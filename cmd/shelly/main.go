@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 
+	"github.com/baziele/shelly/internal/llm"
+	"github.com/baziele/shelly/internal/quickrequest"
 	"github.com/baziele/shelly/internal/session"
 )
 
@@ -17,6 +19,14 @@ func main() {
 	s, err := session.New(os.Getenv("SHELL"))
 	if err != nil {
 		os.Exit(1)
+	}
+
+	// Wire up Quick Request handler.
+	adapter := llm.NewOpenAIAdapter()
+	s.QuickRequestHandler = &quickrequest.Handler{
+		LLM:           adapter,
+		StaticContext: s.StaticContext(),
+		History:       s.CommandHistory(),
 	}
 
 	if *staticContextFlag {

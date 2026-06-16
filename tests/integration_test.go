@@ -292,6 +292,37 @@ func TestContextDumpCapturesCommandOutput(t *testing.T) {
 	}
 }
 
+func TestQuickRequestRendersInlineResponse(t *testing.T) {
+	// Always run — the adapter has defaults if env vars are not set.
+
+	ptmx, cmd := startShelly(t,
+		"SHELL=/bin/bash",
+		"PS1=SHELL_PROMPT ",
+		"HISTFILE=/dev/null",
+		"LLM_BASE_URL="+os.Getenv("LLM_BASE_URL"),
+		"LLM_API_KEY="+os.Getenv("LLM_API_KEY"),
+		"LLM_MODEL=deepseek-v4-flash",
+	)
+
+	expect(t, ptmx, "SHELL_PROMPT", 3*time.Second)
+
+	// Type a quick request.
+	if _, err := ptmx.Write([]byte(": say hello in one word\n")); err != nil {
+		t.Fatalf("write quick request: %v", err)
+	}
+
+	// The response should be rendered inline.
+	expect(t, ptmx, "Hello", 15*time.Second)
+
+	// Shell prompt should return.
+	expect(t, ptmx, "SHELL_PROMPT", 3*time.Second)
+
+	if _, err := ptmx.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	waitForExit(t, cmd, 5*time.Second)
+}
+
 func TestStaticContextFlagPrintsStructuredContext(t *testing.T) {
 	cmd := exec.Command(binaryPath, "-static-context")
 	cmd.Env = append(os.Environ(), "SHELL=/bin/bash")

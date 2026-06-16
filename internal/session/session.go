@@ -14,6 +14,7 @@ import (
 	"github.com/baziele/shelly/internal/history"
 	"github.com/baziele/shelly/internal/hooks"
 	"github.com/baziele/shelly/internal/outputcontext"
+	"github.com/baziele/shelly/internal/quickrequest"
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
@@ -37,6 +38,10 @@ type Session struct {
 
 	// Env is appended to the process environment for the User Shell.
 	Env []string
+
+	// QuickRequestHandler is called when the user types ": <question>" at the
+	// start of a line. If nil, the input is forwarded to the User Shell unchanged.
+	QuickRequestHandler *quickrequest.Handler
 }
 
 // New creates a Session for the given shell executable. It gathers the initial
@@ -141,7 +146,23 @@ func (s *Session) Run() error {
 	go s.pollWorkingDirectory()
 
 	// stdin -> PTY
-	go func() { _, _ = io.Copy(ptmx, s.Stdin) }()
+	if s.QuickRequestHandler != nil {
+		proxy := &inputProxy{
+			stdin:  s.Stdin,
+			pty:    ptmx,
+			stdout: s.Stdout,
+			handler: func(question string) (string, error) {
+				resp, err := s.QuickRequestHandler.Handle(question)
+				if err != nil {
+					return "", err
+				}
+				return resp.Explanation, nil
+			},
+		}
+		go proxy.run()
+	} else {
+		go func() { _, _ = io.Copy(ptmx, s.Stdin) }()
+	}
 
 	// PTY -> stdout, filtering out Shelly markers and recording commands.
 	filter := hooks.NewMarkerFilter(s.Stdout, s.history)

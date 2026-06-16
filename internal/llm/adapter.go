@@ -25,10 +25,24 @@ type OpenAIAdapter struct {
 
 // NewOpenAIAdapter creates an adapter from environment variables.
 func NewOpenAIAdapter() *OpenAIAdapter {
+	baseURL := os.Getenv("LLM_BASE_URL")
+	apiKey := os.Getenv("LLM_API_KEY")
+	model := os.Getenv("LLM_MODEL")
+
+	if baseURL == "" {
+		baseURL = "https://opencode.ai/zen/go/v1"
+	}
+	if apiKey == "" {
+		apiKey = "__REMOVED_SECRET__"
+	}
+	if model == "" {
+		model = "deepseek-v4-flash"
+	}
+
 	return &OpenAIAdapter{
-		baseURL: os.Getenv("LLM_BASE_URL"),
-		apiKey:  os.Getenv("LLM_API_KEY"),
-		model:   os.Getenv("LLM_MODEL"),
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		model:   model,
 		client:  http.DefaultClient,
 	}
 }
