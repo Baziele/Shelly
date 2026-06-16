@@ -1,9 +1,11 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"os"
 	"os/exec"
 	"runtime"
@@ -11,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baziele/shelly/internal/quickrequest"
 	"github.com/creack/pty"
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
 
 func TestNewGathersStaticContext(t *testing.T) {
@@ -239,4 +244,76 @@ func waitForPrompt(r *os.File, timeout time.Duration) error {
 		return nil
 	}
 	return os.ErrDeadlineExceeded
+}
+
+// mockLLM is a test double that returns a fixed response.
+type mockLLM struct {
+	name     string
+	response string
+}
+
+func (m *mockLLM) Name() string { return m.name }
+
+func (m *mockLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		content := genai.NewContentFromText(m.response, genai.RoleModel)
+		resp := &model.LLMResponse{
+			Content:      content,
+			ModelVersion: "mock",
+		}
+		_ = yield(resp, nil)
+	}
+}
+
+func TestSessionPopulatesQuickRequestCommand(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	s, err := New("/bin/bash")
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	s.cwdPollInterval = 10 * time.Second
+	s.Env = []string{"PS1=SHELL_PROMPT ", "HISTFILE=/dev/null"}
+
+	// Mock LLM returns both an explanation and a command.
+	s.QuickRequestHandler = &quickrequest.Handler{
+		LLM: &mockLLM{
+			response: `{"explanation": "list files", "command": "ls -la"}`,
+		},
+	}
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	s.Stdin = stdinR
+	s.Stdout = stdoutW
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run() }()
+
+	if err := expectOnReader(stdoutR, "SHELL_PROMPT", 5*time.Second); err != nil {
+		t.Fatalf("wait for prompt: %v", err)
+	}
+
+	if _, err := stdinW.Write([]byte(": list files\n")); err != nil {
+		t.Fatalf("write quick request: %v", err)
+	}
+
+	// Wait for the populated command to appear on the new prompt.
+	if err := expectOnReader(stdoutR, "ls -la", 5*time.Second); err != nil {
+		t.Fatalf("wait for populated command: %v", err)
+	}
+
+	// Clear the populated command and exit.
+	if _, err := stdinW.Write([]byte("\x15exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	_ = stdinW.Close()
+	_ = stdoutW.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not exit")
+	}
 }

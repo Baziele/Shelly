@@ -312,8 +312,9 @@ func TestQuickRequestRendersInlineResponse(t *testing.T) {
 
 	expect(t, ptmx, "SHELL_PROMPT", 3*time.Second)
 
-	// Type a quick request.
-	if _, err := ptmx.Write([]byte(": say hello in one word\n")); err != nil {
+	// Type a quick request. Ask for an explanation only so the following
+	// `exit` is not appended to a populated command.
+	if _, err := ptmx.Write([]byte(": say hello in one word (no command)\n")); err != nil {
 		t.Fatalf("write quick request: %v", err)
 	}
 

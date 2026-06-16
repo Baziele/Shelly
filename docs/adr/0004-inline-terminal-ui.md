@@ -17,4 +17,5 @@ All Shelly interactions are rendered **inline** in the terminal:
 - The terminal session remains the primary interface; no context switch for the user.
 - Screen real estate for Agent Mode is limited, so progress and tool output must be compact.
 - A completion marker and Ctrl+C cancellation are required so the user knows when an agent run has ended.
-- Input handling is more complex because Shelly must temporarily manage the input line for command population and agent conversations while still proxying the PTY.
+- Quick Requests are detected through shell hooks (bash `DEBUG` trap and a zsh `accept-line` widget) rather than by intercepting stdin, so up-arrow recall, paste, and normal line editing all work unchanged.
+- Input handling is still more complex for Agent Mode and Auto Command, where Shelly must temporarily manage the input line or command execution while still proxying the PTY.

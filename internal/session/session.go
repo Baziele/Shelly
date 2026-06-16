@@ -152,15 +152,15 @@ func (s *Session) Run() error {
 	// handling quick-request markers emitted by shell hooks.
 	var qr hooks.QuickRequestHandler
 	if s.QuickRequestHandler != nil {
-		qr = func(question string) (string, error) {
+		qr = func(question string) (hooks.QuickRequestResult, error) {
 			resp, err := s.QuickRequestHandler.Handle(question)
 			if err != nil {
-				return "", err
+				return hooks.QuickRequestResult{}, err
 			}
-			return resp.Explanation, nil
+			return hooks.QuickRequestResult{Explanation: resp.Explanation, Command: resp.Command}, nil
 		}
 	}
-	filter := hooks.NewMarkerFilter(s.Stdout, s.history, qr)
+	filter := hooks.NewMarkerFilter(s.Stdout, ptmx, s.history, qr)
 	_, err = io.Copy(filter, ptmx)
 	if err != nil && !errors.Is(err, syscall.EIO) {
 		return err

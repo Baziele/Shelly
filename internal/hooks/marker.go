@@ -16,16 +16,24 @@ import (
 // markers in the PTY output stream.
 const MarkerPrefix = "777;shelly;"
 
+// QuickRequestResult is returned by a QuickRequestHandler. A non-empty Command
+// is written into the User Shell input line via the PTY.
+type QuickRequestResult struct {
+	Explanation string
+	Command     string
+}
+
 // QuickRequestHandler is called when a shell hook reports that the user
-// submitted a line starting with ": ". It should return the response text to
-// render inline.
-type QuickRequestHandler func(question string) (string, error)
+// submitted a line starting with ": ". It returns the response text to render
+// inline and an optional command to populate on the User Shell input line.
+type QuickRequestHandler func(question string) (QuickRequestResult, error)
 
 // MarkerFilter wraps an io.Writer, removes Shelly command-boundary markers
 // from the byte stream, records the decoded commands in a History, and
 // captures the output associated with each command.
 type MarkerFilter struct {
 	w       io.Writer
+	pty     io.Writer
 	history *history.History
 	qr      QuickRequestHandler
 	buf     []byte
@@ -35,9 +43,11 @@ type MarkerFilter struct {
 // NewMarkerFilter creates a filter that writes non-marker output to w and
 // records parsed commands in hist. If qr is non-nil, quick-request markers
 // emitted by shell hooks are handled by calling qr and writing the returned
-// text to w.
-func NewMarkerFilter(w io.Writer, hist *history.History, qr QuickRequestHandler) *MarkerFilter {
-	return &MarkerFilter{w: w, history: hist, qr: qr}
+// text to w. When qr returns a Command and pty is non-nil, the command is
+// populated on the User Shell input line by simulating keystrokes through the
+// PTY.
+func NewMarkerFilter(w io.Writer, pty io.Writer, hist *history.History, qr QuickRequestHandler) *MarkerFilter {
+	return &MarkerFilter{w: w, pty: pty, history: hist, qr: qr}
 }
 
 // write passes p to the underlying writer and also appends it to the output
@@ -168,6 +178,15 @@ func (f *MarkerFilter) parseQuickRequest(payload []byte) error {
 		fmt.Fprintf(f.w, "\r\nshelly: error: %v\r\n", err)
 		return nil
 	}
-	fmt.Fprintf(f.w, "\r\n%s\r\n", strings.TrimRight(resp, "\n"))
+	fmt.Fprintf(f.w, "\r\n%s\r\n", strings.TrimRight(resp.Explanation, "\n"))
+
+	if resp.Command != "" && f.pty != nil {
+		// Clear the current input line (Ctrl+A to beginning, Ctrl+K to kill
+		// to end) before populating the suggested command.
+		const clearLine = "\x01\x0b"
+		if _, err := f.pty.Write([]byte(clearLine + resp.Command)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
