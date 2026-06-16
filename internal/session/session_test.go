@@ -16,6 +16,7 @@ import (
 	"github.com/baziele/shelly/internal/agentmode"
 	"github.com/baziele/shelly/internal/autocommand"
 	"github.com/baziele/shelly/internal/quickrequest"
+	"github.com/baziele/shelly/internal/tools"
 	"github.com/creack/pty"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -409,6 +410,92 @@ func TestSessionAgentModeRendersInlineResponse(t *testing.T) {
 
 	// Wait for the agent response and completion marker.
 	if err := expectOnReader(stdoutR, "I am ready to help you.", 5*time.Second); err != nil {
+		t.Fatalf("wait for agent response: %v", err)
+	}
+	if err := expectOnReader(stdoutR, "[shelly agent done]", 5*time.Second); err != nil {
+		t.Fatalf("wait for completion marker: %v", err)
+	}
+
+	if _, err := stdinW.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	_ = stdinW.Close()
+	_ = stdoutW.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not exit")
+	}
+}
+
+// mockToolLLM returns a function call on the first turn, then text.
+type mockToolLLM struct {
+	callIndex int
+}
+
+func (m *mockToolLLM) Name() string { return "mock-tool" }
+
+func (m *mockToolLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.callIndex++
+		if m.callIndex == 1 {
+			fc := genai.NewPartFromFunctionCall("read_file", map[string]any{"path": "AGENT_TEST_FILE"})
+			fc.FunctionCall.ID = "call_1"
+			content := genai.NewContentFromParts([]*genai.Part{fc}, genai.RoleModel)
+			_ = yield(&model.LLMResponse{Content: content, ModelVersion: "mock"}, nil)
+			return
+		}
+		content := genai.NewContentFromText("File result: tool executed", genai.RoleModel)
+		_ = yield(&model.LLMResponse{Content: content, ModelVersion: "mock"}, nil)
+	}
+}
+
+func TestSessionAgentModeExecutesTool(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	dir := t.TempDir()
+	testFile := dir + "/test.txt"
+	if err := os.WriteFile(testFile, []byte("tool content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	s, err := New("/bin/bash")
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	s.cwdPollInterval = 10 * time.Second
+	s.Env = []string{"PS1=SHELL_PROMPT ", "HISTFILE=/dev/null"}
+
+	// Create a tool registry that uses our test file.
+	registry := tools.NewRegistry()
+	s.AgentModeHandler = &agentmode.Handler{
+		LLM:     &mockToolLLM{},
+		History: s.CommandHistory(),
+		Tools:   registry,
+	}
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	s.Stdin = stdinR
+	s.Stdout = stdoutW
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run() }()
+
+	if err := expectOnReader(stdoutR, "SHELL_PROMPT", 5*time.Second); err != nil {
+		t.Fatalf("wait for prompt: %v", err)
+	}
+
+	// Write the agent mode request. The mock LLM will request a read_file
+	// tool call, the tool will be executed, and the final text response
+	// will be rendered.
+	if _, err := stdinW.Write([]byte(":: read file\n")); err != nil {
+		t.Fatalf("write agent mode: %v", err)
+	}
+
+	if err := expectOnReader(stdoutR, "File result: tool executed", 5*time.Second); err != nil {
 		t.Fatalf("wait for agent response: %v", err)
 	}
 	if err := expectOnReader(stdoutR, "[shelly agent done]", 5*time.Second); err != nil {

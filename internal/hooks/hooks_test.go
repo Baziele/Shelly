@@ -43,6 +43,9 @@ func TestInjectorAddsBashRcfileArgument(t *testing.T) {
 	if !strings.Contains(string(content), "\":: \"") {
 		t.Error("rcfile missing agent-mode prefix check")
 	}
+	if !strings.Contains(string(content), "::() { :; }") {
+		t.Error("rcfile missing agent-mode no-op function")
+	}
 }
 
 func envValue(cmd *exec.Cmd, key string) string {
@@ -89,6 +92,9 @@ func TestInjectorSetsZshZdotdir(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "\":: \"") {
 		t.Error(".zshrc missing agent-mode prefix check")
+	}
+	if !strings.Contains(string(content), "function :: { :; }") {
+		t.Error(".zshrc missing agent-mode no-op function")
 	}
 }
 

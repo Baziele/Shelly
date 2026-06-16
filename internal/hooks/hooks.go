@@ -114,6 +114,7 @@ __shelly_emit_am() {
 }
 
 _() { :; }
+::() { :; }
 
 __shelly_prompt_command() {
     local code=$?
@@ -184,6 +185,7 @@ __shelly_emit_am() {
 }
 
 function _ { :; }
+function :: { :; }
 
 __shelly_precmd() {
     local code=$?

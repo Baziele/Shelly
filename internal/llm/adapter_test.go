@@ -281,3 +281,194 @@ func TestOpenAIAdapterMapsModelRoleToAssistant(t *testing.T) {
 		t.Errorf("role = %q, want %q", receivedRequest.Messages[0].Role, "assistant")
 	}
 }
+
+func TestOpenAIAdapterSendsTools(t *testing.T) {
+	var receivedRequest openAIRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedRequest)
+		resp := openAIResponse{
+			Model: "gpt-4",
+			Choices: []openAIChoice{
+				{Message: openAIMessage{Role: "assistant", Content: "ok"}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	adapter := &OpenAIAdapter{
+		baseURL: server.URL,
+		apiKey:  "test-key",
+		model:   "test-model",
+		client:  server.Client(),
+	}
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("read a file", genai.RoleUser),
+		},
+		Tools: map[string]any{
+			"function_declarations": []*genai.Tool{
+				{
+					FunctionDeclarations: []*genai.FunctionDeclaration{
+						{
+							Name:        "read_file",
+							Description: "Read a file",
+							Parameters: &genai.Schema{
+								Type: genai.TypeObject,
+								Properties: map[string]*genai.Schema{
+									"path": {
+										Type:        genai.TypeString,
+										Description: "File path",
+									},
+								},
+								Required: []string{"path"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var err error
+	for _, e := range adapter.GenerateContent(context.Background(), req, false) {
+		err = e
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(receivedRequest.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(receivedRequest.Tools))
+	}
+	if receivedRequest.Tools[0].Type != "function" {
+		t.Errorf("tool type = %q, want %q", receivedRequest.Tools[0].Type, "function")
+	}
+	if receivedRequest.Tools[0].Function.Name != "read_file" {
+		t.Errorf("tool name = %q, want %q", receivedRequest.Tools[0].Function.Name, "read_file")
+	}
+	params := receivedRequest.Tools[0].Function.Parameters
+	if params["type"] != "object" {
+		t.Errorf("params type = %v, want object", params["type"])
+	}
+}
+
+func TestOpenAIAdapterParsesToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := openAIResponse{
+			Model: "gpt-4",
+			Choices: []openAIChoice{
+				{
+					Message: openAIMessage{
+						Role: "assistant",
+						ToolCalls: []openAIToolCall{
+							{
+								ID:   "call_1",
+								Type: "function",
+								Function: openAIToolFunction{
+									Name:      "read_file",
+									Arguments: `{"path":"/tmp/test.txt"}`,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	adapter := &OpenAIAdapter{
+		baseURL: server.URL,
+		apiKey:  "test-key",
+		model:   "test-model",
+		client:  server.Client(),
+	}
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("read a file", genai.RoleUser),
+		},
+	}
+
+	var resp *model.LLMResponse
+	var err error
+	for r, e := range adapter.GenerateContent(context.Background(), req, false) {
+		resp = r
+		err = e
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+		t.Fatal("expected response with parts")
+	}
+	part := resp.Content.Parts[0]
+	if part.FunctionCall == nil {
+		t.Fatal("expected FunctionCall part")
+	}
+	if part.FunctionCall.Name != "read_file" {
+		t.Errorf("function name = %q, want %q", part.FunctionCall.Name, "read_file")
+	}
+	if part.FunctionCall.Args["path"] != "/tmp/test.txt" {
+		t.Errorf("args[path] = %v, want /tmp/test.txt", part.FunctionCall.Args["path"])
+	}
+}
+
+func TestOpenAIAdapterSendsFunctionResponse(t *testing.T) {
+	var receivedRequest openAIRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedRequest)
+		resp := openAIResponse{
+			Model: "gpt-4",
+			Choices: []openAIChoice{
+				{Message: openAIMessage{Role: "assistant", Content: "done"}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	adapter := &OpenAIAdapter{
+		baseURL: server.URL,
+		apiKey:  "test-key",
+		model:   "test-model",
+		client:  server.Client(),
+	}
+
+	fc := genai.NewPartFromFunctionResponse("read_file", map[string]any{"content": "hello"})
+	fc.FunctionResponse.ID = "call_1"
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromParts([]*genai.Part{fc}, genai.RoleUser),
+		},
+	}
+
+	var err error
+	for _, e := range adapter.GenerateContent(context.Background(), req, false) {
+		err = e
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(receivedRequest.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(receivedRequest.Messages))
+	}
+	msg := receivedRequest.Messages[0]
+	if msg.Role != "tool" {
+		t.Errorf("role = %q, want %q", msg.Role, "tool")
+	}
+	if msg.ToolCallID != "call_1" {
+		t.Errorf("tool_call_id = %q, want %q", msg.ToolCallID, "call_1")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"iter"
 	"net/http"
 	"os"
+	"strings"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -79,6 +80,13 @@ func (a *OpenAIAdapter) generate(ctx context.Context, req *model.LLMRequest, str
 		Stream:   stream,
 	}
 
+	// Convert genai tools to OpenAI format.
+	if toolsAny, ok := req.Tools["function_declarations"]; ok {
+		if tools, ok := toolsAny.([]*genai.Tool); ok {
+			body.Tools = genaiToolsToOpenAI(tools)
+		}
+	}
+
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -119,12 +127,56 @@ func (a *OpenAIAdapter) generate(ctx context.Context, req *model.LLMRequest, str
 	}
 
 	choice := openaiResp.Choices[0]
-	content := genai.NewContentFromText(choice.Message.Content, genai.RoleModel)
+	content, err := openAIMessageToContent(choice.Message)
+	if err != nil {
+		return nil, err
+	}
 
 	return &model.LLMResponse{
 		Content:      content,
 		ModelVersion: openaiResp.Model,
 	}, nil
+}
+
+func genaiToolsToOpenAI(tools []*genai.Tool) []openAITool {
+	var out []openAITool
+	for _, tool := range tools {
+		for _, decl := range tool.FunctionDeclarations {
+			params := schemaToMap(decl.Parameters)
+			out = append(out, openAITool{
+				Type: "function",
+				Function: openAIFunction{
+					Name:        decl.Name,
+					Description: decl.Description,
+					Parameters:  params,
+				},
+			})
+		}
+	}
+	return out
+}
+
+func schemaToMap(s *genai.Schema) map[string]any {
+	if s == nil {
+		return nil
+	}
+	m := map[string]any{
+		"type": strings.ToLower(string(s.Type)),
+	}
+	if s.Description != "" {
+		m["description"] = s.Description
+	}
+	if s.Properties != nil {
+		props := make(map[string]any, len(s.Properties))
+		for k, v := range s.Properties {
+			props[k] = schemaToMap(v)
+		}
+		m["properties"] = props
+	}
+	if len(s.Required) > 0 {
+		m["required"] = s.Required
+	}
+	return m
 }
 
 func contentsToMessages(contents []*genai.Content) ([]openAIMessage, error) {
@@ -134,31 +186,100 @@ func contentsToMessages(contents []*genai.Content) ([]openAIMessage, error) {
 		if role == "model" {
 			role = "assistant"
 		}
-
-		var text string
-		for _, part := range c.Parts {
-			if part.Text != "" {
-				text += part.Text
-			}
+		if role == "user" {
+			role = "user"
 		}
 
-		messages = append(messages, openAIMessage{
-			Role:    role,
-			Content: text,
-		})
+		msg := openAIMessage{Role: role}
+		for _, part := range c.Parts {
+			if part.Text != "" {
+				msg.Content += part.Text
+			}
+			if part.FunctionCall != nil {
+				msg.ToolCalls = append(msg.ToolCalls, openAIToolCall{
+					ID:   part.FunctionCall.ID,
+					Type: "function",
+					Function: openAIToolFunction{
+						Name:      part.FunctionCall.Name,
+						Arguments: toJSON(part.FunctionCall.Args),
+					},
+				})
+			}
+			if part.FunctionResponse != nil {
+				msg = openAIMessage{
+					Role:       "tool",
+					ToolCallID: part.FunctionResponse.ID,
+					Content:    toJSON(part.FunctionResponse.Response),
+				}
+			}
+		}
+		messages = append(messages, msg)
 	}
 	return messages, nil
+}
+
+func openAIMessageToContent(m openAIMessage) (*genai.Content, error) {
+	parts := []*genai.Part{}
+
+	if m.Content != "" {
+		parts = append(parts, genai.NewPartFromText(m.Content))
+	}
+
+	for _, tc := range m.ToolCalls {
+		var args map[string]any
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return nil, fmt.Errorf("parse tool call arguments: %w", err)
+		}
+		fc := genai.NewPartFromFunctionCall(tc.Function.Name, args)
+		fc.FunctionCall.ID = tc.ID
+		parts = append(parts, fc)
+	}
+
+	return genai.NewContentFromParts(parts, genai.RoleModel), nil
+}
+
+func toJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
 }
 
 type openAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []openAIMessage `json:"messages"`
 	Stream   bool            `json:"stream,omitempty"`
+	Tools    []openAITool    `json:"tools,omitempty"`
+}
+
+type openAITool struct {
+	Type     string           `json:"type"`
+	Function openAIFunction   `json:"function"`
+}
+
+type openAIFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string          `json:"role"`
+	Content    string          `json:"content,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+}
+
+type openAIToolCall struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"`
+	Function openAIToolFunction `json:"function"`
+}
+
+type openAIToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type openAIResponse struct {

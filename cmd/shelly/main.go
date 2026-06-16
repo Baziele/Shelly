@@ -12,6 +12,7 @@ import (
 	"github.com/baziele/shelly/internal/llm"
 	"github.com/baziele/shelly/internal/quickrequest"
 	"github.com/baziele/shelly/internal/session"
+	"github.com/baziele/shelly/internal/tools"
 )
 
 func main() {
@@ -39,6 +40,7 @@ func main() {
 		LLM:           adapter,
 		StaticContext: s.StaticContext(),
 		History:       s.CommandHistory(),
+		Tools:         tools.NewRegistry(),
 	}
 
 	if *staticContextFlag {

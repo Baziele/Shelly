@@ -7,6 +7,7 @@ import (
 	"github.com/baziele/shelly/internal/history"
 	"github.com/baziele/shelly/internal/outputcontext"
 	"github.com/baziele/shelly/internal/context"
+	"github.com/baziele/shelly/internal/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -17,13 +18,19 @@ type Handler struct {
 	LLM           model.LLM
 	StaticContext *staticcontext.StaticContext
 	History       *history.History
+	Tools         *tools.Registry
 
 	// conversation holds the running history of user and model messages.
 	conversation []*genai.Content
 }
 
+// maxToolIterations prevents infinite tool-call loops.
+const maxToolIterations = 10
+
 // Handle sends a user message to the LLM with full Session context and
 // conversation history, then returns the model's response text.
+// If the LLM requests tool calls, Handle executes them and feeds the results
+// back until the LLM returns a text response.
 func (h *Handler) Handle(message string) (string, error) {
 	if len(h.conversation) == 0 {
 		// First message: build the system prompt with context.
@@ -33,28 +40,67 @@ func (h *Handler) Handle(message string) (string, error) {
 		h.conversation = append(h.conversation, genai.NewContentFromText(message, genai.RoleUser))
 	}
 
-	req := &model.LLMRequest{
-		Contents: h.conversation,
+	for i := 0; i < maxToolIterations; i++ {
+		req := &model.LLMRequest{
+			Contents: h.conversation,
+		}
+		if h.Tools != nil {
+			req.Tools = map[string]any{
+				"function_declarations": h.Tools.GenaiTools(),
+			}
+		}
+
+		var resp *model.LLMResponse
+		var err error
+		for r, e := range h.LLM.GenerateContent(context.Background(), req, false) {
+			resp = r
+			err = e
+		}
+		if err != nil {
+			return "", fmt.Errorf("LLM error: %w", err)
+		}
+		if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+			return "", fmt.Errorf("empty LLM response")
+		}
+
+		// Check if the model returned function calls.
+		funcCalls := extractFunctionCalls(resp.Content.Parts)
+		if len(funcCalls) == 0 {
+			// No function calls — this is the final text response.
+			responseText := resp.Content.Parts[0].Text
+			h.conversation = append(h.conversation, genai.NewContentFromText(responseText, genai.RoleModel))
+			return responseText, nil
+		}
+
+		// Add the assistant's function call message to the conversation.
+		h.conversation = append(h.conversation, resp.Content)
+
+		// Execute each tool and add function responses.
+		if h.Tools == nil {
+			return "", fmt.Errorf("LLM requested tools but no tool registry configured")
+		}
+		for _, fc := range funcCalls {
+			result, err := h.Tools.Run(fc.Name, fc.Args)
+			if err != nil {
+				result = map[string]any{"error": err.Error()}
+			}
+			respPart := genai.NewPartFromFunctionResponse(fc.Name, result)
+			respPart.FunctionResponse.ID = fc.ID
+			h.conversation = append(h.conversation, genai.NewContentFromParts([]*genai.Part{respPart}, genai.RoleUser))
+		}
 	}
 
-	var resp *model.LLMResponse
-	var err error
-	for r, e := range h.LLM.GenerateContent(context.Background(), req, false) {
-		resp = r
-		err = e
-	}
-	if err != nil {
-		return "", fmt.Errorf("LLM error: %w", err)
-	}
+	return "", fmt.Errorf("reached maximum tool iterations (%d)", maxToolIterations)
+}
 
-	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
-		return "", fmt.Errorf("empty LLM response")
+func extractFunctionCalls(parts []*genai.Part) []*genai.FunctionCall {
+	var calls []*genai.FunctionCall
+	for _, p := range parts {
+		if p.FunctionCall != nil {
+			calls = append(calls, p.FunctionCall)
+		}
 	}
-
-	responseText := resp.Content.Parts[0].Text
-	h.conversation = append(h.conversation, genai.NewContentFromText(responseText, genai.RoleModel))
-
-	return responseText, nil
+	return calls
 }
 
 func (h *Handler) buildPrompt(message string) string {

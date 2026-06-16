@@ -3,11 +3,13 @@ package agentmode
 import (
 	"context"
 	"iter"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/baziele/shelly/internal/history"
 	"github.com/baziele/shelly/internal/context"
+	"github.com/baziele/shelly/internal/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -135,4 +137,71 @@ func (c *captureLLM) GenerateContent(ctx context.Context, req *model.LLMRequest,
 		*c.prompt = req.Contents[0].Parts[0].Text
 	}
 	return c.wrapped.GenerateContent(ctx, req, stream)
+}
+
+// mockToolLLM simulates an LLM that calls a tool on the first turn and then
+// returns text after receiving the tool result.
+type mockToolLLM struct {
+	callIndex int
+}
+
+func (m *mockToolLLM) Name() string { return "mock-tool" }
+
+func (m *mockToolLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.callIndex++
+		if m.callIndex == 1 {
+			// First call: return a function call.
+			fc := genai.NewPartFromFunctionCall("read_file", map[string]any{"path": "/tmp/test.txt"})
+			fc.FunctionCall.ID = "call_1"
+			content := genai.NewContentFromParts([]*genai.Part{fc}, genai.RoleModel)
+			resp := &model.LLMResponse{Content: content, ModelVersion: "mock"}
+			_ = yield(resp, nil)
+			return
+		}
+		// Second call: return text after tool result.
+		content := genai.NewContentFromText("File contains: hello", genai.RoleModel)
+		resp := &model.LLMResponse{Content: content, ModelVersion: "mock"}
+		_ = yield(resp, nil)
+	}
+}
+
+func TestHandlerExecutesToolAndReturnsText(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.txt"
+	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	llm := &mockToolLLM{}
+	h := &Handler{
+		LLM:     llm,
+		History: history.New(),
+		Tools:   tools.NewRegistry(),
+	}
+
+	resp, err := h.Handle("read the file")
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if !strings.Contains(resp, "File contains: hello") {
+		t.Errorf("response = %q, expected text after tool result", resp)
+	}
+}
+
+func TestHandlerReturnsErrorWhenToolMissing(t *testing.T) {
+	llm := &mockToolLLM{}
+	h := &Handler{
+		LLM:     llm,
+		History: history.New(),
+		// No Tools registry configured.
+	}
+
+	_, err := h.Handle("read the file")
+	if err == nil {
+		t.Fatal("expected error when tool registry missing")
+	}
+	if !strings.Contains(err.Error(), "no tool registry") {
+		t.Errorf("error = %v, expected 'no tool registry'", err)
+	}
 }
