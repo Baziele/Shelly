@@ -17,7 +17,7 @@ func marker(cmd string, exit int) string {
 func TestMarkerParserExtractsCommandAndExitCode(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	input := []byte("before" + marker("ls -la", 0) + "after")
 	if _, err := f.Write(input); err != nil {
@@ -43,7 +43,7 @@ func TestMarkerParserExtractsCommandAndExitCode(t *testing.T) {
 func TestMarkerParserHandlesSplitMarkers(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	m := marker("echo hello", 42)
 	// Split the marker across two writes.
@@ -67,7 +67,7 @@ func TestMarkerParserHandlesSplitMarkers(t *testing.T) {
 func TestMarkerParserIgnoresOtherOSCSequences(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	input := []byte("\033]0;window title\007visible")
 	if _, err := f.Write(input); err != nil {
@@ -85,7 +85,7 @@ func TestMarkerParserIgnoresOtherOSCSequences(t *testing.T) {
 func TestMarkerParserDecodesBase64Command(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	cmd := "echo 'hello world' && ls | wc -l"
 	input := []byte(marker(cmd, 1))
@@ -102,7 +102,7 @@ func TestMarkerParserDecodesBase64Command(t *testing.T) {
 func TestMarkerParserCapturesOutputBetweenMarkers(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	input := []byte("output1" + marker("cmd1", 0) + "output2" + marker("cmd2", 1))
 	if _, err := f.Write(input); err != nil {
@@ -124,7 +124,7 @@ func TestMarkerParserCapturesOutputBetweenMarkers(t *testing.T) {
 func TestMarkerParserCapturesOutputAcrossSplitWrites(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	m1 := marker("cmd1", 0)
 	if _, err := f.Write([]byte("part1")); err != nil {
@@ -146,7 +146,7 @@ func TestMarkerParserCapturesOutputAcrossSplitWrites(t *testing.T) {
 func TestMarkerParserCapturesCleanOutput(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, nil, hist, nil, nil)
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, nil)
 
 	input := []byte("output1" + marker("cmd1", 0) + "output2" + marker("cmd2", 1))
 	if _, err := f.Write(input); err != nil {
@@ -171,7 +171,7 @@ func TestMarkerFilterHandlesQuickRequestMarker(t *testing.T) {
 	handler := func(question string) (QuickRequestResult, error) {
 		return QuickRequestResult{Explanation: "answer to " + question}, nil
 	}
-	f := NewMarkerFilter(&out, nil, hist, handler, nil)
+	f := NewMarkerFilter(&out, nil, hist, handler, nil, nil)
 
 	question := "what can you do"
 	qr := fmt.Sprintf("\033]777;shelly;qr=%s\007", base64.StdEncoding.EncodeToString([]byte(question)))
@@ -191,7 +191,7 @@ func TestMarkerFilterPopulatesCommandOnPty(t *testing.T) {
 	handler := func(question string) (QuickRequestResult, error) {
 		return QuickRequestResult{Explanation: "ok", Command: "ls -la"}, nil
 	}
-	f := NewMarkerFilter(&out, &pty, hist, handler, nil)
+	f := NewMarkerFilter(&out, &pty, hist, handler, nil, nil)
 
 	question := "list files"
 	qr := fmt.Sprintf("\033]777;shelly;qr=%s\007", base64.StdEncoding.EncodeToString([]byte(question)))
@@ -212,7 +212,7 @@ func TestMarkerFilterClearsLineBeforePopulatingCommand(t *testing.T) {
 	handler := func(question string) (QuickRequestResult, error) {
 		return QuickRequestResult{Explanation: "ok", Command: "git status"}, nil
 	}
-	f := NewMarkerFilter(&out, &pty, hist, handler, nil)
+	f := NewMarkerFilter(&out, &pty, hist, handler, nil, nil)
 
 	question := "status"
 	qr := fmt.Sprintf("\033]777;shelly;qr=%s\007", base64.StdEncoding.EncodeToString([]byte(question)))
@@ -237,7 +237,7 @@ func TestMarkerFilterExecutesAutoCommand(t *testing.T) {
 	handler := func(request string) (string, error) {
 		return "echo auto", nil
 	}
-	f := NewMarkerFilter(&out, &pty, hist, nil, handler)
+	f := NewMarkerFilter(&out, &pty, hist, nil, handler, nil)
 
 	request := "say auto"
 	ac := fmt.Sprintf("\033]777;shelly;ac=%s\007", base64.StdEncoding.EncodeToString([]byte(request)))
@@ -261,7 +261,7 @@ func TestMarkerFilterAutoCommandDoesNotRenderExplanation(t *testing.T) {
 	handler := func(request string) (string, error) {
 		return "echo auto", nil
 	}
-	f := NewMarkerFilter(&out, &pty, hist, nil, handler)
+	f := NewMarkerFilter(&out, &pty, hist, nil, handler, nil)
 
 	request := "say auto"
 	ac := fmt.Sprintf("\033]777;shelly;ac=%s\007", base64.StdEncoding.EncodeToString([]byte(request)))
@@ -271,5 +271,60 @@ func TestMarkerFilterAutoCommandDoesNotRenderExplanation(t *testing.T) {
 
 	if out.String() != "" {
 		t.Errorf("auto-command rendered unexpected output: %q", out.String())
+	}
+}
+
+func TestMarkerFilterHandlesAgentModeMarker(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	handler := func(message string) (string, error) {
+		return "Agent response to " + message, nil
+	}
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, handler)
+
+	message := "hello agent"
+	am := fmt.Sprintf("\033]777;shelly;am=%s\007", base64.StdEncoding.EncodeToString([]byte(message)))
+	if _, err := f.Write([]byte(am)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "Agent response to hello agent") {
+		t.Errorf("output missing agent response, got: %q", out.String())
+	}
+}
+
+func TestMarkerFilterAgentModeRendersCompletionMarker(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	handler := func(message string) (string, error) {
+		return "done", nil
+	}
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, handler)
+
+	am := fmt.Sprintf("\033]777;shelly;am=%s\007", base64.StdEncoding.EncodeToString([]byte("test")))
+	if _, err := f.Write([]byte(am)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "[shelly agent done]") {
+		t.Errorf("output missing completion marker, got: %q", out.String())
+	}
+}
+
+func TestMarkerFilterAgentModeRendersError(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	handler := func(message string) (string, error) {
+		return "", fmt.Errorf("llm error")
+	}
+	f := NewMarkerFilter(&out, nil, hist, nil, nil, handler)
+
+	am := fmt.Sprintf("\033]777;shelly;am=%s\007", base64.StdEncoding.EncodeToString([]byte("test")))
+	if _, err := f.Write([]byte(am)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "shelly: agent error: llm error") {
+		t.Errorf("output missing error message, got: %q", out.String())
 	}
 }

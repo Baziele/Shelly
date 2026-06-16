@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/baziele/shelly/internal/agentmode"
 	"github.com/baziele/shelly/internal/autocommand"
 	"github.com/baziele/shelly/internal/context"
 	"github.com/baziele/shelly/internal/history"
@@ -44,9 +45,13 @@ type Session struct {
 	// start of a line. If nil, the input is forwarded to the User Shell unchanged.
 	QuickRequestHandler *quickrequest.Handler
 
-	// AutoCommandHandler is called when the user types "; <request>" at the
+	// AutoCommandHandler is called when the user types "_ <request>" at the
 	// start of a line. If nil, the input is forwarded to the User Shell unchanged.
 	AutoCommandHandler *autocommand.Handler
+
+	// AgentModeHandler is called when the user types ":: <message>" at the
+	// start of a line. If nil, the input is forwarded to the User Shell unchanged.
+	AgentModeHandler *agentmode.Handler
 }
 
 // New creates a Session for the given shell executable. It gathers the initial
@@ -171,7 +176,13 @@ func (s *Session) Run() error {
 			return s.AutoCommandHandler.Handle(request)
 		}
 	}
-	filter := hooks.NewMarkerFilter(s.Stdout, ptmx, s.history, qr, autoCmd)
+	var agent hooks.AgentModeHandler
+	if s.AgentModeHandler != nil {
+		agent = func(message string) (string, error) {
+			return s.AgentModeHandler.Handle(message)
+		}
+	}
+	filter := hooks.NewMarkerFilter(s.Stdout, ptmx, s.history, qr, autoCmd, agent)
 	_, err = io.Copy(filter, ptmx)
 	if err != nil && !errors.Is(err, syscall.EIO) {
 		return err

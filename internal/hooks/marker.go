@@ -29,9 +29,14 @@ type QuickRequestResult struct {
 type QuickRequestHandler func(question string) (QuickRequestResult, error)
 
 // AutoCommandHandler is called when a shell hook reports that the user
-// submitted a line starting with "; ". It returns the command to execute
+// submitted a line starting with "_ ". It returns the command to execute
 // immediately through the User Shell.
 type AutoCommandHandler func(request string) (string, error)
+
+// AgentModeHandler is called when a shell hook reports that the user
+// submitted a line starting with ":: ". It returns the agent response text
+// to render inline.
+type AgentModeHandler func(message string) (string, error)
 
 // MarkerFilter wraps an io.Writer, removes Shelly command-boundary markers
 // from the byte stream, records the decoded commands in a History, and
@@ -42,6 +47,7 @@ type MarkerFilter struct {
 	history *history.History
 	qr      QuickRequestHandler
 	autoCmd AutoCommandHandler
+	agent   AgentModeHandler
 	buf     []byte
 	output  []byte
 }
@@ -53,9 +59,10 @@ type MarkerFilter struct {
 // populated on the User Shell input line by simulating keystrokes through the
 // PTY. If autoCmd is non-nil, auto-command markers are handled by calling
 // autoCmd and writing the returned command to pty followed by a newline so it
-// executes immediately.
-func NewMarkerFilter(w io.Writer, pty io.Writer, hist *history.History, qr QuickRequestHandler, autoCmd AutoCommandHandler) *MarkerFilter {
-	return &MarkerFilter{w: w, pty: pty, history: hist, qr: qr, autoCmd: autoCmd}
+// executes immediately. If agent is non-nil, agent-mode markers are handled
+// by calling agent and writing the returned text to w.
+func NewMarkerFilter(w io.Writer, pty io.Writer, hist *history.History, qr QuickRequestHandler, autoCmd AutoCommandHandler, agent AgentModeHandler) *MarkerFilter {
+	return &MarkerFilter{w: w, pty: pty, history: hist, qr: qr, autoCmd: autoCmd, agent: agent}
 }
 
 // write passes p to the underlying writer and also appends it to the output
@@ -150,6 +157,9 @@ func (f *MarkerFilter) parseMarker(payload []byte) error {
 	if bytes.HasPrefix(payload, []byte("ac=")) {
 		return f.parseAutoCommand(payload[len("ac="):])
 	}
+	if bytes.HasPrefix(payload, []byte("am=")) {
+		return f.parseAgentMode(payload[len("am="):])
+	}
 
 	parts := bytes.SplitN(payload, []byte(";"), 2)
 	if len(parts) != 2 || !bytes.HasPrefix(parts[0], []byte("cmd=")) || !bytes.HasPrefix(parts[1], []byte("exit=")) {
@@ -224,5 +234,27 @@ func (f *MarkerFilter) parseAutoCommand(payload []byte) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (f *MarkerFilter) parseAgentMode(payload []byte) error {
+	if f.agent == nil {
+		return nil
+	}
+
+	messageEnc := string(payload)
+	message, err := base64.StdEncoding.DecodeString(messageEnc)
+	if err != nil {
+		return err
+	}
+
+	resp, err := f.agent(string(message))
+	if err != nil {
+		fmt.Fprintf(f.w, "\r\nshelly: agent error: %v\r\n", err)
+		return nil
+	}
+
+	fmt.Fprintf(f.w, "\r\n%s\r\n", strings.TrimRight(resp, "\n"))
+	fmt.Fprintf(f.w, "\r\n[shelly agent done]\r\n")
 	return nil
 }

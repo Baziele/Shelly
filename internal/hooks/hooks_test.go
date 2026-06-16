@@ -37,6 +37,12 @@ func TestInjectorAddsBashRcfileArgument(t *testing.T) {
 	if !strings.Contains(string(content), "\"_ \"") {
 		t.Error("rcfile missing auto-command prefix check")
 	}
+	if !strings.Contains(string(content), "__shelly_emit_am") {
+		t.Error("rcfile missing agent-mode emitter")
+	}
+	if !strings.Contains(string(content), "\":: \"") {
+		t.Error("rcfile missing agent-mode prefix check")
+	}
 }
 
 func envValue(cmd *exec.Cmd, key string) string {
@@ -77,6 +83,12 @@ func TestInjectorSetsZshZdotdir(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "\"_ \"") {
 		t.Error(".zshrc missing auto-command prefix check")
+	}
+	if !strings.Contains(string(content), "__shelly_emit_am") {
+		t.Error(".zshrc missing agent-mode emitter")
+	}
+	if !strings.Contains(string(content), "\":: \"") {
+		t.Error(".zshrc missing agent-mode prefix check")
 	}
 }
 

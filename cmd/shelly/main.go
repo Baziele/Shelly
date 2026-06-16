@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/baziele/shelly/internal/agentmode"
 	"github.com/baziele/shelly/internal/autocommand"
 	"github.com/baziele/shelly/internal/llm"
 	"github.com/baziele/shelly/internal/quickrequest"
@@ -22,7 +23,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Wire up Quick Request and Auto Command handlers.
+	// Wire up Quick Request, Auto Command, and Agent Mode handlers.
 	adapter := llm.NewOpenAIAdapter()
 	s.QuickRequestHandler = &quickrequest.Handler{
 		LLM:           adapter,
@@ -30,6 +31,11 @@ func main() {
 		History:       s.CommandHistory(),
 	}
 	s.AutoCommandHandler = &autocommand.Handler{
+		LLM:           adapter,
+		StaticContext: s.StaticContext(),
+		History:       s.CommandHistory(),
+	}
+	s.AgentModeHandler = &agentmode.Handler{
 		LLM:           adapter,
 		StaticContext: s.StaticContext(),
 		History:       s.CommandHistory(),
