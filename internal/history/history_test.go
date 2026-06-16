@@ -8,7 +8,7 @@ import (
 
 func TestHistoryRetainsCommandAndExitCode(t *testing.T) {
 	h := New()
-	h.Add("ls -la", 0)
+	h.Add("ls -la", 0, "", "")
 
 	entries := h.Entries()
 	if len(entries) != 1 {
@@ -25,7 +25,7 @@ func TestHistoryRetainsCommandAndExitCode(t *testing.T) {
 func TestHistoryRetainsLastTenCommands(t *testing.T) {
 	h := New()
 	for i := 0; i < 12; i++ {
-		h.Add(fcmd(i), i)
+		h.Add(fcmd(i), i, "", "")
 	}
 
 	entries := h.Entries()
@@ -57,12 +57,28 @@ func TestHistoryReturnsEmptySliceWhenNoCommands(t *testing.T) {
 
 func TestHistoryEntriesAreCopied(t *testing.T) {
 	h := New()
-	h.Add("first", 0)
+	h.Add("first", 0, "", "")
 
 	entries := h.Entries()
 	entries[0].RawInput = "mutated"
 
 	if h.Entries()[0].RawInput != "first" {
 		t.Error("history entry was mutated through returned slice")
+	}
+}
+
+func TestHistoryRetainsCleanOutput(t *testing.T) {
+	h := New()
+	h.Add("ls -la", 0, "raw output", "clean output")
+
+	entries := h.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Output != "raw output" {
+		t.Errorf("Output = %q, want %q", entries[0].Output, "raw output")
+	}
+	if entries[0].CleanOutput != "clean output" {
+		t.Errorf("CleanOutput = %q, want %q", entries[0].CleanOutput, "clean output")
 	}
 }

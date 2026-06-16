@@ -13,6 +13,7 @@ import (
 	"github.com/baziele/shelly/internal/context"
 	"github.com/baziele/shelly/internal/history"
 	"github.com/baziele/shelly/internal/hooks"
+	"github.com/baziele/shelly/internal/outputcontext"
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
@@ -88,7 +89,7 @@ func (s *Session) DumpContext(w io.Writer) error {
 	return enc.Encode(ContextSnapshot{
 		StaticContext:  s.staticCtx,
 		CommandHistory: s.history.Entries(),
-		OutputContext:  nil,
+		OutputContext:  outputcontext.Build(s.history.Entries(), 6144),
 	})
 }
 

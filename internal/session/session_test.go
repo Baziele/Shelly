@@ -40,7 +40,7 @@ func TestDumpContextIncludesStaticContextAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	s.CommandHistory().Add("ls -la", 0)
+	s.CommandHistory().Add("ls -la", 0, "", "")
 
 	var buf strings.Builder
 	if err := s.DumpContext(&buf); err != nil {
@@ -56,6 +56,34 @@ func TestDumpContextIncludesStaticContextAndHistory(t *testing.T) {
 	}
 	if !strings.Contains(out, "ls -la") {
 		t.Error("dump missing command raw input")
+	}
+	if !strings.Contains(out, "output_context") {
+		t.Error("dump missing output_context")
+	}
+}
+
+func TestDumpContextIncludesOutputContext(t *testing.T) {
+	s, err := New("/bin/bash")
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	s.CommandHistory().Add("ls -la", 0, "file1\nfile2", "file1\nfile2")
+	s.CommandHistory().Add("echo hi", 0, "hi", "hi")
+
+	var buf strings.Builder
+	if err := s.DumpContext(&buf); err != nil {
+		t.Fatalf("DumpContext failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "output_context") {
+		t.Error("dump missing output_context")
+	}
+	if !strings.Contains(out, "file1") {
+		t.Error("dump missing output content")
+	}
+	if !strings.Contains(out, "hi") {
+		t.Error("dump missing second output content")
 	}
 }
 

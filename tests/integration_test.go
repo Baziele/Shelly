@@ -237,6 +237,59 @@ func TestContextDumpOnExit(t *testing.T) {
 	if !strings.Contains(string(content), "echo DUMP_TEST") {
 		t.Error("dump missing captured command")
 	}
+	if !strings.Contains(string(content), "output_context") {
+		t.Error("dump missing output_context")
+	}
+}
+
+func TestContextDumpCapturesCommandOutput(t *testing.T) {
+	dumpPath := filepath.Join(t.TempDir(), "context.json")
+	ptmx, cmd := startShelly(t, "SHELL=/bin/bash", "PS1=SHELL_PROMPT ", "HISTFILE=/dev/null", "SHELLY_CONTEXT_DUMP="+dumpPath)
+
+	expect(t, ptmx, "SHELL_PROMPT", 3*time.Second)
+	if _, err := ptmx.Write([]byte("echo OUTPUT_CAPTURE_TEST\n")); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	expect(t, ptmx, "OUTPUT_CAPTURE_TEST", 3*time.Second)
+
+	if _, err := ptmx.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	waitForExit(t, cmd, 5*time.Second)
+
+	content, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("read dump file: %v", err)
+	}
+	if !strings.Contains(string(content), "OUTPUT_CAPTURE_TEST") {
+		t.Error("dump missing captured command output")
+	}
+
+	var dump struct {
+		CommandHistory []struct {
+			RawInput    string `json:"RawInput"`
+			ExitCode    int    `json:"ExitCode"`
+			Output      string `json:"Output"`
+			CleanOutput string `json:"CleanOutput"`
+		} `json:"command_history"`
+		OutputContext []string `json:"output_context"`
+	}
+	if err := json.Unmarshal(content, &dump); err != nil {
+		t.Fatalf("unmarshal dump: %v\n%s", err, content)
+	}
+
+	if len(dump.CommandHistory) == 0 {
+		t.Fatal("no command history entries")
+	}
+	if dump.CommandHistory[0].CleanOutput == "" {
+		t.Errorf("CleanOutput is empty, Output=%q", dump.CommandHistory[0].Output)
+	}
+	if len(dump.OutputContext) == 0 {
+		t.Error("OutputContext is empty")
+	}
+	if len(dump.OutputContext) > 0 && !strings.Contains(dump.OutputContext[0], "OUTPUT_CAPTURE_TEST") {
+		t.Errorf("OutputContext missing output: %v", dump.OutputContext)
+	}
 }
 
 func TestStaticContextFlagPrintsStructuredContext(t *testing.T) {

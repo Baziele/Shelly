@@ -97,3 +97,69 @@ func TestMarkerParserDecodesBase64Command(t *testing.T) {
 		t.Errorf("RawInput = %q, want %q", entries[0].RawInput, cmd)
 	}
 }
+
+func TestMarkerParserCapturesOutputBetweenMarkers(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	f := NewMarkerFilter(&out, hist)
+
+	input := []byte("output1" + marker("cmd1", 0) + "output2" + marker("cmd2", 1))
+	if _, err := f.Write(input); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	entries := hist.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Output != "output1" {
+		t.Errorf("entry 0 Output = %q, want %q", entries[0].Output, "output1")
+	}
+	if entries[1].Output != "output2" {
+		t.Errorf("entry 1 Output = %q, want %q", entries[1].Output, "output2")
+	}
+}
+
+func TestMarkerParserCapturesOutputAcrossSplitWrites(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	f := NewMarkerFilter(&out, hist)
+
+	m1 := marker("cmd1", 0)
+	if _, err := f.Write([]byte("part1")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := f.Write([]byte("part2" + m1)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	entries := hist.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Output != "part1part2" {
+		t.Errorf("Output = %q, want %q", entries[0].Output, "part1part2")
+	}
+}
+
+func TestMarkerParserCapturesCleanOutput(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	f := NewMarkerFilter(&out, hist)
+
+	input := []byte("output1" + marker("cmd1", 0) + "output2" + marker("cmd2", 1))
+	if _, err := f.Write(input); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	entries := hist.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].CleanOutput != "output1" {
+		t.Errorf("entry 0 CleanOutput = %q, want %q", entries[0].CleanOutput, "output1")
+	}
+	if entries[1].CleanOutput != "output2" {
+		t.Errorf("entry 1 CleanOutput = %q, want %q", entries[1].CleanOutput, "output2")
+	}
+}

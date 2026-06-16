@@ -5,8 +5,10 @@ const maxEntries = 10
 
 // Entry records a single command that completed in the User Shell.
 type Entry struct {
-	RawInput string
-	ExitCode int
+	RawInput    string
+	ExitCode    int
+	Output      string
+	CleanOutput string
 }
 
 // History retains the most recent completed commands, bounded by maxEntries.
@@ -21,11 +23,11 @@ func New() *History {
 
 // Add records a completed command. If the buffer is full, the oldest entry is
 // discarded.
-func (h *History) Add(raw string, exit int) {
+func (h *History) Add(raw string, exit int, output string, cleanOutput string) {
 	if len(h.entries) >= maxEntries {
 		h.entries = h.entries[1:]
 	}
-	h.entries = append(h.entries, Entry{RawInput: raw, ExitCode: exit})
+	h.entries = append(h.entries, Entry{RawInput: raw, ExitCode: exit, Output: output, CleanOutput: cleanOutput})
 }
 
 // Entries returns a copy of the retained entries in chronological order

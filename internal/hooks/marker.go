@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/baziele/shelly/internal/history"
+	"github.com/baziele/shelly/internal/outputcontext"
 )
 
 // MarkerPrefix is the OSC payload prefix Shelly uses to identify its own
@@ -16,17 +17,27 @@ import (
 const MarkerPrefix = "777;shelly;"
 
 // MarkerFilter wraps an io.Writer, removes Shelly command-boundary markers
-// from the byte stream, and records the decoded commands in a History.
+// from the byte stream, records the decoded commands in a History, and
+// captures the output associated with each command.
 type MarkerFilter struct {
 	w       io.Writer
 	history *history.History
 	buf     []byte
+	output  []byte
 }
 
 // NewMarkerFilter creates a filter that writes non-marker output to w and
 // records parsed commands in hist.
 func NewMarkerFilter(w io.Writer, hist *history.History) *MarkerFilter {
 	return &MarkerFilter{w: w, history: hist}
+}
+
+// write passes p to the underlying writer and also appends it to the output
+// buffer so it can be associated with the next command marker.
+func (f *MarkerFilter) write(p []byte) error {
+	_, err := f.w.Write(p)
+	f.output = append(f.output, p...)
+	return err
 }
 
 // Write implements io.Writer. It buffers partial OSC sequences and strips
@@ -56,14 +67,14 @@ func (f *MarkerFilter) flush() (bool, error) {
 	osc := bytes.Index(f.buf, []byte{0x1b, ']'})
 	if osc == -1 {
 		// No OSC start in buffer; flush everything as plain text.
-		_, err := f.w.Write(f.buf)
+		err := f.write(f.buf)
 		f.buf = f.buf[:0]
 		return false, err
 	}
 
 	if osc > 0 {
 		// Plain text before the OSC.
-		_, err := f.w.Write(f.buf[:osc])
+		err := f.write(f.buf[:osc])
 		f.buf = f.buf[osc:]
 		return true, err
 	}
@@ -83,7 +94,7 @@ func (f *MarkerFilter) flush() (bool, error) {
 		}
 	} else {
 		// Not a Shelly marker; pass the whole OSC through unchanged.
-		if _, err := f.w.Write(f.buf[:2+contentEnd+termLen]); err != nil {
+		if err := f.write(f.buf[:2+contentEnd+termLen]); err != nil {
 			return true, err
 		}
 	}
@@ -124,6 +135,7 @@ func (f *MarkerFilter) parseMarker(payload []byte) error {
 		return err
 	}
 
-	f.history.Add(string(cmd), exit)
+	f.history.Add(string(cmd), exit, string(f.output), outputcontext.Clean(string(f.output)))
+	f.output = f.output[:0]
 	return nil
 }
