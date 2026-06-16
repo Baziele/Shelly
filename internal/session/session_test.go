@@ -513,3 +513,107 @@ func TestSessionAgentModeExecutesTool(t *testing.T) {
 		t.Fatal("session did not exit")
 	}
 }
+
+// mockEditFileLLM returns an edit_file function call on the first turn, then a
+// final text response so the tool loop terminates.
+type mockEditFileLLM struct {
+	callIndex int
+}
+
+func (m *mockEditFileLLM) Name() string { return "mock-edit" }
+
+func (m *mockEditFileLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.callIndex++
+		if m.callIndex == 1 {
+			fc := genai.NewPartFromFunctionCall("edit_file", map[string]any{
+				"path":    "created.html",
+				"content": "<html></html>",
+			})
+			fc.FunctionCall.ID = "call_1"
+			content := genai.NewContentFromParts([]*genai.Part{fc}, genai.RoleModel)
+			_ = yield(&model.LLMResponse{Content: content, ModelVersion: "mock"}, nil)
+			return
+		}
+		content := genai.NewContentFromText("Created file", genai.RoleModel)
+		_ = yield(&model.LLMResponse{Content: content, ModelVersion: "mock"}, nil)
+	}
+}
+
+func TestSessionAgentModeUsesShellWorkingDirectory(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	root := t.TempDir()
+	subDir := root + "/subdir"
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	s, err := New("/bin/bash")
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	s.cwdPollInterval = 50 * time.Millisecond
+	s.Env = []string{"PS1=SHELL_PROMPT ", "HISTFILE=/dev/null"}
+
+	registry := tools.NewRegistry()
+	s.AgentModeHandler = &agentmode.Handler{
+		LLM:           &mockEditFileLLM{},
+		History:       s.CommandHistory(),
+		Tools:         registry,
+		StaticContext: s.StaticContext(),
+	}
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	s.Stdin = stdinR
+	s.Stdout = stdoutW
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run() }()
+
+	if err := expectOnReader(stdoutR, "SHELL_PROMPT", 5*time.Second); err != nil {
+		t.Fatalf("wait for prompt: %v", err)
+	}
+
+	// Change into the subdirectory inside the shell.
+	if _, err := stdinW.Write([]byte("cd " + subDir + "\n")); err != nil {
+		t.Fatalf("write cd: %v", err)
+	}
+	if err := expectOnReader(stdoutR, "SHELL_PROMPT", 5*time.Second); err != nil {
+		t.Fatalf("wait for prompt after cd: %v", err)
+	}
+
+	// Wait for the CWD poller to observe the change.
+	time.Sleep(200 * time.Millisecond)
+
+	// Trigger agent mode. The mock LLM asks to write "created.html" in the
+	// current directory. It should end up in subDir, not root.
+	if _, err := stdinW.Write([]byte(":: create html\n")); err != nil {
+		t.Fatalf("write agent mode: %v", err)
+	}
+
+	if err := expectOnReader(stdoutR, "[shelly agent done]", 5*time.Second); err != nil {
+		t.Fatalf("wait for completion marker: %v", err)
+	}
+
+	if _, err := os.Stat(subDir + "/created.html"); err != nil {
+		t.Errorf("file not created in subdir: %v", err)
+	}
+	if _, err := os.Stat(root + "/created.html"); err == nil {
+		t.Error("file was incorrectly created in root directory")
+	}
+
+	if _, err := stdinW.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	_ = stdinW.Close()
+	_ = stdoutW.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not exit")
+	}
+}

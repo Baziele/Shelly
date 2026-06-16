@@ -25,12 +25,15 @@ func (e *ExecuteShell) Parameters() *genai.Schema {
 	}
 }
 
-func (e *ExecuteShell) Execute(args map[string]any) (map[string]any, error) {
+func (e *ExecuteShell) Execute(ctx *ToolContext, args map[string]any) (map[string]any, error) {
 	cmdStr, err := stringParam(args, "command")
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.Command("sh", "-c", cmdStr)
+	if ctx != nil && ctx.WorkingDirectory != "" {
+		cmd.Dir = ctx.WorkingDirectory
+	}
 	out, err := cmd.CombinedOutput()
 	exitCode := 0
 	if cmd.ProcessState != nil {

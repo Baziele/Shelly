@@ -4,9 +4,16 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"google.golang.org/genai"
 )
+
+// ToolContext carries session-level context for tool execution.
+type ToolContext struct {
+	// WorkingDirectory is the User Shell's current working directory.
+	WorkingDirectory string
+}
 
 // Tool is a capability exposed to the LLM agent.
 type Tool interface {
@@ -16,8 +23,8 @@ type Tool interface {
 	Description() string
 	// Parameters returns the JSON schema describing the function arguments.
 	Parameters() *genai.Schema
-	// Execute runs the tool with the given arguments and returns the result.
-	Execute(args map[string]any) (map[string]any, error)
+	// Execute runs the tool with the given context and arguments and returns the result.
+	Execute(ctx *ToolContext, args map[string]any) (map[string]any, error)
 }
 
 // Registry holds all available tools.
@@ -69,13 +76,25 @@ func (r *Registry) GenaiTools() []*genai.Tool {
 	return []*genai.Tool{{FunctionDeclarations: decls}}
 }
 
-// Run looks up a tool by name and executes it with the provided arguments.
-func (r *Registry) Run(name string, args map[string]any) (map[string]any, error) {
+// Run looks up a tool by name and executes it with the provided context and arguments.
+func (r *Registry) Run(ctx *ToolContext, name string, args map[string]any) (map[string]any, error) {
 	t, ok := r.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
-	return t.Execute(args)
+	return t.Execute(ctx, args)
+}
+
+// resolvePath returns an absolute path, resolving relative paths against the
+// User Shell's current working directory.
+func resolvePath(ctx *ToolContext, path string) string {
+	if ctx == nil || ctx.WorkingDirectory == "" {
+		return path
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(ctx.WorkingDirectory, path)
 }
 
 // stringParam extracts a required string parameter from args.

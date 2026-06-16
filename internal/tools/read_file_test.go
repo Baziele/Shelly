@@ -14,7 +14,7 @@ func TestReadFileReturnsContent(t *testing.T) {
 	}
 
 	tool := &ReadFile{}
-	result, err := tool.Execute(map[string]any{"path": path})
+	result, err := tool.Execute(&ToolContext{}, map[string]any{"path": path})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestReadFileReturnsContent(t *testing.T) {
 
 func TestReadFileReturnsErrorForMissingPath(t *testing.T) {
 	tool := &ReadFile{}
-	_, err := tool.Execute(map[string]any{})
+	_, err := tool.Execute(&ToolContext{}, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing path")
 	}
@@ -34,7 +34,7 @@ func TestReadFileReturnsErrorForMissingPath(t *testing.T) {
 
 func TestReadFileReturnsErrorResultForMissingFile(t *testing.T) {
 	tool := &ReadFile{}
-	result, err := tool.Execute(map[string]any{"path": "/nonexistent/path"})
+	result, err := tool.Execute(&ToolContext{}, map[string]any{"path": "/nonexistent/path"})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestRegistryRun(t *testing.T) {
 	}
 
 	r := NewRegistry()
-	result, err := r.Run("read_file", map[string]any{"path": path})
+	result, err := r.Run(&ToolContext{}, "read_file", map[string]any{"path": path})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestRegistryRun(t *testing.T) {
 
 func TestRegistryRunUnknownTool(t *testing.T) {
 	r := NewRegistry()
-	_, err := r.Run("nonexistent", map[string]any{})
+	_, err := r.Run(&ToolContext{}, "nonexistent", map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for unknown tool")
 	}

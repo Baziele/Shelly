@@ -29,7 +29,7 @@ func (s *SearchOnline) Parameters() *genai.Schema {
 	}
 }
 
-func (s *SearchOnline) Execute(args map[string]any) (map[string]any, error) {
+func (s *SearchOnline) Execute(ctx *ToolContext, args map[string]any) (map[string]any, error) {
 	query, err := stringParam(args, "query")
 	if err != nil {
 		return nil, err

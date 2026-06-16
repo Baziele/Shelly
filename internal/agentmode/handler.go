@@ -79,8 +79,12 @@ func (h *Handler) Handle(message string) (string, error) {
 		if h.Tools == nil {
 			return "", fmt.Errorf("LLM requested tools but no tool registry configured")
 		}
+		toolCtx := &tools.ToolContext{}
+		if h.StaticContext != nil {
+			toolCtx.WorkingDirectory = h.StaticContext.WorkingDirectory
+		}
 		for _, fc := range funcCalls {
-			result, err := h.Tools.Run(fc.Name, fc.Args)
+			result, err := h.Tools.Run(toolCtx, fc.Name, fc.Args)
 			if err != nil {
 				result = map[string]any{"error": err.Error()}
 			}

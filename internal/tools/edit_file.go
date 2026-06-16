@@ -29,7 +29,7 @@ func (e *EditFile) Parameters() *genai.Schema {
 	}
 }
 
-func (e *EditFile) Execute(args map[string]any) (map[string]any, error) {
+func (e *EditFile) Execute(ctx *ToolContext, args map[string]any) (map[string]any, error) {
 	path, err := stringParam(args, "path")
 	if err != nil {
 		return nil, err
@@ -38,7 +38,7 @@ func (e *EditFile) Execute(args map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(resolvePath(ctx, path), []byte(content), 0o644); err != nil {
 		return map[string]any{"error": err.Error()}, nil
 	}
 	return map[string]any{"status": "ok"}, nil

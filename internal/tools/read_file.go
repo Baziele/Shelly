@@ -25,12 +25,12 @@ func (r *ReadFile) Parameters() *genai.Schema {
 	}
 }
 
-func (r *ReadFile) Execute(args map[string]any) (map[string]any, error) {
+func (r *ReadFile) Execute(ctx *ToolContext, args map[string]any) (map[string]any, error) {
 	path, err := stringParam(args, "path")
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(resolvePath(ctx, path))
 	if err != nil {
 		return map[string]any{"error": err.Error()}, nil
 	}
