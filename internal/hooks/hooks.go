@@ -92,6 +92,13 @@ __shelly_emit() {
     printf '\033]777;shelly;cmd=%s;exit=%s\007' "$b64" "$code" >&2
 }
 
+__shelly_emit_qr() {
+    local question="$1"
+    local b64
+    b64=$(printf '%s' "$question" | base64 | tr -d '\n')
+    printf '\033]777;shelly;qr=%s\007' "$b64" >&2
+}
+
 __shelly_prompt_command() {
     local code=$?
     local last
@@ -101,7 +108,16 @@ __shelly_prompt_command() {
     fi
 }
 
+__shelly_debug_trap() {
+    if [[ "$BASH_COMMAND" == ": "* ]]; then
+        __shelly_emit_qr "${BASH_COMMAND#: }"
+        history -s "$BASH_COMMAND"
+        return 1
+    fi
+}
+
 PROMPT_COMMAND="__shelly_prompt_command${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+trap '__shelly_debug_trap' DEBUG
 `
 }
 
@@ -127,6 +143,13 @@ __shelly_emit() {
     printf '\033]777;shelly;cmd=%s;exit=%s\007' "$b64" "$code" >&2
 }
 
+__shelly_emit_qr() {
+    local question="$1"
+    local b64
+    b64=$(printf '%s' "$question" | base64 | tr -d '\n')
+    printf '\033]777;shelly;qr=%s\007' "$b64" >&2
+}
+
 __shelly_precmd() {
     local code=$?
     local last
@@ -136,6 +159,16 @@ __shelly_precmd() {
     fi
 }
 
+__shelly_accept_line() {
+    if [[ "$BUFFER" == ": "* ]]; then
+        __shelly_emit_qr "${BUFFER#: }"
+        print -s "$BUFFER"
+        BUFFER=""
+    fi
+    zle .accept-line
+}
+
+zle -N accept-line __shelly_accept_line
 precmd_functions+=(__shelly_precmd)
 `
 }

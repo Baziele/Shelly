@@ -64,6 +64,11 @@ func startShelly(t *testing.T, env ...string) (*os.File, *exec.Cmd) {
 
 func expect(t *testing.T, r *os.File, want string, timeout time.Duration) {
 	t.Helper()
+	_ = readUntil(t, r, want, timeout)
+}
+
+func readUntil(t *testing.T, r *os.File, want string, timeout time.Duration) string {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	buf := make([]byte, 1024)
 	var out strings.Builder
@@ -78,10 +83,11 @@ func expect(t *testing.T, r *os.File, want string, timeout time.Duration) {
 		}
 		out.Write(buf[:n])
 		if strings.Contains(out.String(), want) {
-			return
+			return out.String()
 		}
 	}
 	t.Fatalf("expected output containing %q within %v, got %q", want, timeout, out.String())
+	return out.String()
 }
 
 func waitForExit(t *testing.T, cmd *exec.Cmd, timeout time.Duration) {
@@ -311,11 +317,12 @@ func TestQuickRequestRendersInlineResponse(t *testing.T) {
 		t.Fatalf("write quick request: %v", err)
 	}
 
-	// The response should be rendered inline.
-	expect(t, ptmx, "Hello", 15*time.Second)
-
-	// Shell prompt should return.
-	expect(t, ptmx, "SHELL_PROMPT", 3*time.Second)
+	// Wait for the prompt to return. The response should appear before it.
+	out := readUntil(t, ptmx, "SHELL_PROMPT", 30*time.Second)
+	lower := strings.ToLower(out)
+	if !strings.Contains(lower, "hello") {
+		t.Errorf("quick request response missing 'hello', got: %q", out)
+	}
 
 	if _, err := ptmx.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)

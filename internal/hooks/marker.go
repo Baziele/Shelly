@@ -16,20 +16,28 @@ import (
 // markers in the PTY output stream.
 const MarkerPrefix = "777;shelly;"
 
+// QuickRequestHandler is called when a shell hook reports that the user
+// submitted a line starting with ": ". It should return the response text to
+// render inline.
+type QuickRequestHandler func(question string) (string, error)
+
 // MarkerFilter wraps an io.Writer, removes Shelly command-boundary markers
 // from the byte stream, records the decoded commands in a History, and
 // captures the output associated with each command.
 type MarkerFilter struct {
 	w       io.Writer
 	history *history.History
+	qr      QuickRequestHandler
 	buf     []byte
 	output  []byte
 }
 
 // NewMarkerFilter creates a filter that writes non-marker output to w and
-// records parsed commands in hist.
-func NewMarkerFilter(w io.Writer, hist *history.History) *MarkerFilter {
-	return &MarkerFilter{w: w, history: hist}
+// records parsed commands in hist. If qr is non-nil, quick-request markers
+// emitted by shell hooks are handled by calling qr and writing the returned
+// text to w.
+func NewMarkerFilter(w io.Writer, hist *history.History, qr QuickRequestHandler) *MarkerFilter {
+	return &MarkerFilter{w: w, history: hist, qr: qr}
 }
 
 // write passes p to the underlying writer and also appends it to the output
@@ -118,6 +126,10 @@ func oscTerminator(buf []byte) (int, int) {
 }
 
 func (f *MarkerFilter) parseMarker(payload []byte) error {
+	if bytes.HasPrefix(payload, []byte("qr=")) {
+		return f.parseQuickRequest(payload[len("qr="):])
+	}
+
 	parts := bytes.SplitN(payload, []byte(";"), 2)
 	if len(parts) != 2 || !bytes.HasPrefix(parts[0], []byte("cmd=")) || !bytes.HasPrefix(parts[1], []byte("exit=")) {
 		return fmt.Errorf("malformed marker")
@@ -137,5 +149,25 @@ func (f *MarkerFilter) parseMarker(payload []byte) error {
 
 	f.history.Add(string(cmd), exit, string(f.output), outputcontext.Clean(string(f.output)))
 	f.output = f.output[:0]
+	return nil
+}
+
+func (f *MarkerFilter) parseQuickRequest(payload []byte) error {
+	if f.qr == nil {
+		return nil
+	}
+
+	questionEnc := string(payload)
+	question, err := base64.StdEncoding.DecodeString(questionEnc)
+	if err != nil {
+		return err
+	}
+
+	resp, err := f.qr(string(question))
+	if err != nil {
+		fmt.Fprintf(f.w, "\r\nshelly: error: %v\r\n", err)
+		return nil
+	}
+	fmt.Fprintf(f.w, "\r\n%s\r\n", strings.TrimRight(resp, "\n"))
 	return nil
 }

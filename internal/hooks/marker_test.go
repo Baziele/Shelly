@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/baziele/shelly/internal/history"
@@ -16,7 +17,7 @@ func marker(cmd string, exit int) string {
 func TestMarkerParserExtractsCommandAndExitCode(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	input := []byte("before" + marker("ls -la", 0) + "after")
 	if _, err := f.Write(input); err != nil {
@@ -42,7 +43,7 @@ func TestMarkerParserExtractsCommandAndExitCode(t *testing.T) {
 func TestMarkerParserHandlesSplitMarkers(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	m := marker("echo hello", 42)
 	// Split the marker across two writes.
@@ -66,7 +67,7 @@ func TestMarkerParserHandlesSplitMarkers(t *testing.T) {
 func TestMarkerParserIgnoresOtherOSCSequences(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	input := []byte("\033]0;window title\007visible")
 	if _, err := f.Write(input); err != nil {
@@ -84,7 +85,7 @@ func TestMarkerParserIgnoresOtherOSCSequences(t *testing.T) {
 func TestMarkerParserDecodesBase64Command(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	cmd := "echo 'hello world' && ls | wc -l"
 	input := []byte(marker(cmd, 1))
@@ -101,7 +102,7 @@ func TestMarkerParserDecodesBase64Command(t *testing.T) {
 func TestMarkerParserCapturesOutputBetweenMarkers(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	input := []byte("output1" + marker("cmd1", 0) + "output2" + marker("cmd2", 1))
 	if _, err := f.Write(input); err != nil {
@@ -123,7 +124,7 @@ func TestMarkerParserCapturesOutputBetweenMarkers(t *testing.T) {
 func TestMarkerParserCapturesOutputAcrossSplitWrites(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	m1 := marker("cmd1", 0)
 	if _, err := f.Write([]byte("part1")); err != nil {
@@ -145,7 +146,7 @@ func TestMarkerParserCapturesOutputAcrossSplitWrites(t *testing.T) {
 func TestMarkerParserCapturesCleanOutput(t *testing.T) {
 	hist := history.New()
 	var out bytes.Buffer
-	f := NewMarkerFilter(&out, hist)
+	f := NewMarkerFilter(&out, hist, nil)
 
 	input := []byte("output1" + marker("cmd1", 0) + "output2" + marker("cmd2", 1))
 	if _, err := f.Write(input); err != nil {
@@ -161,5 +162,24 @@ func TestMarkerParserCapturesCleanOutput(t *testing.T) {
 	}
 	if entries[1].CleanOutput != "output2" {
 		t.Errorf("entry 1 CleanOutput = %q, want %q", entries[1].CleanOutput, "output2")
+	}
+}
+
+func TestMarkerFilterHandlesQuickRequestMarker(t *testing.T) {
+	hist := history.New()
+	var out bytes.Buffer
+	handler := func(question string) (string, error) {
+		return "answer to " + question, nil
+	}
+	f := NewMarkerFilter(&out, hist, handler)
+
+	question := "what can you do"
+	qr := fmt.Sprintf("\033]777;shelly;qr=%s\007", base64.StdEncoding.EncodeToString([]byte(question)))
+	if _, err := f.Write([]byte(qr)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "answer to what can you do") {
+		t.Errorf("output missing response, got: %q", out.String())
 	}
 }

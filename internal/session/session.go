@@ -146,26 +146,21 @@ func (s *Session) Run() error {
 	go s.pollWorkingDirectory()
 
 	// stdin -> PTY
-	if s.QuickRequestHandler != nil {
-		proxy := &inputProxy{
-			stdin:  s.Stdin,
-			pty:    ptmx,
-			stdout: s.Stdout,
-			handler: func(question string) (string, error) {
-				resp, err := s.QuickRequestHandler.Handle(question)
-				if err != nil {
-					return "", err
-				}
-				return resp.Explanation, nil
-			},
-		}
-		go proxy.run()
-	} else {
-		go func() { _, _ = io.Copy(ptmx, s.Stdin) }()
-	}
+	go func() { _, _ = io.Copy(ptmx, s.Stdin) }()
 
-	// PTY -> stdout, filtering out Shelly markers and recording commands.
-	filter := hooks.NewMarkerFilter(s.Stdout, s.history)
+	// PTY -> stdout, filtering out Shelly markers, recording commands, and
+	// handling quick-request markers emitted by shell hooks.
+	var qr hooks.QuickRequestHandler
+	if s.QuickRequestHandler != nil {
+		qr = func(question string) (string, error) {
+			resp, err := s.QuickRequestHandler.Handle(question)
+			if err != nil {
+				return "", err
+			}
+			return resp.Explanation, nil
+		}
+	}
+	filter := hooks.NewMarkerFilter(s.Stdout, s.history, qr)
 	_, err = io.Copy(filter, ptmx)
 	if err != nil && !errors.Is(err, syscall.EIO) {
 		return err
