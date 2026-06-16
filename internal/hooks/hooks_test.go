@@ -31,6 +31,12 @@ func TestInjectorAddsBashRcfileArgument(t *testing.T) {
 	if !strings.Contains(string(content), MarkerPrefix) {
 		t.Error("rcfile missing Shelly marker prefix")
 	}
+	if !strings.Contains(string(content), "__shelly_emit_ac") {
+		t.Error("rcfile missing auto-command emitter")
+	}
+	if !strings.Contains(string(content), "\"_ \"") {
+		t.Error("rcfile missing auto-command prefix check")
+	}
 }
 
 func envValue(cmd *exec.Cmd, key string) string {
@@ -65,6 +71,12 @@ func TestInjectorSetsZshZdotdir(t *testing.T) {
 	}
 	if !strings.Contains(string(content), MarkerPrefix) {
 		t.Error(".zshrc missing Shelly marker prefix")
+	}
+	if !strings.Contains(string(content), "__shelly_emit_ac") {
+		t.Error(".zshrc missing auto-command emitter")
+	}
+	if !strings.Contains(string(content), "\"_ \"") {
+		t.Error(".zshrc missing auto-command prefix check")
 	}
 }
 

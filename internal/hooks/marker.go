@@ -28,6 +28,11 @@ type QuickRequestResult struct {
 // inline and an optional command to populate on the User Shell input line.
 type QuickRequestHandler func(question string) (QuickRequestResult, error)
 
+// AutoCommandHandler is called when a shell hook reports that the user
+// submitted a line starting with "; ". It returns the command to execute
+// immediately through the User Shell.
+type AutoCommandHandler func(request string) (string, error)
+
 // MarkerFilter wraps an io.Writer, removes Shelly command-boundary markers
 // from the byte stream, records the decoded commands in a History, and
 // captures the output associated with each command.
@@ -36,6 +41,7 @@ type MarkerFilter struct {
 	pty     io.Writer
 	history *history.History
 	qr      QuickRequestHandler
+	autoCmd AutoCommandHandler
 	buf     []byte
 	output  []byte
 }
@@ -45,9 +51,11 @@ type MarkerFilter struct {
 // emitted by shell hooks are handled by calling qr and writing the returned
 // text to w. When qr returns a Command and pty is non-nil, the command is
 // populated on the User Shell input line by simulating keystrokes through the
-// PTY.
-func NewMarkerFilter(w io.Writer, pty io.Writer, hist *history.History, qr QuickRequestHandler) *MarkerFilter {
-	return &MarkerFilter{w: w, pty: pty, history: hist, qr: qr}
+// PTY. If autoCmd is non-nil, auto-command markers are handled by calling
+// autoCmd and writing the returned command to pty followed by a newline so it
+// executes immediately.
+func NewMarkerFilter(w io.Writer, pty io.Writer, hist *history.History, qr QuickRequestHandler, autoCmd AutoCommandHandler) *MarkerFilter {
+	return &MarkerFilter{w: w, pty: pty, history: hist, qr: qr, autoCmd: autoCmd}
 }
 
 // write passes p to the underlying writer and also appends it to the output
@@ -139,6 +147,9 @@ func (f *MarkerFilter) parseMarker(payload []byte) error {
 	if bytes.HasPrefix(payload, []byte("qr=")) {
 		return f.parseQuickRequest(payload[len("qr="):])
 	}
+	if bytes.HasPrefix(payload, []byte("ac=")) {
+		return f.parseAutoCommand(payload[len("ac="):])
+	}
 
 	parts := bytes.SplitN(payload, []byte(";"), 2)
 	if len(parts) != 2 || !bytes.HasPrefix(parts[0], []byte("cmd=")) || !bytes.HasPrefix(parts[1], []byte("exit=")) {
@@ -185,6 +196,31 @@ func (f *MarkerFilter) parseQuickRequest(payload []byte) error {
 		// to end) before populating the suggested command.
 		const clearLine = "\x01\x0b"
 		if _, err := f.pty.Write([]byte(clearLine + resp.Command)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *MarkerFilter) parseAutoCommand(payload []byte) error {
+	if f.autoCmd == nil || f.pty == nil {
+		return nil
+	}
+
+	requestEnc := string(payload)
+	request, err := base64.StdEncoding.DecodeString(requestEnc)
+	if err != nil {
+		return err
+	}
+
+	cmd, err := f.autoCmd(string(request))
+	if err != nil {
+		fmt.Fprintf(f.w, "\r\nshelly: error: %v\r\n", err)
+		return nil
+	}
+
+	if cmd != "" {
+		if _, err := f.pty.Write([]byte(cmd + "\n")); err != nil {
 			return err
 		}
 	}

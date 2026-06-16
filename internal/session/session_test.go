@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baziele/shelly/internal/autocommand"
 	"github.com/baziele/shelly/internal/quickrequest"
 	"github.com/creack/pty"
 	"google.golang.org/adk/model"
@@ -307,6 +308,58 @@ func TestSessionPopulatesQuickRequestCommand(t *testing.T) {
 
 	// Clear the populated command and exit.
 	if _, err := stdinW.Write([]byte("\x15exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	_ = stdinW.Close()
+	_ = stdoutW.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not exit")
+	}
+}
+
+func TestSessionExecutesAutoCommand(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	s, err := New("/bin/bash")
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	s.cwdPollInterval = 10 * time.Second
+	s.Env = []string{"PS1=SHELL_PROMPT ", "HISTFILE=/dev/null"}
+
+	// Mock LLM returns a command that prints a marker.
+	s.AutoCommandHandler = &autocommand.Handler{
+		LLM: &mockLLM{
+			response: `{"command": "echo AUTO_OK"}`,
+		},
+	}
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	s.Stdin = stdinR
+	s.Stdout = stdoutW
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run() }()
+
+	if err := expectOnReader(stdoutR, "SHELL_PROMPT", 5*time.Second); err != nil {
+		t.Fatalf("wait for prompt: %v", err)
+	}
+
+	if _, err := stdinW.Write([]byte("_ say hello\n")); err != nil {
+		t.Fatalf("write auto command: %v", err)
+	}
+
+	// Wait for the auto-executed command output.
+	if err := expectOnReader(stdoutR, "AUTO_OK", 5*time.Second); err != nil {
+		t.Fatalf("wait for auto command output: %v", err)
+	}
+
+	if _, err := stdinW.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
 	_ = stdinW.Close()

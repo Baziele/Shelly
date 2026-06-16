@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/baziele/shelly/internal/autocommand"
 	"github.com/baziele/shelly/internal/llm"
 	"github.com/baziele/shelly/internal/quickrequest"
 	"github.com/baziele/shelly/internal/session"
@@ -21,9 +22,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Wire up Quick Request handler.
+	// Wire up Quick Request and Auto Command handlers.
 	adapter := llm.NewOpenAIAdapter()
 	s.QuickRequestHandler = &quickrequest.Handler{
+		LLM:           adapter,
+		StaticContext: s.StaticContext(),
+		History:       s.CommandHistory(),
+	}
+	s.AutoCommandHandler = &autocommand.Handler{
 		LLM:           adapter,
 		StaticContext: s.StaticContext(),
 		History:       s.CommandHistory(),

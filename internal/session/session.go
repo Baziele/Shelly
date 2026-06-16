@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/baziele/shelly/internal/autocommand"
 	"github.com/baziele/shelly/internal/context"
 	"github.com/baziele/shelly/internal/history"
 	"github.com/baziele/shelly/internal/hooks"
@@ -42,6 +43,10 @@ type Session struct {
 	// QuickRequestHandler is called when the user types ": <question>" at the
 	// start of a line. If nil, the input is forwarded to the User Shell unchanged.
 	QuickRequestHandler *quickrequest.Handler
+
+	// AutoCommandHandler is called when the user types "; <request>" at the
+	// start of a line. If nil, the input is forwarded to the User Shell unchanged.
+	AutoCommandHandler *autocommand.Handler
 }
 
 // New creates a Session for the given shell executable. It gathers the initial
@@ -149,7 +154,7 @@ func (s *Session) Run() error {
 	go func() { _, _ = io.Copy(ptmx, s.Stdin) }()
 
 	// PTY -> stdout, filtering out Shelly markers, recording commands, and
-	// handling quick-request markers emitted by shell hooks.
+	// handling quick-request and auto-command markers emitted by shell hooks.
 	var qr hooks.QuickRequestHandler
 	if s.QuickRequestHandler != nil {
 		qr = func(question string) (hooks.QuickRequestResult, error) {
@@ -160,7 +165,13 @@ func (s *Session) Run() error {
 			return hooks.QuickRequestResult{Explanation: resp.Explanation, Command: resp.Command}, nil
 		}
 	}
-	filter := hooks.NewMarkerFilter(s.Stdout, ptmx, s.history, qr)
+	var autoCmd hooks.AutoCommandHandler
+	if s.AutoCommandHandler != nil {
+		autoCmd = func(request string) (string, error) {
+			return s.AutoCommandHandler.Handle(request)
+		}
+	}
+	filter := hooks.NewMarkerFilter(s.Stdout, ptmx, s.history, qr, autoCmd)
 	_, err = io.Copy(filter, ptmx)
 	if err != nil && !errors.Is(err, syscall.EIO) {
 		return err

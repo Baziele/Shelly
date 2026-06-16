@@ -99,6 +99,15 @@ __shelly_emit_qr() {
     printf '\033]777;shelly;qr=%s\007' "$b64" >&2
 }
 
+__shelly_emit_ac() {
+    local request="$1"
+    local b64
+    b64=$(printf '%s' "$request" | base64 | tr -d '\n')
+    printf '\033]777;shelly;ac=%s\007' "$b64" >&2
+}
+
+_() { :; }
+
 __shelly_prompt_command() {
     local code=$?
     local last
@@ -111,6 +120,11 @@ __shelly_prompt_command() {
 __shelly_debug_trap() {
     if [[ "$BASH_COMMAND" == ": "* ]]; then
         __shelly_emit_qr "${BASH_COMMAND#: }"
+        history -s "$BASH_COMMAND"
+        return 1
+    fi
+    if [[ "$BASH_COMMAND" == "_ "* ]]; then
+        __shelly_emit_ac "${BASH_COMMAND#_ }"
         history -s "$BASH_COMMAND"
         return 1
     fi
@@ -150,6 +164,8 @@ __shelly_emit_qr() {
     printf '\033]777;shelly;qr=%s\007' "$b64" >&2
 }
 
+function _ { :; }
+
 __shelly_precmd() {
     local code=$?
     local last
@@ -162,6 +178,11 @@ __shelly_precmd() {
 __shelly_accept_line() {
     if [[ "$BUFFER" == ": "* ]]; then
         __shelly_emit_qr "${BUFFER#: }"
+        print -s "$BUFFER"
+        BUFFER=""
+    fi
+    if [[ "$BUFFER" == "_ "* ]]; then
+        __shelly_emit_ac "${BUFFER#_ }"
         print -s "$BUFFER"
         BUFFER=""
     fi
