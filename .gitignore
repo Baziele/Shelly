@@ -29,3 +29,5 @@ pnpm-debug.log*
 .env.development
 .env.test
 .env.production
+
+todo.md
