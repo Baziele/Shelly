@@ -33,9 +33,6 @@ func NewOpenAIAdapter() *OpenAIAdapter {
 	if baseURL == "" {
 		baseURL = "https://opencode.ai/zen/go/v1"
 	}
-	if apiKey == "" {
-		apiKey = "__REMOVED_SECRET__"
-	}
 	if model == "" {
 		model = "deepseek-v4-flash"
 	}
@@ -64,6 +61,10 @@ func (a *OpenAIAdapter) GenerateContent(ctx context.Context, req *model.LLMReque
 }
 
 func (a *OpenAIAdapter) generate(ctx context.Context, req *model.LLMRequest, stream bool) (*model.LLMResponse, error) {
+	if a.apiKey == "" {
+		return nil, fmt.Errorf("LLM_API_KEY is not set")
+	}
+
 	modelName := a.model
 	if req.Model != "" {
 		modelName = req.Model
