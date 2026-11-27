@@ -50,6 +50,9 @@ Fast mode is deliberately not a small agent turn. Starting an agent, loading
 its tools and sending its long system prompt costs seconds; fast mode keeps
 a lean process warm and pays only for the model. T3 Code splits its providers
 the same way (an agent adapter and a separate text-generation path).
+For Claude Code the lean process is `claude -p` with everything turned off;
+for OpenCode it is a session on OpenCode's own background service (its HTTP
+API), run by a no-tools agent defined in Shelly's fast-mode folder.
 
 ## Agents over ACP
 
