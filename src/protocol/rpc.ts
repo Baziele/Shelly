@@ -7,6 +7,7 @@ import {
   FastError,
   PromptError,
   ProtocolMismatch,
+  ThreadBusy,
   ThreadError,
   ThreadNotFound,
   UnknownRequest,
@@ -125,31 +126,42 @@ export const WatchThread = Rpc.make('thread.watch', {
   stream: true,
 });
 
+/*
+ * The calls below act on a thread, so they name the calling client: only the
+ * client that has the thread attached may drive it (ThreadBusy otherwise).
+ * Rename and delete also work on a thread nobody has attached.
+ */
+
 /** Stop the running turn. Pending permission requests are cancelled. */
 export const CancelTurn = Rpc.make('thread.cancel', {
-  payload: { threadId: Schema.String },
-  error: ThreadNotFound,
+  payload: { threadId: Schema.String, clientId: Schema.String },
+  error: ThreadError,
 });
 
 /** Answer a permission request with one of its options, or null to refuse it outright. */
 export const RespondToPermission = Rpc.make('thread.respond', {
-  payload: { threadId: Schema.String, requestId: Schema.String, optionId: Schema.NullOr(Schema.String) },
-  error: Schema.Union([ThreadNotFound, UnknownRequest]),
+  payload: {
+    threadId: Schema.String,
+    clientId: Schema.String,
+    requestId: Schema.String,
+    optionId: Schema.NullOr(Schema.String),
+  },
+  error: Schema.Union([ThreadNotFound, ThreadBusy, UnknownRequest]),
 });
 
 export const SetThreadMode = Rpc.make('thread.setMode', {
-  payload: { threadId: Schema.String, modeId: Schema.String },
-  error: Schema.Union([ThreadNotFound, AgentFailed]),
+  payload: { threadId: Schema.String, clientId: Schema.String, modeId: Schema.String },
+  error: Schema.Union([ThreadNotFound, ThreadBusy, AgentFailed]),
 });
 
 export const RenameThread = Rpc.make('thread.rename', {
-  payload: { threadId: Schema.String, title: Schema.String },
-  error: ThreadNotFound,
+  payload: { threadId: Schema.String, clientId: Schema.String, title: Schema.String },
+  error: ThreadError,
 });
 
 export const DeleteThread = Rpc.make('thread.delete', {
-  payload: { threadId: Schema.String },
-  error: ThreadNotFound,
+  payload: { threadId: Schema.String, clientId: Schema.String },
+  error: ThreadError,
 });
 
 /**
