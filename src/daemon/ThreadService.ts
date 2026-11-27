@@ -291,6 +291,11 @@ const make = Effect.gen(function* () {
       return;
     }
     thread.currentModeId = mode.currentModeId;
+    // Like any other event, a mode change ends the current message (setMode
+    // arrives here outside handleUpdate), so compaction keeps the two apart.
+    if (thread.turn) {
+      thread.turn.message = null;
+    }
     yield* emit(threadId, thread, { type: 'mode.changed', currentModeId: mode.currentModeId, availableModes: mode.availableModes });
   });
 

@@ -558,6 +558,25 @@ describe('ThreadService under races and shutdown', () => {
       }), { fake });
   });
 
+  it('starts a new message after a mode change, so compaction keeps them apart', async () => {
+    const fake = new FakeAgents();
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const collecting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'plan it'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.turns.length === 1);
+        fake.lastTurn!.push({ type: 'chunk', kind: 'text', text: 'before' });
+        yield* Effect.sleep('20 millis');
+        yield* threads.setMode(thread.id, CLIENT, 'plan');
+        fake.lastTurn!.push({ type: 'chunk', kind: 'text', text: 'after' }, { type: 'end', stopReason: 'end_turn', error: null });
+        const live = Array.from(yield* Fiber.join(collecting));
+        const ids = live.flatMap((event) => (event.type === 'message.chunk' ? [event.messageId] : []));
+        assert.notEqual(ids[0], ids[1]);
+        const { history } = yield* threads.attach({ threadId: thread.id, clientId: CLIENT, force: false, historyTurns: 1 });
+        assert.deepEqual(shape(history), ['turn.started', 'mode.changed', 'chunk:text:before', 'mode.changed', 'chunk:text:after', 'ended:end_turn']);
+      }), { fake });
+  });
+
   it('fails setMode with ThreadNotFound when the thread is deleted while the agent starts, and releases the session', async () => {
     const home = newHome();
     const fake = new FakeAgents();
