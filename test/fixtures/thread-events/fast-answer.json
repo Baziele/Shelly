@@ -1,0 +1,27 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "fast",
+  "description": "Fast mode answers a quick question instead of writing a command.",
+  "prompt": "what does lsof -i :3000 show",
+  "steps": [
+    {
+      "after": 450,
+      "fastStream": {
+        "text": "It lists the processes with a network socket on port **3000**: the command, its PID, the user, and whether it is listening (`LISTEN`) or connected. Add `-t` to print only PIDs, e.g. `kill $(lsof -t -i :3000)`.",
+        "chunk": 5,
+        "every": 18
+      }
+    },
+    {
+      "after": 150,
+      "fast": {
+        "type": "done",
+        "text": "It lists the processes with a network socket on port **3000**: the command, its PID, the user, and whether it is listening (`LISTEN`) or connected. Add `-t` to print only PIDs, e.g. `kill $(lsof -t -i :3000)`.",
+        "kind": "answer",
+        "durationMs": 910
+      }
+    }
+  ]
+}

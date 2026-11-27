@@ -1,0 +1,39 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "A long streamed answer that passes the bottom of the screen: finished blocks move into scrollback while it streams.",
+  "prompt": "explain how the network layer works",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "explain how the network layer works",
+        "at": 0
+      }
+    },
+    {
+      "after": 500,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "# How the network layer is put together\n\nHere is a walk through every part of `src/net`, in the order a request meets them.\n\n## 1. Caching\n\nThe client's handling of the HTTP cache lives in `src/net/caching.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_CACHING` in `.env`\n- Tests: `src/net/__tests__/caching.test.ts`\n\n```ts\nexport const cachingConfig = load('caching', {\n  enabled: true,\n  limit: 10,\n});\n```\n\n## 2. Retries\n\nThe client's handling of the retry policy lives in `src/net/retries.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_RETRIES` in `.env`\n- Tests: `src/net/__tests__/retries.test.ts`\n\n```ts\nexport const retriesConfig = load('retries', {\n  enabled: true,\n  limit: 20,\n});\n```\n\n## 3. Timeouts\n\nThe client's handling of request timeouts lives in `src/net/timeouts.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_TIMEOUTS` in `.env`\n- Tests: `src/net/__tests__/timeouts.test.ts`\n\n```ts\nexport const timeoutsConfig = load('timeouts', {\n  enabled: true,\n  limit: 30,\n});\n```\n\n## 4. Logging\n\nThe client's handling of structured logs lives in `src/net/logging.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_LOGGING` in `.env`\n- Tests: `src/net/__tests__/logging.test.ts`\n\n```ts\nexport const loggingConfig = load('logging', {\n  enabled: true,\n  limit: 40,\n});\n```\n\n## 5. Metrics\n\nThe client's handling of the metrics pipeline lives in `src/net/metrics.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_METRICS` in `.env`\n- Tests: `src/net/__tests__/metrics.test.ts`\n\n```ts\nexport const metricsConfig = load('metrics', {\n  enabled: true,\n  limit: 50,\n});\n```\n\n## 6. Tracing\n\nThe client's handling of distributed tracing lives in `src/net/tracing.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_TRACING` in `.env`\n- Tests: `src/net/__tests__/tracing.test.ts`\n\n```ts\nexport const tracingConfig = load('tracing', {\n  enabled: true,\n  limit: 60,\n});\n```\n\n## 7. Rate limits\n\nThe client's handling of the rate limiter lives in `src/net/rate-limits.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_RATE_LIMITS` in `.env`\n- Tests: `src/net/__tests__/rate-limits.test.ts`\n\n```ts\nexport const ratelimitsConfig = load('rate limits', {\n  enabled: true,\n  limit: 70,\n});\n```\n\n## 8. Feature flags\n\nThe client's handling of flag evaluation lives in `src/net/feature-flags.ts`. It is configured once at startup and read on every request, so a change there affects **every** call the app makes. The defaults were chosen for the production API; the staging API is slower and needs more slack.\n\n- Default: on, with sensible limits\n- Override: `ACME_FEATURE_FLAGS` in `.env`\n- Tests: `src/net/__tests__/feature-flags.test.ts`\n\n```ts\nexport const featureflagsConfig = load('feature flags', {\n  enabled: true,\n  limit: 80,\n});\n```\n\nThat is the whole layer: eight small modules, each configured once, each tested on its own.\n",
+        "chunk": 8,
+        "every": 10
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "end_turn",
+        "error": null,
+        "durationMs": 31000
+      }
+    }
+  ]
+}
