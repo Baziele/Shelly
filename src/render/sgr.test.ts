@@ -19,6 +19,22 @@ describe('styleToSgr', () => {
   });
 });
 
+describe('reduced colour depths', () => {
+  it('maps 256-palette and RGB colours onto the 16 base colours', () => {
+    const red = { fg: { kind: 'rgb', r: 250, g: 10, b: 10 }, bg: { kind: 'indexed', index: 196 }, attributes: 0 } as const;
+    assert.equal(styleToSgr(red, 'ansi16'), '\u001b[0;91;101m');
+    const base = { fg: { kind: 'indexed', index: 5 }, bg: DEFAULT_COLOR, attributes: 0 } as const;
+    assert.equal(styleToSgr(base, 'ansi16'), '\u001b[0;35m');
+  });
+
+  it('drops colours without colour support and shows muted text as dim', () => {
+    const muted = { fg: { kind: 'indexed', index: 8 }, bg: { kind: 'indexed', index: 1 }, attributes: 4 } as const;
+    assert.equal(styleToSgr(muted, 'none'), '\u001b[0;2;3m');
+    const accent = { fg: { kind: 'indexed', index: 5 }, bg: DEFAULT_COLOR, attributes: 1 } as const;
+    assert.equal(styleToSgr(accent, 'none'), '\u001b[0;1m');
+  });
+});
+
 describe('rgbToAnsi256', () => {
   it('maps greys onto the grey ramp', () => {
     assert.equal(rgbToAnsi256(0, 0, 0), 16);
@@ -31,6 +47,13 @@ describe('detectColorDepth', () => {
   it('trusts COLORTERM', () => {
     assert.equal(detectColorDepth({ COLORTERM: 'truecolor' }), 'truecolor');
     assert.equal(detectColorDepth({ TERM_PROGRAM: 'Apple_Terminal' }), 'ansi256');
+  });
+
+  it('honours NO_COLOR and small palettes', () => {
+    assert.equal(detectColorDepth({ NO_COLOR: '1', COLORTERM: 'truecolor' }), 'none');
+    assert.equal(detectColorDepth({ TERM: 'dumb' }), 'none');
+    assert.equal(detectColorDepth({ TERM: 'linux' }), 'ansi16');
+    assert.equal(detectColorDepth({ NO_COLOR: '', TERM: 'xterm-256color' }), 'ansi256');
   });
 });
 

@@ -1,0 +1,14 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "fast",
+  "description": "Fast mode fails; the error shows under the input, which stays open to retry.",
+  "prompt": "compress this folder",
+  "steps": [
+    {
+      "after": 700,
+      "fastError": "Fast mode is unavailable: claude is not signed in (run `claude login`)."
+    }
+  ]
+}

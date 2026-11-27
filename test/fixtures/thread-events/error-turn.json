@@ -1,0 +1,117 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "A turn that fails: a tool errors, then the agent process dies.",
+  "prompt": "deploy the staging branch",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "deploy the staging branch",
+        "at": 0
+      }
+    },
+    {
+      "after": 500,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "Deploying `staging` with the project's deploy script.",
+        "chunk": 5,
+        "every": 14
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`./scripts/deploy.sh staging`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 600,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`./scripts/deploy.sh staging`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "Building image acme-web:staging…\nStep 1/9 : FROM node:22-alpine",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 700,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`./scripts/deploy.sh staging`",
+          "kind": "execute",
+          "status": "failed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "Building image acme-web:staging…\nStep 1/9 : FROM node:22-alpine\nerror: failed to solve: node:22-alpine: failed to resolve source metadata\nexit status 1",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 400,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Read /home/dev/acme-web/.env.staging",
+          "kind": "read",
+          "status": "failed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "Error: ENOENT: no such file or directory, open '/home/dev/acme-web/.env.staging'",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 500,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "error",
+        "error": "claude-agent-acp exited unexpectedly (code 1): API connection lost",
+        "durationMs": 4100
+      }
+    }
+  ]
+}

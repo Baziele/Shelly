@@ -1,0 +1,27 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "fast",
+  "description": "Fast mode writes a command, which goes to the shell's input line.",
+  "prompt": "find files over 100MB here",
+  "steps": [
+    {
+      "after": 450,
+      "fastStream": {
+        "text": "find . -type f -size +100M -exec ls -lh {} +",
+        "chunk": 3,
+        "every": 25
+      }
+    },
+    {
+      "after": 150,
+      "fast": {
+        "type": "done",
+        "text": "find . -type f -size +100M -exec ls -lh {} +",
+        "kind": "command",
+        "durationMs": 820
+      }
+    }
+  ]
+}

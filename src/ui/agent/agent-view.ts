@@ -1,0 +1,710 @@
+import { BoxRenderable, TextRenderable, type SyntaxStyle } from '@opentui/core';
+import type { ThreadEvent } from '../../protocol/schema.js';
+import type { PaintFrame } from '../../render/inline-painter.js';
+import { LiveRegion, type LiveRegionScreen, type PaintRow } from '../../render/live-region.js';
+import type { ColorDepth } from '../../render/sgr.js';
+import type { CursorPosition } from '../../terminal/cursor-report.js';
+import { HeadlessRenderer } from '../headless-renderer.js';
+import {
+  SPINNER_INTERVAL_MS,
+  formatBackgrounded,
+  formatModeChange,
+  formatNotice,
+  formatPermission,
+  formatPermissionOutcome,
+  formatPlan,
+  formatStatus,
+  formatSummary,
+  formatThought,
+  formatTool,
+  shortToolTitle,
+  spinnerFrame,
+  type FormatContext,
+} from './format.js';
+import { parseKeys } from './keys.js';
+import { oneLine, seg, type Line } from './lines.js';
+import { createMarkdownStyle, MessageView, type StableSplit } from './message-view.js';
+import { lineToPaintRow } from './paint-line.js';
+import { toStyledText } from './styled.js';
+import { hasGapBefore, TurnModel, type Block, type LineBlock, type Phase, type PermissionRequest } from './turn-model.js';
+
+/** The host terminal as the agent view uses it. */
+export interface AgentViewHost extends LiveRegionScreen {
+  queryCursorPosition(timeoutMs?: number): Promise<CursorPosition>;
+}
+
+export interface AgentViewOptions {
+  /** Shown in the status line and prompts: `claude`. */
+  readonly agentName: string;
+  /** The shell's working directory; paths are shown relative to it. */
+  readonly cwd: string;
+  readonly home: string;
+  /** Rows kept free above the live region. */
+  readonly marginRows?: number;
+  readonly now?: () => number;
+}
+
+export type AgentAction =
+  | { readonly type: 'answer'; readonly requestId: string; readonly optionId: string | null }
+  | { readonly type: 'cancel' }
+  | { readonly type: 'background' };
+
+/** Frames are coalesced to at most one per this many milliseconds (about 60 fps). */
+const FRAME_MS = 16;
+/** Longest finish() waits for the last frames before giving the terminal back anyway. */
+const FINISH_TIMEOUT_MS = 2000;
+
+type State = 'created' | 'running' | 'finishing' | 'done';
+
+interface BlockViewBase {
+  readonly key: string;
+  readonly root: BoxRenderable;
+  /** What the last sync showed: commits go by what was drawn, not by the model. */
+  syncedFinal: boolean;
+  syncedVersion: number;
+  syncedWidth: number;
+  syncedSpinner: string;
+}
+
+interface MessageBlockView extends BlockViewBase {
+  readonly kind: 'message';
+  readonly message: MessageView;
+}
+
+interface TextBlockView extends BlockViewBase {
+  readonly kind: 'text';
+  readonly text: TextRenderable;
+}
+
+type BlockView = MessageBlockView | TextBlockView;
+
+/** The layout of one frame, read while OpenTUI hands the frame over. */
+interface FrameSnapshot {
+  readonly rows: PaintFrame['rows'];
+  readonly height: number;
+  readonly blocks: ReadonlyArray<{ readonly key: string; readonly bottom: number; readonly final: boolean; readonly split: StableSplit | undefined; readonly top: number }>;
+}
+
+/**
+ * A running agent turn, drawn inline below the user's echoed request.
+ * Finished output goes to scrollback in order; running tool calls, the
+ * streaming paragraph, the plan, permission prompts and the status line stay
+ * in a live region at the bottom that repaints in place.
+ */
+export class AgentView {
+  private readonly model = new TurnModel();
+  private readonly headless: HeadlessRenderer;
+  private readonly region: LiveRegion;
+  private readonly style: SyntaxStyle;
+  private readonly root: BoxRenderable;
+  private readonly blocksBox: BoxRenderable;
+  private readonly extras: TextRenderable;
+  private readonly views = new Map<string, BlockView>();
+  private readonly listeners = new Set<(action: AgentAction) => void>();
+  private readonly now: () => number;
+  /** The agent's name as shown: it comes from config or the daemon, so it is sanitized. */
+  private readonly agentName: string;
+
+  private state: State = 'created';
+  private startedAt = 0;
+  private bufferRows: number;
+  private frameTimer: NodeJS.Timeout | undefined;
+  private spinnerTimer: NodeJS.Timeout | undefined;
+  private lastTickAt = 0;
+  /** A frame was requested and has not been processed yet. */
+  private awaitingFrame = false;
+  /** Something changed while a frame was in flight. */
+  private dirty = false;
+  /** A resize is being handled; nothing is painted until it is. */
+  private paused = false;
+  private selectedOption = 0;
+  private shownRequestId: string | undefined;
+  private idleWaiters: Array<() => void> = [];
+  private stats = { frames: 0, renderMs: 0, firstPaintMs: -1 };
+
+  constructor(
+    private readonly host: AgentViewHost,
+    colorDepth: ColorDepth,
+    private readonly options: AgentViewOptions,
+  ) {
+    this.now = options.now ?? Date.now;
+    this.agentName = oneLine(options.agentName) || 'agent';
+    this.bufferRows = Math.max(48, host.size.rows * 2);
+    this.headless = HeadlessRenderer.create({ width: host.size.cols, height: this.bufferRows });
+    this.region = new LiveRegion(host, colorDepth, { marginRows: options.marginRows ?? 2 });
+    this.style = createMarkdownStyle(this.headless.renderer);
+
+    const renderer = this.headless.renderer;
+    this.root = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
+    this.blocksBox = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
+    this.extras = new TextRenderable(renderer, { content: '', wrapMode: 'none', width: '100%', flexShrink: 0 });
+    this.root.add(this.blocksBox);
+    this.root.add(this.extras);
+    renderer.root.add(this.root);
+    this.headless.onFrame((frame) => this.captureFrame(frame));
+  }
+
+  /** Begin drawing at `anchor`: the row below the echoed request (or the cursor at the end of it). */
+  start(anchor: CursorPosition): void {
+    if (this.state !== 'created') {
+      return;
+    }
+    this.state = 'running';
+    this.startedAt = this.now();
+    this.region.start(anchor);
+    this.spinnerTimer = setInterval(() => this.schedule(), SPINNER_INTERVAL_MS);
+    this.schedule();
+  }
+
+  apply(event: ThreadEvent): void {
+    if (this.state === 'done') {
+      return;
+    }
+    this.model.apply(event);
+    if (event.type === 'turn.ended') {
+      clearInterval(this.spinnerTimer);
+    }
+    this.schedule();
+  }
+
+  /** Keys typed while the turn runs. Returns whether the view used them. */
+  handleInput(data: string): boolean {
+    if (this.state !== 'running' || this.model.ended) {
+      return false;
+    }
+    let consumed = false;
+    for (const key of parseKeys(data)) {
+      if (this.state !== 'running') {
+        break;
+      }
+      if (key.name === 'ctrl-c') {
+        this.stop();
+        consumed = true;
+        continue;
+      }
+      const request = this.model.permissions[0];
+      if (request) {
+        this.handlePermissionKey(request, key);
+        consumed = true;
+        continue;
+      }
+      if (key.name === 'escape') {
+        this.background();
+        consumed = true;
+      }
+    }
+    return consumed;
+  }
+
+  onAction(listener: (action: AgentAction) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Commit what is left, erase the live region and leave the cursor on a
+   * fresh line below everything, ready for the shell prompt.
+   */
+  async finish(): Promise<void> {
+    if (this.state === 'created') {
+      this.state = 'done';
+      return;
+    }
+    if (this.state !== 'running') {
+      return;
+    }
+    this.state = 'finishing';
+    clearInterval(this.spinnerTimer);
+    await Promise.race([
+      this.whenIdle(),
+      new Promise<void>((resolve) => setTimeout(resolve, FINISH_TIMEOUT_MS).unref()),
+    ]);
+    this.close();
+  }
+
+  /**
+   * Re-anchor and reflow after the terminal was resized. Call once the size
+   * has settled; it asks the terminal where the cursor (parked on the live
+   * region) ended up.
+   */
+  async relayout(): Promise<void> {
+    if (this.state !== 'running' && this.state !== 'finishing') {
+      return;
+    }
+    this.paused = true;
+    let cursor: CursorPosition;
+    try {
+      cursor = await this.host.queryCursorPosition();
+    } catch {
+      cursor = this.region.anchor;
+    }
+    // The view may have been finished or destroyed while the terminal answered.
+    if ((this.state as State) === 'done') {
+      return;
+    }
+    this.region.relayout(cursor);
+    this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
+    this.paused = false;
+    this.schedule();
+  }
+
+  destroy(): void {
+    this.state = 'done';
+    clearTimeout(this.frameTimer);
+    clearInterval(this.spinnerTimer);
+    this.releaseIdleWaiters();
+    this.headless.destroy();
+  }
+
+  /** Rendering costs so far, for measurements. */
+  get renderStats(): { readonly frames: number; readonly averageFrameMs: number; readonly firstPaintMs: number } {
+    return {
+      frames: this.stats.frames,
+      averageFrameMs: this.stats.frames ? this.stats.renderMs / this.stats.frames : 0,
+      firstPaintMs: this.stats.firstPaintMs,
+    };
+  }
+
+  // ─── Input ────────────────────────────────────────────────────────────────
+
+  private handlePermissionKey(request: PermissionRequest, key: ReturnType<typeof parseKeys>[number]): void {
+    const count = request.options.length;
+    const move = (step: number): void => {
+      if (count > 0) {
+        this.selectedOption = (this.selectedOption + step + count) % count;
+        this.schedule();
+      }
+    };
+    switch (key.name) {
+      case 'left':
+      case 'up':
+      case 'shift-tab':
+        move(-1);
+        return;
+      case 'right':
+      case 'down':
+      case 'tab':
+        move(1);
+        return;
+      case 'enter':
+        this.answer(request, request.options[this.selectedOption]?.optionId ?? null);
+        return;
+      case 'escape':
+        this.answer(request, firstOption(request, 'reject')?.optionId ?? null);
+        return;
+      case 'char': {
+        const char = key.char.toLowerCase();
+        if (/^[1-9]$/.test(char)) {
+          const option = request.options[Number(char) - 1];
+          if (option) {
+            this.answer(request, option.optionId);
+          }
+        } else if (char === 'y') {
+          const option = firstOption(request, 'allow');
+          if (option) {
+            this.answer(request, option.optionId);
+          }
+        } else if (char === 'n') {
+          this.answer(request, firstOption(request, 'reject')?.optionId ?? null);
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  private answer(request: PermissionRequest, optionId: string | null): void {
+    this.model.answer(request.requestId, optionId);
+    this.emit({ type: 'answer', requestId: request.requestId, optionId });
+    this.schedule();
+  }
+
+  private stop(): void {
+    this.model.stopping = true;
+    this.emit({ type: 'cancel' });
+    this.schedule();
+  }
+
+  /** Hand the terminal back while the agent keeps working. */
+  private background(): void {
+    this.emit({ type: 'background' });
+    this.state = 'finishing';
+    clearInterval(this.spinnerTimer);
+    clearTimeout(this.frameTimer);
+    const row = lineToPaintRow(formatBackgrounded(this.formatContext()));
+    this.region.update([row], []);
+    this.close();
+  }
+
+  private emit(action: AgentAction): void {
+    for (const listener of this.listeners) {
+      listener(action);
+    }
+  }
+
+  // ─── Frames ───────────────────────────────────────────────────────────────
+
+  private schedule(): void {
+    if (this.state === 'created' || this.state === 'done') {
+      return;
+    }
+    if (this.awaitingFrame || this.paused) {
+      this.dirty = true;
+      return;
+    }
+    if (this.frameTimer) {
+      return;
+    }
+    const wait = Math.max(0, FRAME_MS - (this.now() - this.lastTickAt));
+    this.frameTimer = setTimeout(() => {
+      this.frameTimer = undefined;
+      this.tick();
+    }, wait);
+  }
+
+  private tick(): void {
+    if (this.state === 'created' || this.state === 'done') {
+      return;
+    }
+    if (this.awaitingFrame || this.paused) {
+      this.dirty = true;
+      return;
+    }
+    this.lastTickAt = this.now();
+    this.dirty = false;
+    this.sync();
+    this.awaitingFrame = true;
+    this.headless.requestRender();
+  }
+
+  /** Bring the OpenTUI tree up to date with the model. */
+  private sync(): void {
+    const context = this.formatContext();
+    const { blocks, committed } = this.model;
+    const liveKeys = new Set<string>();
+
+    for (let index = committed; index < blocks.length; index++) {
+      const block = blocks[index]!;
+      liveKeys.add(block.key);
+      let view = this.views.get(block.key);
+      if (!view) {
+        view = this.createView(block);
+        this.views.set(block.key, view);
+      }
+      // Blocks can be inserted mid-list (a permission outcome above its tool); keep the tree in order.
+      const position = index - committed;
+      if (this.blocksBox.getChildren()[position] !== view.root) {
+        this.blocksBox.add(view.root, position);
+      }
+      this.updateView(view, block, blocks[index - 1], context);
+    }
+
+    for (const [key, view] of this.views) {
+      if (!liveKeys.has(key)) {
+        this.destroyView(key, view);
+      }
+    }
+
+    this.extras.content = toStyledText(this.extraLines(context));
+  }
+
+  private createView(block: Block): BlockView {
+    const renderer = this.headless.renderer;
+    const base = { key: block.key, syncedFinal: false, syncedVersion: -1, syncedWidth: -1, syncedSpinner: '' };
+    if (block.kind === 'message') {
+      const message = new MessageView(renderer, this.style);
+      return { ...base, kind: 'message', root: message.root, message };
+    }
+    const root = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
+    const text = new TextRenderable(renderer, { content: '', wrapMode: 'none', width: '100%', flexShrink: 0 });
+    root.add(text);
+    return { ...base, kind: 'text', root, text };
+  }
+
+  private updateView(view: BlockView, block: Block, previous: Block | undefined, context: FormatContext): void {
+    const gap = hasGapBefore(previous, block);
+    if (view.kind === 'message' && block.kind === 'message') {
+      view.message.gapBefore = gap;
+      if (view.syncedVersion !== block.version) {
+        view.message.update(block.text, block.final);
+      }
+    } else if (view.kind === 'text') {
+      view.root.marginTop = gap ? 1 : 0;
+      const animated = block.kind === 'tool' && block.tool.status === 'in_progress' && !block.stopped;
+      const spinnerChanged = animated && view.syncedSpinner !== context.spinner;
+      if (view.syncedVersion !== block.version || view.syncedWidth !== context.width || spinnerChanged) {
+        view.text.content = toStyledText(this.blockLines(block, context));
+      }
+    }
+    view.syncedFinal = block.final;
+    view.syncedVersion = block.version;
+    view.syncedWidth = context.width;
+    view.syncedSpinner = context.spinner;
+  }
+
+  private destroyView(key: string, view: BlockView): void {
+    this.views.delete(key);
+    if (view.kind === 'message') {
+      view.message.destroy();
+    } else {
+      view.root.destroyRecursively();
+    }
+  }
+
+  private captureFrame(frame: PaintFrame): void {
+    if (!this.awaitingFrame) {
+      // OpenTUI drew on its own; nothing changed that was not painted already.
+      return;
+    }
+    const top = this.root.y;
+    const blocks = this.model.blocks.slice(this.model.committed).flatMap((block) => {
+      const view = this.views.get(block.key);
+      if (!view) {
+        return [];
+      }
+      return [{
+        key: block.key,
+        top: view.root.y - top,
+        bottom: view.root.y + view.root.height - top,
+        final: view.syncedFinal,
+        split: view.kind === 'message' && !view.syncedFinal ? shiftSplit(view.message.stableSplit(), view.message.markdown.y - top) : undefined,
+      }];
+    });
+    const snapshot: FrameSnapshot = { rows: frame.rows, height: this.root.height, blocks };
+    const startedAt = performance.now();
+    // Let OpenTUI finish its frame before the tree changes.
+    queueMicrotask(() => {
+      this.processFrame(snapshot);
+      this.stats.renderMs += performance.now() - startedAt;
+    });
+  }
+
+  private processFrame(snapshot: FrameSnapshot): void {
+    this.awaitingFrame = false;
+    if (this.state === 'done' || this.state === 'created') {
+      return;
+    }
+    if (this.paused) {
+      this.dirty = true;
+      return;
+    }
+    if (snapshot.height > snapshot.rows.length) {
+      // The live content outgrew the buffer: grow it and draw again.
+      this.bufferRows = snapshot.height + this.host.size.rows;
+      this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
+      this.dirty = true;
+      this.afterFrame();
+      return;
+    }
+
+    // The stable prefix, by what this frame drew: blocks in order, up to the first one not final.
+    let commitEnd = 0;
+    let committedBlocks = 0;
+    for (const block of snapshot.blocks) {
+      if (!block.final) {
+        break;
+      }
+      commitEnd = block.bottom;
+      committedBlocks++;
+    }
+    // A streaming message right after the stable prefix can give up its finished blocks too.
+    const streaming = snapshot.blocks[committedBlocks];
+    let split: { key: string; split: StableSplit } | undefined;
+    if (streaming?.split && streaming.split.row > commitEnd) {
+      split = { key: streaming.key, split: streaming.split };
+      commitEnd = streaming.split.row;
+    }
+
+    const commit = snapshot.rows.slice(0, commitEnd);
+    const live = this.clip(snapshot.rows.slice(commitEnd, snapshot.height));
+    this.region.update(commit, live);
+    this.stats.frames++;
+    if (this.stats.firstPaintMs < 0) {
+      this.stats.firstPaintMs = this.now() - this.startedAt;
+    }
+
+    if (committedBlocks > 0) {
+      const end = this.model.committed + committedBlocks;
+      for (const block of this.model.blocks.slice(this.model.committed, end)) {
+        const view = this.views.get(block.key);
+        if (view) {
+          this.destroyView(block.key, view);
+        }
+      }
+      this.model.markCommitted(end);
+      this.dirty = true;
+    }
+    if (split) {
+      const view = this.views.get(split.key);
+      if (view?.kind === 'message') {
+        view.message.cut(split.split.byteOffset);
+        this.dirty = true;
+      }
+    }
+    this.afterFrame();
+  }
+
+  private afterFrame(): void {
+    if (this.dirty) {
+      this.schedule();
+      return;
+    }
+    if (this.isIdle()) {
+      this.releaseIdleWaiters();
+    }
+  }
+
+  /** The live rows, cut to the tail that fits, with a note saying how much is above. */
+  private clip(rows: readonly PaintRow[]): readonly PaintRow[] {
+    const max = this.region.maxLiveRows;
+    if (rows.length <= max) {
+      return rows;
+    }
+    const kept = rows.slice(rows.length - (max - 1));
+    const hidden = rows.length - kept.length;
+    const note = lineToPaintRow([seg(`  ⋮ ${hidden} more line${hidden === 1 ? '' : 's'} above, in scrollback when done`, 'muted')]);
+    return [note, ...kept];
+  }
+
+  private isIdle(): boolean {
+    return !this.awaitingFrame && !this.dirty && !this.frameTimer
+      && this.model.stablePrefixEnd === this.model.committed
+      && this.model.blocks.slice(this.model.committed).every((block) => this.views.get(block.key)?.syncedVersion === block.version);
+  }
+
+  private whenIdle(): Promise<void> {
+    if (this.isIdle() && this.model.committed === this.model.blocks.length) {
+      return Promise.resolve();
+    }
+    this.schedule();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
+  }
+
+  private releaseIdleWaiters(): void {
+    const waiters = this.idleWaiters;
+    this.idleWaiters = [];
+    for (const resolve of waiters) {
+      resolve();
+    }
+  }
+
+  private close(): void {
+    this.region.finish();
+    this.state = 'done';
+    clearTimeout(this.frameTimer);
+    this.frameTimer = undefined;
+    clearInterval(this.spinnerTimer);
+    this.releaseIdleWaiters();
+  }
+
+  // ─── Formatting ───────────────────────────────────────────────────────────
+
+  private formatContext(): FormatContext {
+    return {
+      cwd: this.options.cwd,
+      home: this.options.home,
+      width: this.host.size.cols,
+      agentName: this.agentName,
+      spinner: spinnerFrame(this.now()),
+    };
+  }
+
+  private blockLines(block: Block, context: FormatContext): Line[] {
+    switch (block.kind) {
+      case 'tool':
+        return formatTool(block.tool, context, { stopped: block.stopped, permission: block.permission });
+      case 'line':
+        return lineBlockLines(block, context);
+      case 'message':
+        return [];
+    }
+  }
+
+  /** The live rows under the blocks: plan, permission prompt, thought and status. */
+  private extraLines(context: FormatContext): Line[] {
+    const lines: Line[] = [];
+    const hasContentAbove = (): boolean => lines.length > 0 || this.model.blocks.length > this.model.committed || this.model.committed > 0;
+    const gap = (): void => {
+      if (hasContentAbove()) {
+        lines.push([]);
+      }
+    };
+
+    const { plan, ended } = this.model;
+    if (plan && plan.length > 0 && !ended) {
+      gap();
+      lines.push(...formatPlan(plan, context.width));
+    }
+
+    const request = this.model.permissions[0];
+    if (request?.requestId !== this.shownRequestId) {
+      this.shownRequestId = request?.requestId;
+      this.selectedOption = 0;
+    }
+    if (request && !ended) {
+      gap();
+      lines.push(...formatPermission({ title: request.title, options: request.options, selected: this.selectedOption }, context));
+    }
+
+    if (!ended && this.state !== 'finishing') {
+      lines.push([]);
+      const phase = this.model.phase;
+      if (this.model.thought && phase.type === 'thinking') {
+        const thought = formatThought(this.model.thought, context.width);
+        if (thought) {
+          lines.push(thought);
+        }
+      }
+      const startedAt = this.model.startedAt ?? this.startedAt;
+      lines.push(formatStatus({
+        phase: phaseText(phase, this.agentName, context),
+        elapsedMs: this.now() - Math.min(startedAt, this.now()),
+        hints: phase.type === 'waiting'
+          ? ['←→ select · enter confirm · esc reject', 'enter confirm · esc reject', 'enter · esc']
+          : phase.type === 'stopping' ? [] : ['esc background · ^c stop', 'esc · ^c'],
+      }, context));
+    }
+    return lines;
+  }
+}
+
+const firstOption = (request: PermissionRequest, type: 'allow' | 'reject') =>
+  request.options.find((option) => option.kind.startsWith(type));
+
+const shiftSplit = (split: StableSplit | undefined, offset: number): StableSplit | undefined =>
+  split && { row: split.row + offset, byteOffset: split.byteOffset };
+
+const phaseText = (phase: Phase, agentName: string, context: FormatContext): string => {
+  switch (phase.type) {
+    case 'starting':
+      return `Starting ${agentName}…`;
+    case 'thinking':
+    case 'ended':
+      return 'Thinking';
+    case 'writing':
+      return 'Writing';
+    case 'running':
+      return `Running ${shortToolTitle(phase.tool, context, Math.max(12, Math.floor(context.width / 2) - 12))}`;
+    case 'waiting':
+      return 'Waiting for you';
+    case 'stopping':
+      return 'Stopping…';
+  }
+};
+
+export const lineBlockLines = (block: LineBlock, context: FormatContext): Line[] => {
+  const { content } = block;
+  switch (content.type) {
+    case 'notice':
+      return [formatNotice(content.level, content.text, context.width)];
+    case 'mode':
+      return [formatModeChange(content.name, context.width)];
+    case 'permission':
+      return [formatPermissionOutcome(content.title, content.outcome, context)];
+    case 'plan':
+      return formatPlan(content.entries, context.width);
+    case 'summary':
+      return [formatSummary(content.ended, content.toolCount, context)];
+  }
+};

@@ -1,0 +1,50 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "One streamed answer that uses every markdown feature: headings, lists, quote, table, code, tasks, links.",
+  "prompt": "why did the build fail",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "why did the build fail",
+        "at": 0
+      }
+    },
+    {
+      "after": 500,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m0",
+        "kind": "thought",
+        "text": "Let me look at the build output and the file it points to.",
+        "chunk": 8,
+        "every": 30
+      }
+    },
+    {
+      "after": 700,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "# Why the build failed\n\nThe build stopped at **type checking**: `tsc` found *one* error in `src/api/client.ts`, so no bundle was written.\n\n## What happened\n\n1. `pnpm build` runs `tsc --noEmit` before bundling.\n2. `fetchUser()` now returns `Promise<User | undefined>`, but `Profile.tsx` still treats it as `User`.\n   - The change came in with the cache layer.\n   - Nothing else depends on it.\n3. The bundler never ran.\n\n> Type errors fail the build on purpose here: `noEmitOnError` is on in `tsconfig.json`.\n\n| File | Line | Error |\n|------|-----:|-------|\n| `src/pages/Profile.tsx` | 42 | TS2532: Object is possibly 'undefined' |\n| `src/api/client.ts` | 17 | (source of the change) |\n\n### The fix\n\nHandle the missing user where it is read:\n\n```tsx\nconst user = await fetchUser(id);\nif (!user) {\n  return <NotFound />; // the cache can miss\n}\nreturn <ProfileCard user={user} />;\n```\n\nThen rebuild:\n\n```sh\npnpm build && pnpm test --filter profile   # about 40s\n```\n\n- [x] Found the failing check\n- [ ] Apply the fix\n- [ ] Re-run the build\n\nSee the [TypeScript handbook on narrowing](https://www.typescriptlang.org/docs/handbook/2/narrowing.html) for why the `if` is enough. Unicode check: 漢字 and 🚀 line up.\n\n---\n\n~~Disabling strict mode~~ would hide this class of bug, so I would not.\n",
+        "chunk": 6,
+        "every": 12
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "end_turn",
+        "error": null,
+        "durationMs": 9400
+      }
+    }
+  ]
+}

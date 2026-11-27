@@ -1,5 +1,6 @@
 import { ansi } from '../terminal/ansi.js';
 import type { CursorPosition } from '../terminal/cursor-report.js';
+import { hasCellControls, stripCellControls } from './sanitize.js';
 import { isBlankStyle, styleToSgr, type CellStyle, type ColorDepth } from './sgr.js';
 
 /** A run of identically styled cells. */
@@ -31,11 +32,25 @@ export class InlinePainter {
   constructor(private readonly colorDepth: ColorDepth) {}
 
   paint(frame: PaintFrame, anchor: CursorPosition): string {
+    let output = this.paintRows(frame.rows, anchor);
+
+    const { cursor } = frame;
+    output += ansi.cursorTo(anchor.row + cursor.row - 1, cursor.col);
+    output += cursor.visible ? ansi.showCursor : '';
+
+    return ansi.beginSynchronizedUpdate + ansi.hideCursor + output + ansi.endSynchronizedUpdate;
+  }
+
+  /**
+   * The rows alone: no synchronized-update wrapper and no cursor placement,
+   * for callers that combine them with other output in one update.
+   */
+  paintRows(rows: PaintFrame['rows'], anchor: CursorPosition): string {
     let output = '';
 
-    frame.rows.forEach((spans, index) => {
+    rows.forEach((spans, index) => {
       const startCol = index === 0 ? anchor.col : 1;
-      const content = this.encodeRow(spans, startCol - 1);
+      const content = encodeRow(spans, this.colorDepth, startCol - 1);
       if (this.painted[index] === content) {
         return;
       }
@@ -43,16 +58,12 @@ export class InlinePainter {
       this.painted[index] = content;
     });
 
-    for (let index = frame.rows.length; index < this.painted.length; index++) {
+    for (let index = rows.length; index < this.painted.length; index++) {
       output += ansi.cursorTo(anchor.row + index, 1) + ansi.eraseLine;
     }
-    this.painted.length = Math.min(this.painted.length, frame.rows.length);
+    this.painted.length = Math.min(this.painted.length, rows.length);
 
-    const { cursor } = frame;
-    output += ansi.cursorTo(anchor.row + cursor.row - 1, cursor.col);
-    output += cursor.visible ? ansi.showCursor : '';
-
-    return ansi.beginSynchronizedUpdate + ansi.hideCursor + output + ansi.endSynchronizedUpdate;
+    return output;
   }
 
   /** Erase everything from the anchor down and leave the cursor on the anchor. */
@@ -65,12 +76,27 @@ export class InlinePainter {
   invalidate(): void {
     this.painted = [];
   }
-
-  private encodeRow(spans: ReadonlyArray<PaintSpan>, skipCells: number): string {
-    const visible = trimTrailingBlanks(skipLeadingCells(spans, skipCells));
-    return visible.map((span) => styleToSgr(span.style, this.colorDepth) + span.text).join('');
-  }
 }
+
+/**
+ * One row as styled text with its trailing blanks dropped, so a terminal that
+ * reflows it on resize has nothing extra to wrap. The first `skipCells` cells
+ * are left out (they belong to whatever sits left of the anchor).
+ */
+export const encodeRow = (spans: ReadonlyArray<PaintSpan>, colorDepth: ColorDepth, skipCells = 0): string => {
+  const visible = trimTrailingBlanks(skipCells > 0 ? skipLeadingCells(spans, skipCells) : [...spans]);
+  let output = '';
+  let lastSgr = '';
+  for (const span of visible) {
+    const sgr = styleToSgr(span.style, colorDepth);
+    // The last stop before the terminal: a control character in cell text would act, not show.
+    const text = hasCellControls(span.text) ? stripCellControls(span.text) : span.text;
+    // Neighbouring spans that encode alike (common at reduced colour depths) share one sequence.
+    output += (sgr === lastSgr ? '' : sgr) + text;
+    lastSgr = sgr;
+  }
+  return output;
+};
 
 /** Drop the first `cells` cells of a row. */
 const skipLeadingCells = (spans: ReadonlyArray<PaintSpan>, cells: number): PaintSpan[] => {

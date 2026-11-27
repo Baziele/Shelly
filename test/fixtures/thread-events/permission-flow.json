@@ -1,0 +1,225 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "Two permission prompts: one allowed with arrow keys and enter, one rejected with n.",
+  "prompt": "clean up the build output and remove the old lockfile",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "clean up the build output and remove the old lockfile",
+        "at": 0
+      }
+    },
+    {
+      "after": 600,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "I'll delete `dist/` and the stale `package-lock.json` (the project uses pnpm).",
+        "chunk": 5,
+        "every": 14
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`rm -rf dist`",
+          "kind": "execute",
+          "status": "pending",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 150,
+      "event": {
+        "type": "permission.requested",
+        "turnId": "t1",
+        "requestId": "p1",
+        "toolCallId": "tc1",
+        "title": "`rm -rf dist`",
+        "options": [
+          {
+            "optionId": "allow",
+            "name": "Allow once",
+            "kind": "allow_once"
+          },
+          {
+            "optionId": "always",
+            "name": "Allow always",
+            "kind": "allow_always"
+          },
+          {
+            "optionId": "reject",
+            "name": "Reject",
+            "kind": "reject_once"
+          }
+        ]
+      }
+    },
+    {
+      "after": 1400,
+      "keys": "\u001b[C"
+    },
+    {
+      "after": 700,
+      "keys": "\u001b[D"
+    },
+    {
+      "after": 600,
+      "keys": "\r"
+    },
+    {
+      "after": 150,
+      "event": {
+        "type": "permission.resolved",
+        "turnId": "t1",
+        "requestId": "p1",
+        "optionId": "allow"
+      }
+    },
+    {
+      "after": 100,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`rm -rf dist`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 400,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`rm -rf dist`",
+          "kind": "execute",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Delete /home/dev/acme-web/package-lock.json",
+          "kind": "delete",
+          "status": "pending",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 100,
+      "event": {
+        "type": "permission.requested",
+        "turnId": "t1",
+        "requestId": "p2",
+        "toolCallId": "tc2",
+        "title": "Delete /home/dev/acme-web/package-lock.json",
+        "options": [
+          {
+            "optionId": "allow",
+            "name": "Allow once",
+            "kind": "allow_once"
+          },
+          {
+            "optionId": "always",
+            "name": "Allow always",
+            "kind": "allow_always"
+          },
+          {
+            "optionId": "reject",
+            "name": "Reject",
+            "kind": "reject_once"
+          }
+        ]
+      }
+    },
+    {
+      "after": 1500,
+      "keys": "n"
+    },
+    {
+      "after": 150,
+      "event": {
+        "type": "permission.resolved",
+        "turnId": "t1",
+        "requestId": "p2",
+        "optionId": "reject"
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Delete /home/dev/acme-web/package-lock.json",
+          "kind": "delete",
+          "status": "failed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "The user rejected this action.",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m2",
+        "kind": "text",
+        "text": "Removed `dist/`. I left `package-lock.json` in place since you rejected deleting it.",
+        "chunk": 5,
+        "every": 14
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "end_turn",
+        "error": null,
+        "durationMs": 8800
+      }
+    }
+  ]
+}

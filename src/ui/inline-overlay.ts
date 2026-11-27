@@ -5,10 +5,20 @@ import { ansi } from '../terminal/ansi.js';
 import type { CursorPosition } from '../terminal/cursor-report.js';
 import type { HostTerminal } from '../terminal/host-terminal.js';
 import { HeadlessRenderer } from './headless-renderer.js';
-import { MAX_VIEW_ROWS, PromptView } from './prompt-view.js';
+import type { PickerItem } from './list-picker.js';
+import { MAX_VIEW_ROWS, PromptView, type PickerRequest, type PromptMode } from './prompt-view.js';
 
 /** Below this many free columns after the prompt, the input moves to its own row. */
 const MIN_INLINE_INPUT_COLS = 24;
+
+export interface OverlayOpenOptions {
+  /** Defaults from the trigger: `__` is fast mode. */
+  readonly mode?: PromptMode;
+  /** Fast mode from a half-typed command: the command being rewritten. */
+  readonly rewriting?: string;
+  /** Right-aligned on the input row: where `::` will go. */
+  readonly hint?: string;
+}
 
 export interface InlineOverlayHandlers {
   readonly onSubmit: (text: string) => void;
@@ -59,7 +69,7 @@ export class InlineOverlay {
    * Take over the input line at `cursor` (the end of the shell prompt).
    * `initialInput` is anything typed after the trigger before the overlay was ready.
    */
-  open(cursor: CursorPosition, trigger: string, initialInput: string): void {
+  open(cursor: CursorPosition, trigger: string, initialInput: string, options: OverlayOpenOptions = {}): void {
     const { cols } = this.host.size;
     const fitsInline = cols - cursor.col + 1 >= MIN_INLINE_INPUT_COLS;
     const anchor = fitsInline ? { ...cursor } : { row: cursor.row + 1, col: 1 };
@@ -67,10 +77,52 @@ export class InlineOverlay {
     this.session = { origin: { ...cursor }, anchor, lastCursor: undefined };
     this.headless.resize({ width: cols, height: MAX_VIEW_ROWS });
     this.painter.invalidate();
-    this.view.open({ inputCol: anchor.col, trigger });
+    this.view.open({ inputCol: anchor.col, trigger, ...options });
     if (initialInput) {
       this.headless.feed(initialInput);
     }
+    this.headless.requestRender();
+  }
+
+  /** Where `::` will go, shown right-aligned on the input row. */
+  setHint(hint: string | undefined): void {
+    this.update(() => this.view.setHint(hint));
+  }
+
+  /** Fast mode: the request is running (spinner, typing paused) or not. */
+  setBusy(busy: boolean): void {
+    this.update(() => this.view.setBusy(busy));
+  }
+
+  /** Fast mode: the reply so far. */
+  setPreview(text: string): void {
+    this.update(() => this.view.setPreview(text));
+  }
+
+  /** Fast mode: the request failed; the input stays open to retry. */
+  setError(message: string): void {
+    this.update(() => this.view.setError(message));
+  }
+
+  /** A list to pick from (/threads, /agent, /mode); the input filters it. */
+  openPicker(request: PickerRequest): void {
+    this.update(() => this.view.openPicker({
+      ...request,
+      // Picking or closing happens mid-dispatch inside OpenTUI, like submit.
+      onPick: (item: PickerItem) => queueMicrotask(() => request.onPick(item)),
+      onClose: () => queueMicrotask(() => request.onClose()),
+    }));
+  }
+
+  closePicker(): void {
+    this.update(() => this.view.closePicker());
+  }
+
+  private update(change: () => void): void {
+    if (!this.session) {
+      return;
+    }
+    change();
     this.headless.requestRender();
   }
 
@@ -116,6 +168,7 @@ export class InlineOverlay {
 
   destroy(): void {
     this.session = undefined;
+    this.view.destroy();
     this.headless.destroy();
   }
 

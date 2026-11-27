@@ -1,0 +1,58 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "The user presses Ctrl-C mid-stream; the phase shows Stopping… until the turn ends.",
+  "prompt": "rewrite the README",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "rewrite the README",
+        "at": 0
+      }
+    },
+    {
+      "after": 500,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "Here is a new README.\n\n# Acme Web\n\nAcme Web is the customer-facing storefront. It is a React app served by a small Node server, with the API in a separate repository.\n\n## Getting started\n\nYou need Node 22 and pnpm 9. Clone the repo, then install and start the dev server:",
+        "chunk": 4,
+        "every": 30
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "Write /home/dev/acme-web/README.md",
+          "kind": "edit",
+          "status": "pending",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 500,
+      "keys": "\u0003"
+    },
+    {
+      "after": 900,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "cancelled",
+        "error": null,
+        "durationMs": 3900
+      }
+    }
+  ]
+}

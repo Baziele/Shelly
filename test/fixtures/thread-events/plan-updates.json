@@ -1,0 +1,247 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "A plan that updates in place while tools run, committed in its final state at the end.",
+  "prompt": "make sessions last 30 minutes",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "make sessions last 30 minutes",
+        "at": 0
+      }
+    },
+    {
+      "after": 500,
+      "event": {
+        "type": "plan.updated",
+        "turnId": "t1",
+        "entries": [
+          {
+            "content": "Find where the session timeout is configured",
+            "priority": "high",
+            "status": "in_progress"
+          },
+          {
+            "content": "Raise it to 30 minutes",
+            "priority": "medium",
+            "status": "pending"
+          },
+          {
+            "content": "Update the docs",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "after": 500,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "grep -rn \"SESSION_TTL\" /home/dev/acme-web/src",
+          "kind": "search",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 700,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "grep -rn \"SESSION_TTL\" /home/dev/acme-web/src",
+          "kind": "search",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "src/server/session.ts:4\nsrc/server/session.test.ts:9",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "plan.updated",
+        "turnId": "t1",
+        "entries": [
+          {
+            "content": "Find where the session timeout is configured",
+            "priority": "high",
+            "status": "completed"
+          },
+          {
+            "content": "Raise it to 30 minutes",
+            "priority": "medium",
+            "status": "in_progress"
+          },
+          {
+            "content": "Update the docs",
+            "priority": "low",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "after": 400,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Edit /home/dev/acme-web/src/server/session.ts",
+          "kind": "edit",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 800,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Edit /home/dev/acme-web/src/server/session.ts",
+          "kind": "edit",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "diff",
+              "path": "/home/dev/acme-web/src/server/session.ts",
+              "oldText": "export const SESSION_TTL = 15 * 60;\n",
+              "newText": "export const SESSION_TTL = 30 * 60;\n",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "plan.updated",
+        "turnId": "t1",
+        "entries": [
+          {
+            "content": "Find where the session timeout is configured",
+            "priority": "high",
+            "status": "completed"
+          },
+          {
+            "content": "Raise it to 30 minutes",
+            "priority": "medium",
+            "status": "completed"
+          },
+          {
+            "content": "Update the docs",
+            "priority": "low",
+            "status": "in_progress"
+          }
+        ]
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc3",
+          "title": "Edit /home/dev/acme-web/docs/auth.md",
+          "kind": "edit",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 700,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc3",
+          "title": "Edit /home/dev/acme-web/docs/auth.md",
+          "kind": "edit",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "diff",
+              "path": "/home/dev/acme-web/docs/auth.md",
+              "oldText": "Sessions expire after 15 minutes of inactivity.\n",
+              "newText": "Sessions expire after 30 minutes of inactivity.\n",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "plan.updated",
+        "turnId": "t1",
+        "entries": [
+          {
+            "content": "Find where the session timeout is configured",
+            "priority": "high",
+            "status": "completed"
+          },
+          {
+            "content": "Raise it to 30 minutes",
+            "priority": "medium",
+            "status": "completed"
+          },
+          {
+            "content": "Update the docs",
+            "priority": "low",
+            "status": "completed"
+          }
+        ]
+      }
+    },
+    {
+      "after": 300,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "Sessions now last **30 minutes** (`SESSION_TTL` in `src/server/session.ts`), and `docs/auth.md` says so.",
+        "chunk": 5,
+        "every": 14
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "end_turn",
+        "error": null,
+        "durationMs": 7600
+      }
+    }
+  ]
+}

@@ -1,0 +1,443 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "agent",
+  "description": "Tests run and fail, files are read and searched, an edit with a diff, tests pass, notices.",
+  "prompt": "run the tests and fix what fails",
+  "steps": [
+    {
+      "event": {
+        "type": "turn.started",
+        "turnId": "t1",
+        "text": "run the tests and fix what fails",
+        "at": 0
+      }
+    },
+    {
+      "after": 400,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "th1",
+        "kind": "thought",
+        "text": "I'll run the test suite first to see what is failing.",
+        "chunk": 7,
+        "every": 30
+      }
+    },
+    {
+      "after": 600,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "pending",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 150,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 260,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "> acme-web@1.4.0 test\n> vitest run\n",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 260,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "> acme-web@1.4.0 test\n> vitest run\n\n RUN  v2.1.4 /home/dev/acme-web\n\n ✓ src/auth/auth.test.ts (3 tests) 12ms",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 260,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "> acme-web@1.4.0 test\n> vitest run\n\n RUN  v2.1.4 /home/dev/acme-web\n\n ✓ src/auth/auth.test.ts (3 tests) 12ms\n ✓ src/cart/cart.test.ts (4 tests) 19ms\n ✓ src/checkout/checkout.test.ts (5 tests) 26ms\n ✓ src/profile/profile.test.ts (6 tests) 33ms",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 260,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "> acme-web@1.4.0 test\n> vitest run\n\n RUN  v2.1.4 /home/dev/acme-web\n\n ✓ src/auth/auth.test.ts (3 tests) 12ms\n ✓ src/cart/cart.test.ts (4 tests) 19ms\n ✓ src/checkout/checkout.test.ts (5 tests) 26ms\n ✓ src/profile/profile.test.ts (6 tests) 33ms\n ✓ src/search/search.test.ts (7 tests) 40ms\n ❯ src/profile/profile.test.ts (4 tests | 1 failed) 31ms\n   × renders the user card",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 260,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "> acme-web@1.4.0 test\n> vitest run\n\n RUN  v2.1.4 /home/dev/acme-web\n\n ✓ src/auth/auth.test.ts (3 tests) 12ms\n ✓ src/cart/cart.test.ts (4 tests) 19ms\n ✓ src/checkout/checkout.test.ts (5 tests) 26ms\n ✓ src/profile/profile.test.ts (6 tests) 33ms\n ✓ src/search/search.test.ts (7 tests) 40ms\n ❯ src/profile/profile.test.ts (4 tests | 1 failed) 31ms\n   × renders the user card\n     → TypeError: Cannot read properties of undefined (reading 'name')\n\n Test Files  1 failed | 5 passed (6)",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc1",
+          "title": "`pnpm test`",
+          "kind": "execute",
+          "status": "failed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "> acme-web@1.4.0 test\n> vitest run\n\n RUN  v2.1.4 /home/dev/acme-web\n\n ✓ src/auth/auth.test.ts (3 tests) 12ms\n ✓ src/cart/cart.test.ts (4 tests) 19ms\n ✓ src/checkout/checkout.test.ts (5 tests) 26ms\n ✓ src/profile/profile.test.ts (6 tests) 33ms\n ✓ src/search/search.test.ts (7 tests) 40ms\n ❯ src/profile/profile.test.ts (4 tests | 1 failed) 31ms\n   × renders the user card\n     → TypeError: Cannot read properties of undefined (reading 'name')\n\n Test Files  1 failed | 5 passed (6)\n      Tests  1 failed | 24 passed (25)",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m1",
+        "kind": "text",
+        "text": "One test fails: `profile.test.ts` renders a card for a user that the mock returns as `undefined`. Let me look at the component and its test.",
+        "chunk": 5,
+        "every": 14
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Read /home/dev/acme-web/src/pages/Profile.tsx",
+          "kind": "read",
+          "status": "pending",
+          "locations": [
+            {
+              "path": "/home/dev/acme-web/src/pages/Profile.tsx",
+              "line": null
+            }
+          ],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 120,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc3",
+          "title": "Read /home/dev/acme-web/src/profile/profile.test.ts",
+          "kind": "read",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 180,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc2",
+          "title": "Read /home/dev/acme-web/src/pages/Profile.tsx",
+          "kind": "read",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nline 75\nline 76\nline 77\nline 78\nline 79\nline 80\nline 81\nline 82\nline 83\nline 84\nline 85\nline 86\nline 87",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 150,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc3",
+          "title": "Read /home/dev/acme-web/src/profile/profile.test.ts",
+          "kind": "read",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc4",
+          "title": "grep -rn \"fetchUser(\" /home/dev/acme-web/src",
+          "kind": "search",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc4",
+          "title": "grep -rn \"fetchUser(\" /home/dev/acme-web/src",
+          "kind": "search",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": "src/api/client.ts:17\nsrc/pages/Profile.tsx:40\nsrc/pages/Settings.tsx:12",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 150,
+      "event": {
+        "type": "notice",
+        "turnId": "t1",
+        "level": "info",
+        "text": "Context compacted: 48k tokens → 12k"
+      }
+    },
+    {
+      "after": 400,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc5",
+          "title": "Edit /home/dev/acme-web/src/pages/Profile.tsx",
+          "kind": "edit",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 500,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc5",
+          "title": "Edit /home/dev/acme-web/src/pages/Profile.tsx",
+          "kind": "edit",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "diff",
+              "path": "/home/dev/acme-web/src/pages/Profile.tsx",
+              "oldText": "export async function Profile({ id }: Props) {\n  const user = await fetchUser(id);\n  return <ProfileCard user={user} />;\n}\n",
+              "newText": "export async function Profile({ id }: Props) {\n  const user = await fetchUser(id);\n  if (!user) {\n    return <NotFound />;\n  }\n  return <ProfileCard user={user} />;\n}\n",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc6",
+          "title": "`pnpm test --filter profile`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": []
+        }
+      }
+    },
+    {
+      "after": 700,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc6",
+          "title": "`pnpm test --filter profile`",
+          "kind": "execute",
+          "status": "in_progress",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": " RUN  v2.1.4 /home/dev/acme-web\n ✓ src/profile/profile.test.ts (4 tests) 28ms",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 300,
+      "event": {
+        "type": "tool.updated",
+        "turnId": "t1",
+        "tool": {
+          "id": "tc6",
+          "title": "`pnpm test --filter profile`",
+          "kind": "execute",
+          "status": "completed",
+          "locations": [],
+          "content": [
+            {
+              "type": "text",
+              "text": " RUN  v2.1.4 /home/dev/acme-web\n ✓ src/profile/profile.test.ts (4 tests) 28ms\n\n Test Files  1 passed (1)\n      Tests  4 passed (4)",
+              "truncated": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "after": 100,
+      "event": {
+        "type": "notice",
+        "turnId": "t1",
+        "level": "warning",
+        "text": "Settings.tsx also calls fetchUser() without a check; not changed."
+      }
+    },
+    {
+      "after": 300,
+      "stream": {
+        "turnId": "t1",
+        "messageId": "m2",
+        "kind": "text",
+        "text": "Fixed. `Profile` now renders `<NotFound />` when the user is missing, and all **4** profile tests pass.\n\n`Settings.tsx` has the same pattern; say the word and I'll fix it too.",
+        "chunk": 5,
+        "every": 14
+      }
+    },
+    {
+      "after": 200,
+      "event": {
+        "type": "turn.ended",
+        "turnId": "t1",
+        "stopReason": "end_turn",
+        "error": null,
+        "durationMs": 21300
+      }
+    }
+  ]
+}

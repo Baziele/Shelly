@@ -1,0 +1,28 @@
+{
+  "agent": "claude",
+  "cwd": "/home/dev/acme-web",
+  "home": "/home/dev",
+  "kind": "fast",
+  "buffer": "git log --oneline",
+  "description": "Fast mode rewrites the command line the user had typed.",
+  "prompt": "only my commits from last week",
+  "steps": [
+    {
+      "after": 400,
+      "fastStream": {
+        "text": "git log --oneline --author=\"$(git config user.name)\" --since=\"1 week ago\"",
+        "chunk": 4,
+        "every": 25
+      }
+    },
+    {
+      "after": 150,
+      "fast": {
+        "type": "done",
+        "text": "git log --oneline --author=\"$(git config user.name)\" --since=\"1 week ago\"",
+        "kind": "command",
+        "durationMs": 760
+      }
+    }
+  ]
+}
