@@ -25,9 +25,17 @@ const newHome = (): string => {
   return home;
 };
 
-const servicesLayer = (fake: FakeAgents, home: string) => {
+type StoreWrapper = (store: ThreadStore.ThreadStore['Service']) => ThreadStore.ThreadStore['Service'];
+
+const servicesLayer = (fake: FakeAgents, home: string, wrapStore: StoreWrapper = (store) => store) => {
   const paths = DaemonPaths.layer({ SHELLY_HOME: home });
-  const base = Layer.mergeAll(paths, fake.layer(), ThreadStore.layer.pipe(Layer.provide(paths)));
+  const storeLayer = Layer.effect(
+    ThreadStore.ThreadStore,
+    Effect.gen(function* () {
+      return wrapStore(yield* ThreadStore.ThreadStore);
+    }),
+  ).pipe(Layer.provide(ThreadStore.layer.pipe(Layer.provide(paths))));
+  const base = Layer.mergeAll(paths, fake.layer(), storeLayer);
   const config = ShellyConfigFile.layer.pipe(Layer.provide(paths));
   const directory = AgentDirectory.layer.pipe(Layer.provide(Layer.merge(base, config)));
   return ThreadService.layer.pipe(Layer.provideMerge(Layer.mergeAll(base, directory)));
@@ -36,14 +44,33 @@ const servicesLayer = (fake: FakeAgents, home: string) => {
 /** Run a test body against a fresh daemon state. */
 const withThreads = <A, E>(
   body: (threads: ThreadService.ThreadService['Service'], fake: FakeAgents) => Effect.Effect<A, E>,
-  { fake = new FakeAgents(), home = newHome() }: { fake?: FakeAgents; home?: string } = {},
+  { fake = new FakeAgents(), home = newHome(), wrapStore }: { fake?: FakeAgents; home?: string; wrapStore?: StoreWrapper } = {},
 ): Promise<A> =>
   Effect.runPromise(
     Effect.gen(function* () {
       const threads = yield* ThreadService.ThreadService;
       return yield* body(threads, fake);
-    }).pipe(Effect.provide(servicesLayer(fake, home)), Effect.scoped),
+    }).pipe(Effect.provide(servicesLayer(fake, home, wrapStore)), Effect.scoped),
   );
+
+/** Holds every `session` call until `open()`: an agent that is slow to start. */
+const gateSessions = (fake: FakeAgents) => {
+  let open!: () => void;
+  fake.sessionGate = new Promise<void>((resolve) => (open = resolve));
+  return () => {
+    fake.sessionGate = undefined;
+    open();
+  };
+};
+
+const storedEventCount = (home: string, threadId: string): number => {
+  const db = ThreadStore.openDatabase(join(home, 'state.sqlite'));
+  try {
+    return Number((db.prepare('SELECT COUNT(*) AS n FROM thread_events WHERE thread_id = ?').get(threadId) as { n: number }).n);
+  } finally {
+    db.close();
+  }
+};
 
 const CONTEXT: PromptContext = {
   cwd: '/work/app',
@@ -373,5 +400,113 @@ describe('ThreadService', () => {
         assert.deepEqual(shape(events).at(-1), 'ended:interrupted');
         assert.equal((yield* threads.list())[0]?.status, 'idle');
       }), { home });
+  });
+});
+
+describe('ThreadService while a turn is starting', () => {
+  it('ends the turn and frees the thread when setup fails after the turn started', async () => {
+    const fake = new FakeAgents({ script: () => [{ type: 'end', stopReason: 'end_turn', error: null }] });
+    let armed = true;
+    // The store fails once, on the event right after turn.started.
+    const wrapStore: StoreWrapper = (store) => ({
+      ...store,
+      appendEvents: (threadId, events) =>
+        armed && events[0]?.type === 'mode.changed'
+          ? Effect.sync(() => {
+            armed = false;
+          }).pipe(Effect.andThen(Effect.die(new Error('disk full'))))
+          : store.appendEvents(threadId, events),
+    });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const exit = yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'hi'))).pipe(Effect.exit);
+        assert.equal(exit._tag, 'Failure', 'the prompt reports the failure');
+
+        const [row] = yield* threads.list();
+        assert.equal(row?.status, 'idle');
+        assert.equal(yield* threads.runningTurns, 0);
+        assert.deepEqual(shape(Array.from(yield* Stream.runCollect(threads.watch(thread.id, 0)))), ['turn.started', 'ended:error']);
+        assert.ok(fake.released.includes(thread.id), 'the session is released');
+        assert.equal(fake.turns.length, 0, 'the agent never got the prompt');
+
+        // The thread works again.
+        const events = Array.from(yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'again'))));
+        assert.equal(shape(events).at(-1), 'ended:end_turn');
+      }), { fake, wrapStore });
+  });
+
+  it('lets a thread be deleted while its prompt waits for the agent, and writes nothing after', async () => {
+    const home = newHome();
+    const fake = new FakeAgents({ script: () => [{ type: 'end', stopReason: 'end_turn', error: null }] });
+    let threadId = '';
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        threadId = thread.id;
+        const open = gateSessions(fake);
+        const prompting = yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'hi'))).pipe(Effect.flip, Effect.forkChild);
+        yield* eventually(() => fake.sessionRequests.length === 1);
+
+        yield* threads.remove(thread.id, CLIENT);
+        open();
+        const failure = yield* Fiber.join(prompting);
+        assert.equal(failure._tag, 'ThreadNotFound');
+        assert.deepEqual(yield* threads.list(), []);
+        assert.equal(fake.turns.length, 0, 'the agent never got the prompt');
+        assert.equal(fake.released.filter((id) => id === thread.id).length, 2, 'the new session is released too');
+      }), { fake, home });
+    assert.equal(storedEventCount(home, threadId), 0);
+  });
+
+  it('keeps a rename made while the prompt waits for the agent', async () => {
+    const fake = new FakeAgents({ script: () => [{ type: 'end', stopReason: 'end_turn', error: null }] });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const open = gateSessions(fake);
+        const prompting = yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'the first prompt'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.sessionRequests.length === 1);
+        yield* threads.rename(thread.id, CLIENT, 'Chosen name');
+        open();
+        yield* Fiber.join(prompting);
+        assert.equal((yield* threads.list())[0]?.title, 'Chosen name');
+      }), { fake });
+  });
+
+  it('cancels a turn whose prompt is still waiting for the agent', async () => {
+    const fake = new FakeAgents({ script: () => [{ type: 'end', stopReason: 'end_turn', error: null }] });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const open = gateSessions(fake);
+        const prompting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'hi'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.sessionRequests.length === 1);
+        yield* threads.cancel(thread.id, CLIENT);
+        open();
+        const events = Array.from(yield* Fiber.join(prompting));
+        assert.equal(shape(events).at(-1), 'ended:cancelled');
+        assert.equal(fake.turns.length, 0, 'the agent never got the prompt');
+        assert.equal((yield* threads.list())[0]?.status, 'idle');
+      }), { fake });
+  });
+
+  it('keeps a turn running when its driver detaches, for the next driver to answer', async () => {
+    const fake = new FakeAgents({ script: () => [{ type: 'permission', requestId: 'r1', toolCallId: null, title: 'Run', options: [] }] });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        yield* threads.prompt(promptInput(thread.id, 'go')).pipe(Stream.takeUntil((event) => event.type === 'permission.requested'), Stream.runDrain);
+        yield* threads.detach(thread.id, CLIENT);
+        assert.equal(yield* threads.runningTurns, 1);
+        yield* threads.attach({ threadId: thread.id, clientId: 'client-b', force: false, historyTurns: 0 });
+        const busy = yield* threads.respond({ threadId: thread.id, clientId: CLIENT, requestId: 'r1', optionId: 'yes' }).pipe(Effect.flip);
+        assert.equal(busy._tag, 'ThreadBusy', 'the old driver no longer answers');
+        // The scripted agent finishes once answered.
+        yield* threads.respond({ threadId: thread.id, clientId: 'client-b', requestId: 'r1', optionId: 'yes' });
+        yield* eventually(() => fake.responses.length === 1);
+        const events = Array.from(yield* Stream.runCollect(threads.watch(thread.id, 0)));
+        assert.equal(shape(events).at(-1), 'ended:end_turn');
+      }), { fake });
   });
 });

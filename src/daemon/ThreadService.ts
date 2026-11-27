@@ -4,6 +4,7 @@ import * as Effect from 'effect/Effect';
 import * as Exit from 'effect/Exit';
 import * as Fiber from 'effect/Fiber';
 import * as Layer from 'effect/Layer';
+import * as Semaphore from 'effect/Semaphore';
 import * as PubSub from 'effect/PubSub';
 import * as Stream from 'effect/Stream';
 import {
@@ -45,6 +46,8 @@ interface Turn {
   /** The message the next chunk of the same kind continues, if nothing else came in between. */
   message: { readonly id: string; readonly kind: 'text' | 'thought' } | null;
   ended: boolean;
+  /** The user stopped it; if the agent has not been prompted yet, it never is. */
+  cancelRequested: boolean;
   fiber: Fiber.Fiber<void> | null;
 }
 
@@ -54,9 +57,18 @@ interface LiveThread {
   nextSeq: number;
   /** A prompt is getting its session ready; the turn has not started yet. */
   starting: boolean;
+  /** Cancel arrived while `starting`: the turn ends as soon as it is set up. */
+  cancelRequested: boolean;
+  /** Set by delete; a prompt still starting must not touch the thread after it. */
+  deleted: boolean;
   turn: Turn | null;
   currentModeId: string | null;
   readonly events: PubSub.PubSub<ThreadEvent>;
+  /**
+   * Held while a turn is set up (once its session is ready), and by delete,
+   * rename and cancel, so none of them lands in the middle of the setup.
+   */
+  readonly lock: Semaphore.Semaphore;
 }
 
 export interface CreateThreadInput {
@@ -147,7 +159,17 @@ const make = Effect.gen(function* () {
     if (raced) {
       return raced;
     }
-    const created: LiveThread = { attachedBy: null, nextSeq, starting: false, turn: null, currentModeId: null, events };
+    const created: LiveThread = {
+      attachedBy: null,
+      nextSeq,
+      starting: false,
+      cancelRequested: false,
+      deleted: false,
+      turn: null,
+      currentModeId: null,
+      events,
+      lock: Semaphore.makeUnsafe(1),
+    };
     live.set(threadId, created);
     return created;
   });
@@ -322,11 +344,18 @@ const make = Effect.gen(function* () {
   });
 
   const runTurn = (threadId: string, thread: LiveThread, turn: Turn, text: string): Effect.Effect<void> =>
-    turn.session.prompt(text).pipe(
-      Stream.runForEach((update) => handleUpdate(threadId, thread, turn, update)),
+    Effect.suspend(() =>
+      turn.cancelRequested
+        ? Effect.void
+        : turn.session.prompt(text).pipe(Stream.runForEach((update) => handleUpdate(threadId, thread, turn, update)))
+    ).pipe(
       Effect.andThen(
-        // The runtime promises an `end`; if it never came, say so rather than hang.
-        Effect.suspend(() => finishTurn(threadId, thread, turn, 'error', 'The agent stopped without finishing its turn.')),
+        Effect.suspend(() =>
+          turn.cancelRequested
+            ? finishTurn(threadId, thread, turn, 'cancelled', null)
+            // The runtime promises an `end`; if it never came, say so rather than hang.
+            : finishTurn(threadId, thread, turn, 'error', 'The agent stopped without finishing its turn.')
+        ),
       ),
       Effect.onExit((exit) => {
         if (Exit.isSuccess(exit) || turn.ended) {
@@ -347,67 +376,98 @@ const make = Effect.gen(function* () {
       Effect.withSpan('ThreadService.turn', { attributes: { threadId, turnId: turn.turnId } }),
     );
 
+  /**
+   * After setup failed part-way: end the turn if clients heard it start,
+   * set the thread idle, and let go of the session. Best effort: the setup's
+   * own failure is what the prompt reports.
+   */
+  const abandonTurn = Effect.fnUntraced(function* (threadId: string, thread: LiveThread, turn: Turn, announced: boolean) {
+    yield* Effect.logWarning(`turn setup failed thread=${threadId} turn=${turn.turnId}`);
+    const settle = announced
+      ? finishTurn(threadId, thread, turn, 'error', 'Shelly could not start this turn.')
+      : store.updateThread(threadId, { status: 'idle' });
+    yield* settle.pipe(Effect.catchCause(() => store.updateThread(threadId, { status: 'idle' })), Effect.ignoreCause);
+    turn.ended = true;
+    if (thread.turn === turn) {
+      thread.turn = null;
+    }
+    yield* turn.session.cancel.pipe(Effect.timeout(CANCEL_ON_SHUTDOWN_TIMEOUT), Effect.ignoreCause);
+    yield* runtime.release(threadId).pipe(Effect.ignoreCause);
+  });
+
+  /** Set up and fork a turn on a ready session. Runs holding the thread's lock. */
+  const setUpTurn = Effect.fnUntraced(function* (input: PromptInput, thread: LiveThread, session: AgentSession) {
+    const { threadId, text, context } = input;
+    // Read the thread again: it may have been deleted or renamed while the agent started.
+    const row = thread.deleted ? undefined : yield* store.getThread(threadId);
+    if (!row) {
+      yield* runtime.release(threadId);
+      return yield* new ThreadNotFound({ threadId });
+    }
+    const now = Date.now();
+    const turn: Turn = {
+      turnId: randomUUID(),
+      startedAt: now,
+      session,
+      pending: new Set(),
+      message: null,
+      ended: false,
+      cancelRequested: thread.cancelRequested,
+      fiber: null,
+    };
+    thread.turn = turn;
+    thread.starting = false;
+    let announced = false;
+
+    return yield* Effect.gen(function* () {
+      yield* store.updateThread(threadId, {
+        status: 'running',
+        nativeSessionId: session.nativeSessionId,
+        lastShellCwd: context.cwd,
+        turnCount: row.turnCount + 1,
+        updatedAt: now,
+        // A generated title can replace this one later (see titles.ts).
+        ...(row.title === '' ? { title: initialTitle(text) } : {}),
+      });
+      yield* emit(threadId, thread, { type: 'turn.started', turnId: turn.turnId, text, at: now });
+      announced = true;
+      if (session.startedFresh && row.nativeSessionId !== null) {
+        yield* emit(threadId, thread, {
+          type: 'notice',
+          turnId: turn.turnId,
+          level: 'warning',
+          text: 'The agent could not resume the earlier conversation, so this message starts a new one.',
+        });
+      }
+      if (session.modes) {
+        yield* emitMode(threadId, thread, session.modes);
+      }
+      yield* Effect.logInfo(`turn started thread=${threadId} turn=${turn.turnId}`);
+      turn.fiber = yield* runTurn(threadId, thread, turn, formatPromptForAgent(context, text)).pipe(Effect.forkIn(scope));
+      return turn.turnId;
+    }).pipe(Effect.onError(() => abandonTurn(threadId, thread, turn, announced)));
+  });
+
   /** Starts a turn and returns the turn's id; the turn itself runs in the daemon's scope. */
   const startTurn = Effect.fn('ThreadService.startTurn')(function* (input: PromptInput, thread: LiveThread) {
-    const { threadId, clientId, text, context } = input;
+    const { threadId, clientId, context } = input;
     const row = yield* requireThread(threadId);
     yield* requireDriver(threadId, thread, clientId);
     if (thread.turn || thread.starting) {
       return yield* new TurnInProgress({ threadId });
     }
     thread.starting = true;
+    thread.cancelRequested = false;
     // Only waiting for the session may be interrupted (the client went away):
     // once it is ready, the turn is set up and forked as one step, so a
     // thread is never left marked busy with no turn running.
     return yield* Effect.uninterruptibleMask((restore) =>
-      Effect.gen(function* () {
-        const session = yield* restore(runtime.session(sessionRequest(row, context.cwd)));
-        const now = Date.now();
-        const turn: Turn = {
-          turnId: randomUUID(),
-          startedAt: now,
-          session,
-          pending: new Set(),
-          message: null,
-          ended: false,
-          fiber: null,
-        };
-        thread.turn = turn;
-        thread.starting = false;
-
-        yield* store.updateThread(threadId, {
-          status: 'running',
-          nativeSessionId: session.nativeSessionId,
-          lastShellCwd: context.cwd,
-          turnCount: row.turnCount + 1,
-          updatedAt: now,
-          // A generated title can replace this one later (see titles.ts).
-          ...(row.title === '' ? { title: initialTitle(text) } : {}),
-        });
-        yield* emit(threadId, thread, { type: 'turn.started', turnId: turn.turnId, text, at: now });
-        if (session.startedFresh && row.nativeSessionId !== null) {
-          yield* emit(threadId, thread, {
-            type: 'notice',
-            turnId: turn.turnId,
-            level: 'warning',
-            text: 'The agent could not resume the earlier conversation, so this message starts a new one.',
-          });
-        }
-        if (session.modes) {
-          yield* emitMode(threadId, thread, session.modes);
-        }
-        yield* Effect.logInfo(`turn started thread=${threadId} turn=${turn.turnId}`);
-        turn.fiber = yield* runTurn(threadId, thread, turn, formatPromptForAgent(context, text)).pipe(Effect.forkIn(scope));
-        return turn.turnId;
-      }).pipe(
-        Effect.onExit((exit) =>
-          Effect.sync(() => {
-            thread.starting = false;
-            if (!Exit.isSuccess(exit) && thread.turn && !thread.turn.fiber) {
-              thread.turn = null;
-            }
-          })
-        ),
+      restore(runtime.session(sessionRequest(row, context.cwd))).pipe(
+        Effect.flatMap((session) => Semaphore.withPermit(thread.lock, setUpTurn(input, thread, session))),
+        Effect.ensuring(Effect.sync(() => {
+          thread.starting = false;
+          thread.cancelRequested = false;
+        })),
       )
     );
   });
@@ -512,9 +572,19 @@ const make = Effect.gen(function* () {
     yield* requireThread(threadId);
     const thread = yield* liveThread(threadId);
     yield* requireDriver(threadId, thread, clientId);
-    if (thread.turn && !thread.turn.ended) {
-      yield* thread.turn.session.cancel;
-    }
+    yield* Semaphore.withPermit(
+      thread.lock,
+      Effect.gen(function* () {
+        const turn = thread.turn;
+        if (turn && !turn.ended) {
+          turn.cancelRequested = true;
+          yield* turn.session.cancel;
+        } else if (thread.starting) {
+          // The agent is still starting: the turn ends as soon as it is set up.
+          thread.cancelRequested = true;
+        }
+      }),
+    );
   });
 
   const respond = Effect.fn('ThreadService.respond')(function* (input: {
@@ -553,23 +623,31 @@ const make = Effect.gen(function* () {
 
   const rename = Effect.fn('ThreadService.rename')(function* (threadId: string, clientId: string, title: string) {
     yield* requireThread(threadId);
-    yield* requireDriverOrNobody(threadId, live.get(threadId), clientId);
-    yield* store.updateThread(threadId, { title: title.trim() });
+    const thread = yield* liveThread(threadId);
+    yield* requireDriverOrNobody(threadId, thread, clientId);
+    yield* Semaphore.withPermit(thread.lock, store.updateThread(threadId, { title: title.trim() }));
   });
 
   const remove = Effect.fn('ThreadService.remove')(function* (threadId: string, clientId: string) {
     yield* requireThread(threadId);
     const thread = live.get(threadId);
     yield* requireDriverOrNobody(threadId, thread, clientId);
-    if (thread?.turn?.fiber) {
-      yield* Fiber.interrupt(thread.turn.fiber);
-    }
-    yield* runtime.release(threadId);
-    yield* store.deleteThread(threadId);
-    live.delete(threadId);
-    if (thread) {
-      yield* PubSub.shutdown(thread.events);
-    }
+    const removeAll = Effect.gen(function* () {
+      if (thread) {
+        // A prompt still waiting for its session sees this and stops without writing.
+        thread.deleted = true;
+        if (thread.turn?.fiber) {
+          yield* Fiber.interrupt(thread.turn.fiber);
+        }
+      }
+      yield* runtime.release(threadId);
+      yield* store.deleteThread(threadId);
+      live.delete(threadId);
+      if (thread) {
+        yield* PubSub.shutdown(thread.events);
+      }
+    });
+    yield* thread ? Semaphore.withPermit(thread.lock, removeAll) : removeAll;
   });
 
   const prewarm = Effect.fn('ThreadService.prewarm')(function* (input: {

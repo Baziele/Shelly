@@ -37,6 +37,8 @@ export class FakeAgents {
   script: ((prompt: string) => readonly AgentUpdate[]) | undefined;
   /** When set, `session` fails with it. */
   sessionError: AgentUnavailable | undefined;
+  /** When set, `session` waits for it before answering (a cold agent starting). */
+  sessionGate: Promise<void> | undefined;
   private nativeCounter = 0;
   private waiters: ((turn: FakeTurn) => void)[] = [];
   private current: Queue.Queue<AgentUpdate> | undefined;
@@ -69,6 +71,9 @@ export class FakeAgents {
     session: (request) =>
       Effect.suspend(() => {
         this.sessionRequests.push(request);
+        const gate = this.sessionGate;
+        return gate ? Effect.promise(() => gate) : Effect.void;
+      }).pipe(Effect.andThen(() => {
         if (this.sessionError) {
           return Effect.fail(this.sessionError);
         }
@@ -106,7 +111,7 @@ export class FakeAgents {
             this.modes.push(modeId);
           }),
         });
-      }),
+      })),
     prewarm: ({ agentId, session }) => Effect.sync(() => {
       this.prewarmed.push({ agentId, threadId: session?.threadId ?? null });
     }),
