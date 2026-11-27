@@ -323,13 +323,22 @@ const make = Effect.gen(function* () {
   });
 
   /** The agent named the conversation: that becomes the title, unless the user chose one. */
-  const adoptAgentTitle = Effect.fnUntraced(function* (threadId: string, title: string) {
+  const adoptAgentTitle = Effect.fnUntraced(function* (threadId: string, thread: LiveThread, title: string) {
     const clean = initialTitle(title);
-    const row = yield* store.getThread(threadId);
-    if (!row || row.titleSource === 'user' || clean === '' || clean === row.title) {
+    if (clean === '') {
       return;
     }
-    yield* store.updateThread(threadId, { title: clean, titleSource: 'agent' });
+    // Under the thread's lock, as rename is, so a rename at the same moment always wins.
+    yield* Semaphore.withPermit(
+      thread.lock,
+      Effect.gen(function* () {
+        const row = yield* store.getThread(threadId);
+        if (!row || row.titleSource === 'user' || clean === row.title) {
+          return;
+        }
+        yield* store.updateThread(threadId, { title: clean, titleSource: 'agent' });
+      }),
+    );
   });
 
   // Per update, so untraced.
@@ -380,7 +389,7 @@ const make = Effect.gen(function* () {
         yield* emitMode(threadId, thread, update);
         return;
       case 'title':
-        yield* adoptAgentTitle(threadId, update.title);
+        yield* adoptAgentTitle(threadId, thread, update.title);
         return;
       case 'notice':
         yield* emit(threadId, thread, { type: 'notice', turnId: turn.turnId, level: update.level, text: update.text });
@@ -716,10 +725,10 @@ const make = Effect.gen(function* () {
     const thread = yield* liveThread(threadId);
     yield* requireDriverOrNobody(threadId, thread, clientId);
     const clean = title.replace(/\s+/g, ' ').trim();
-    // An empty title hands naming back to the prompt (and the agent).
+    // An empty title keeps the one shown and hands naming back to the agent.
     yield* Semaphore.withPermit(
       thread.lock,
-      store.updateThread(threadId, clean === '' ? { title: '', titleSource: 'prompt' } : { title: clean, titleSource: 'user' }),
+      store.updateThread(threadId, clean === '' ? { titleSource: 'prompt' } : { title: clean, titleSource: 'user' }),
     );
   });
 

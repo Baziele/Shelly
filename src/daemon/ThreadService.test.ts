@@ -388,6 +388,7 @@ describe('ThreadService', () => {
 
         // Clearing the name hands it back to the agent.
         yield* threads.rename(thread.id, CLIENT, '  ');
+        assert.equal((yield* threads.list())[0]?.title, 'Mine', 'an empty name keeps the one shown');
         yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'third')));
         assert.equal((yield* threads.list())[0]?.title, 'Something else');
       }), { fake });

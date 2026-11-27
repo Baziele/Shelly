@@ -575,6 +575,11 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       );
       if (Option.isSome(result)) {
         configOptions = result.value.configOptions;
+      } else {
+        // A model the agent does not know (a typo in config.json): it carries on with its default.
+        yield* Effect.logWarning(`the agent refused config option ${configId}=${value}; using its default`).pipe(
+          Effect.annotateLogs({ agentId: definition.id }),
+        );
       }
     }
     return { ...opened, response: { ...opened.response, configOptions } };
