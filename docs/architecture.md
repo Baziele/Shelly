@@ -102,7 +102,14 @@ line). OpenTUI lays out and styles everything in memory, including streaming
 markdown, code and diffs; Shelly decides where it lands on screen.
 
 An item moves to scrollback once it and everything before it are final, so
-nothing already in scrollback ever needs to change.
+nothing already in scrollback ever needs to change. A long streamed answer
+moves there a markdown block at a time while the rest still streams.
+
+The pieces, in `src/ui/` and `src/render/`: `AgentView` (a running turn),
+`renderHistory` (a past exchange, printed statically), `PromptView` with its
+`ListPicker` (the input, fast-mode progress, slash commands and pickers), and
+`LiveRegion` (committed rows plus the repainting region). `pnpm demo` plays
+recorded event sequences from `test/fixtures/thread-events/` through them.
 
 ## Speed
 
