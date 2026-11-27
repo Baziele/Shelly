@@ -217,6 +217,15 @@ for (const shell of shells) {
       }
     });
 
+    it('sets a line exactly, leading and trailing whitespace and all', { skip: !canEditLine && 'bash 3.2 types instead' }, async () => {
+      session = await start(shell);
+      for (const text of ['  x\t', 'a  ', ' ', '\t\tindented', 'two  \n  lines\t', 'end\n\n']) {
+        await session.editor.replace(text);
+        assert.deepEqual(await session.editor.capture(), { buffer: text, cursor: text.length }, JSON.stringify(text));
+      }
+      assert.deepEqual(execs(session.events), [], 'nothing ran');
+    });
+
     it('fills an empty line', { skip: !canEditLine && 'bash 3.2 types instead' }, async () => {
       session = await start(shell);
       await session.editor.replace('echo filled');
