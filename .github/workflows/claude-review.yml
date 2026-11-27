@@ -1,7 +1,8 @@
 name: Claude review
 
-# Claude reviews every pull request that is ready for review, leaves inline
-# comments and a summary, and fails this check when it finds blocking issues.
+# Claude reviews every pull request that is ready for review, keeps its
+# findings in one comment that it edits on later pushes (one notification per
+# pull request), and fails this check when it finds blocking issues.
 # Mark "Claude review / review" as a required check so nothing merges past it.
 
 on:
@@ -53,16 +54,19 @@ jobs:
                rendering, startup).
             4. Missing or weak tests for the behaviour the change adds.
 
-            Post each real issue as an inline comment on the line it concerns,
-            saying what goes wrong and when. Skip style nits and anything a
-            linter or type checker would catch. Then post one short summary
-            comment with `gh pr comment`.
+            Report everything in ONE comment, so the pull request gets a
+            single notification: list each real issue as `path:line`, then
+            what goes wrong and when. Skip style nits and anything a linter or
+            type checker would catch. If you already left a review comment on
+            this pull request, replace it with
+            `gh pr comment --edit-last --create-if-none --body-file <file>`
+            rather than adding another; editing sends no new notification.
 
             Finish with the structured verdict: "changes_requested" if any
             issue would cause a bug, a security or privacy problem, or a
             serious performance regression; otherwise "pass".
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Write,Grep,Glob"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","changes_requested"]},"blocking_issues":{"type":"integer","minimum":0},"summary":{"type":"string"}},"required":["verdict","blocking_issues","summary"]}'
 
       - name: Enforce the verdict
