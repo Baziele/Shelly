@@ -320,6 +320,16 @@ const make = Effect.gen(function* () {
     yield* emit(threadId, thread, { type: 'mode.changed', currentModeId: mode.currentModeId, availableModes: mode.availableModes });
   });
 
+  /** The agent named the conversation: that becomes the title, unless the user chose one. */
+  const adoptAgentTitle = Effect.fnUntraced(function* (threadId: string, title: string) {
+    const clean = initialTitle(title);
+    const row = yield* store.getThread(threadId);
+    if (!row || row.titleSource === 'user' || clean === '' || clean === row.title) {
+      return;
+    }
+    yield* store.updateThread(threadId, { title: clean, titleSource: 'agent' });
+  });
+
   // Per update, so untraced.
   const handleUpdate = Effect.fnUntraced(function* (threadId: string, thread: LiveThread, turn: Turn, update: AgentUpdate) {
     if (turn.ended) {
@@ -366,6 +376,9 @@ const make = Effect.gen(function* () {
         return;
       case 'mode':
         yield* emitMode(threadId, thread, update);
+        return;
+      case 'title':
+        yield* adoptAgentTitle(threadId, update.title);
         return;
       case 'notice':
         yield* emit(threadId, thread, { type: 'notice', turnId: turn.turnId, level: update.level, text: update.text });
@@ -675,7 +688,12 @@ const make = Effect.gen(function* () {
     yield* requireThread(threadId);
     const thread = yield* liveThread(threadId);
     yield* requireDriverOrNobody(threadId, thread, clientId);
-    yield* Semaphore.withPermit(thread.lock, store.updateThread(threadId, { title: title.trim() }));
+    const clean = title.replace(/\s+/g, ' ').trim();
+    // An empty title hands naming back to the prompt (and the agent).
+    yield* Semaphore.withPermit(
+      thread.lock,
+      store.updateThread(threadId, clean === '' ? { title: '', titleSource: 'prompt' } : { title: clean, titleSource: 'user' }),
+    );
   });
 
   const remove = Effect.fn('ThreadService.remove')(function* (threadId: string, clientId: string) {

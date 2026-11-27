@@ -366,6 +366,30 @@ describe('ThreadService', () => {
       }), { fake });
   });
 
+  it("takes the agent's own title for the thread, unless the user renamed it", async () => {
+    const fake = new FakeAgents({
+      script: (prompt) => [
+        { type: 'title', title: prompt.endsWith('first') ? 'Fix the  flaky build' : 'Something else' },
+        { type: 'end', stopReason: 'end_turn', error: null },
+      ],
+    });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'first')));
+        assert.equal((yield* threads.list())[0]?.title, 'Fix the flaky build');
+
+        yield* threads.rename(thread.id, CLIENT, 'Mine');
+        yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'second')));
+        assert.equal((yield* threads.list())[0]?.title, 'Mine', 'a rename sticks');
+
+        // Clearing the name hands it back to the agent.
+        yield* threads.rename(thread.id, CLIENT, '  ');
+        yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'third')));
+        assert.equal((yield* threads.list())[0]?.title, 'Something else');
+      }), { fake });
+  });
+
   it('prewarms in the background', async () => {
     const fake = new FakeAgents();
     await withThreads((threads) =>
