@@ -71,7 +71,8 @@ for (const shell of shells) {
 
       await session.type('::/context\r');
       const screen = await session.waitFor(
-        (rows) => rows.some((row) => row.startsWith('$ false')) && rows[lastPromptRow(rows)]?.trimEnd() === '$',
+        (rows) => rows.includes('$ :: /context') && lastPromptRow(rows) > rows.indexOf('$ :: /context')
+          && rows[lastPromptRow(rows)]?.trimEnd() === '$',
         'the context and a new prompt',
       );
       const context = screen.slice(screen.indexOf('$ :: /context'));

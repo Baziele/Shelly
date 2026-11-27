@@ -3,7 +3,6 @@ import { afterEach, describe, it } from 'node:test';
 import { lastPromptRow, startShelly, type ShellyHarness } from './harness.js';
 
 const ESCAPE = '\u001b';
-const DOWN = '\u001b[B';
 
 describe('Shelly in a real terminal', { timeout: 30_000 }, () => {
   let shelly: ShellyHarness | undefined;
@@ -44,26 +43,27 @@ describe('Shelly in a real terminal', { timeout: 30_000 }, () => {
   it('shows matching slash commands and completes the selection', async () => {
     shelly = await startShelly();
     await shelly.type('::/');
-    await shelly.waitFor((rows) => rows.some((row) => row.includes('› /ask')), 'the command popup');
+    await shelly.waitFor((rows) => rows.some((row) => row.includes('› /new')), 'the command popup');
 
-    await shelly.type('s');
-    const filtered = await shelly.waitFor((rows) => rows.some((row) => row.includes('› /skills')), 'filtered commands');
-    assert.ok(!filtered.some((row) => row.includes('/run')), '/run does not match "s"');
+    await shelly.type('thr');
+    const filtered = await shelly.waitFor((rows) => rows.some((row) => row.includes('› /threads')), 'filtered commands');
+    assert.ok(!filtered.some((row) => row.includes('/new')), '/new does not match "thr"');
 
-    await shelly.type(DOWN + DOWN + '\t');
-    await shelly.waitFor((rows) => rows.includes('$ :: /skills') && !rows.some((row) => row.includes('›')), 'completion');
+    await shelly.type('\t');
+    await shelly.waitFor((rows) => rows.some((row) => row.startsWith('$ :: /threads')) && !rows.some((row) => row.includes('›')), 'completion');
   });
 
-  it('records a submitted prompt and returns to a fresh shell prompt', async () => {
+  it('says what is missing when no agent is set up, and returns to a fresh shell prompt', async () => {
     shelly = await startShelly();
     await shelly.type('::what is up\r');
     const screen = await shelly.waitFor(
-      (rows) => rows.includes('$ :: what is up') && rows[lastPromptRow(rows)]?.trimEnd() === '$',
+      (rows) => rows.includes('$ :: what is up') && lastPromptRow(rows) > rows.indexOf('$ :: what is up'),
       'the transcript and a new prompt',
+      { timeoutMs: 20_000 },
     );
     const transcript = screen.indexOf('$ :: what is up');
-    assert.match(screen[transcript + 1] ?? '', /isn't connected to an agent/);
-    assert.equal(lastPromptRow(screen), transcript + 2);
+    assert.match(screen[transcript + 1] ?? '', /✗ .*agent/i);
+    assert.equal(lastPromptRow(screen), transcript + 2, 'no blank line before the prompt');
   });
 
   it('exits with the shell', async () => {

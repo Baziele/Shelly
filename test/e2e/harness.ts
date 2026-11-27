@@ -9,7 +9,7 @@ export interface ShellyHarness {
   screen(): Promise<string[]>;
   cursor(): Promise<{ row: number; col: number }>;
   /** Poll the screen until `predicate` holds, or fail with the last screen. */
-  waitFor(predicate: (screen: string[]) => boolean, description: string): Promise<string[]>;
+  waitFor(predicate: (screen: string[]) => boolean, description: string, options?: { timeoutMs?: number }): Promise<string[]>;
   /** Everything Shelly wrote to the terminal so far. */
   raw(): string;
   close(): Promise<number>;
@@ -42,7 +42,7 @@ export const startShelly = async (
     type: (keys) => driver.type(keys),
     screen: () => driver.lines(),
     cursor: () => driver.cursor(),
-    waitFor: (predicate, description) => driver.waitFor(predicate, description),
+    waitFor: (predicate, description, options) => driver.waitFor(predicate, description, options),
     raw: () => driver.raw(),
     close: () => driver.close(),
   };

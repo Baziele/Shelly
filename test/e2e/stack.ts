@@ -1,21 +1,18 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { DaemonClient } from '../../src/client/daemon-client.js';
-import { isProcessAlive, readLock } from '../../src/daemon/lock.js';
+import { readLock } from '../../src/daemon/lock.js';
 import { shellyPaths } from '../../src/protocol/paths.js';
-import { probeSocket } from '../../src/protocol/probe.js';
-import { type DriverOptions, ScenarioDriver } from '../tools/scenario.js';
+import { type DriverOptions, ScenarioDriver, stopDaemonIn } from '../tools/scenario.js';
 
 /*
  * The whole of Shelly for end-to-end tests: the client in a real pty, the
  * daemon it starts on demand (with the real agent and fast-mode layers),
  * the fake ACP agent registered in config.json as the default agent, and
  * the fake `claude` on PATH for fast mode. Everything lives in a throwaway
- * SHELLY_HOME (and HOME), and `stop()` leaves no process behind: it asks
- * the daemon to exit, and kills it (by the pid in its lock) if it will not.
+ * SHELLY_HOME (and HOME), and `stop()` leaves no process behind: closing the
+ * driver stops the daemon (see stopDaemonIn).
  */
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -50,6 +47,13 @@ export interface Stack {
   stop(): Promise<void>;
 }
 
+/** Put the fake `claude` (fast mode's stream-json protocol) in `bin`, for a PATH. */
+export const writeFakeClaude = (bin: string): void => {
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_CLAUDE}" "$@"\n`);
+  chmodSync(join(bin, 'claude'), 0o755);
+};
+
 /** Short, since the socket path under it must fit in 104 bytes. */
 const shortTemp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix));
 
@@ -66,8 +70,7 @@ export const startStack = async (options: StackOptions = {}): Promise<Stack> => 
     ...options.env,
   };
   if (!options.realAgents) {
-    writeFileSync(join(bin, 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_CLAUDE}" "$@"\n`);
-    chmodSync(join(bin, 'claude'), 0o755);
+    writeFakeClaude(bin);
     const config = {
       defaultAgent: 'fake',
       agents: {
@@ -91,7 +94,7 @@ export const startStack = async (options: StackOptions = {}): Promise<Stack> => 
   try {
     driver = await ScenarioDriver.start({ ...options, env });
   } catch (error) {
-    await stopDaemon(shellyHome);
+    await stopDaemonIn(shellyHome);
     rmSync(shellyHome, { recursive: true, force: true });
     throw error;
   }
@@ -108,29 +111,11 @@ export const startStack = async (options: StackOptions = {}): Promise<Stack> => 
         return;
       }
       stopped = true;
+      // Stops the daemon too.
       await driver.close();
-      await stopDaemon(shellyHome);
       rmSync(shellyHome, { recursive: true, force: true });
     },
   };
 };
 
-/** Ask the daemon under `shellyHome` to exit, and make sure it has (and its agents with it). */
-export const stopDaemon = async (shellyHome: string): Promise<void> => {
-  const paths = shellyPaths({ SHELLY_HOME: shellyHome });
-  const pid = readLock(paths.lock)?.pid;
-  if (await probeSocket(paths.socket)) {
-    const client = new DaemonClient({ env: { ...process.env, SHELLY_HOME: shellyHome }, autoStart: false });
-    await client.shutdown(false).catch(() => undefined);
-    await client.dispose().catch(() => undefined);
-  }
-  if (pid === undefined) {
-    return;
-  }
-  for (let waited = 0; waited < 5000 && isProcessAlive(pid); waited += 50) {
-    await sleep(50);
-  }
-  if (isProcessAlive(pid)) {
-    process.kill(pid, 'SIGKILL');
-  }
-};
+export { stopDaemonIn as stopDaemon } from '../tools/scenario.js';

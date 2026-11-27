@@ -55,7 +55,7 @@ describe('scenario driver', { timeout: 60_000 }, () => {
     await driver.type('/con');
     await driver.waitForText('› /context');
     await driver.press('tab');
-    await driver.waitFor((lines) => lines.some((line) => line === '$ :: /context') && !lines.some((line) => line.includes('›')), 'completion');
+    await driver.waitFor((lines) => lines.some((line) => line.startsWith('$ :: /context')) && !lines.some((line) => line.includes('›')), 'completion');
     await driver.press('esc');
     await driver.waitFor((lines) => lines.at(-1) !== undefined && lines.some((line) => line === '$'), 'the prompt back');
     await driver.waitForStable({ quietMs: 200 });

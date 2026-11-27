@@ -6,12 +6,15 @@ import { basename, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, it } from 'node:test';
 import { lastPromptRow, startShelly, type ShellyHarness } from './harness.js';
+import { writeFakeClaude } from './stack.js';
 
 /*
  * The rewrite hotkey (Ctrl+]) in Shelly, end to end: at the prompt it takes
- * the half-typed line into Shelly's input and puts it back afterwards;
- * anywhere else it reaches the program untouched. Add shells with
- * SHELLY_E2E_SHELLS (colon-separated paths).
+ * the half-typed line into Shelly's fast-mode input, and puts it back
+ * afterwards unless a command takes its place; anywhere else it reaches the
+ * program untouched. Fast mode answers through the fake `claude`
+ * (test/fixtures/fake-claude.mjs). Add shells with SHELLY_E2E_SHELLS
+ * (colon-separated paths).
  */
 
 const HOTKEY = '\u001d';
@@ -120,7 +123,9 @@ for (const shell of shells) {
         mkdirSync(dirname(join(home, file)), { recursive: true });
         writeFileSync(join(home, file), content + extra);
       }
-      shelly = await startShelly({ cols: 100, rows: 20, shell, home, env: { TMPDIR: temp } });
+      writeFakeClaude(join(home, 'test-bin'));
+      const env = { TMPDIR: temp, PATH: `${join(home, 'test-bin')}:${process.env.PATH ?? '/usr/bin:/bin'}` };
+      shelly = await startShelly({ cols: 100, rows: 20, shell, home, env });
       // fish asks the terminal a few things before it reads keys.
       await sleep(300);
       return shelly;
@@ -177,7 +182,11 @@ for (const shell of shells) {
         await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the typed line');
 
         await session.type(HOTKEY);
-        await session.waitFor((rows) => promptRow(rows).startsWith('$ __') && !rows.some((row) => row.includes('echo half')), 'the input, in place of the line');
+        await session.waitFor(
+          (rows) => promptRow(rows).startsWith('$ __') && rows.some((row) => row.includes('rewriting: echo half'))
+            && !rows.some((row) => row.startsWith('$ echo half')),
+          'the input, in place of the line',
+        );
 
         await session.type(ESCAPE);
         await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the line put back');
@@ -201,15 +210,34 @@ for (const shell of shells) {
         await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the typed line');
         await session.type(HOTKEY);
         await session.waitFor((rows) => promptRow(rows).startsWith('$ __'), 'the input');
-        await session.type('make it louder\r');
+        await session.type('reply: # Loud enough already.\r');
         const screen = await session.waitFor(
-          (rows) => rows.some((row) => row.startsWith('$ __ make it louder')) && promptRow(rows) === '$ echo half',
-          'the transcript and the line on a new prompt',
+          (rows) => rows.some((row) => row.startsWith('$ __ reply: # Loud enough already.')) && promptRow(rows) === '$ echo half',
+          'the request, its answer and the line on a new prompt',
+          { timeoutMs: 20_000 },
         );
-        assert.ok(screen.some((row) => row.includes("isn't connected to an agent")));
+        const echo = screen.findIndex((row) => row.startsWith('$ __ reply:'));
+        assert.equal(screen[echo + 1]?.trim(), 'Loud enough already.');
+        assert.equal(lastPromptRow(screen), echo + 2, 'the prompt right below the answer');
         assert.ok(!screen.includes('half'), 'the line did not run');
         await session.type('\r');
         await session.waitFor((rows) => rows.includes('half'), 'the command to run');
+      });
+
+      it('puts the command it writes on the line in place of the old one, unexecuted', async () => {
+        const session = await start();
+        await session.type('echo half');
+        await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the typed line');
+        await session.type(HOTKEY);
+        await session.waitFor((rows) => promptRow(rows).startsWith('$ __'), 'the input');
+        await session.type('make it louder\r');
+        const screen = await session.waitFor(
+          (rows) => /^\$ echo pid=\d+ turn=1$/.test(promptRow(rows)),
+          'the new command on the line',
+          { timeoutMs: 20_000 },
+        );
+        assert.ok(!screen.some((row) => row.includes('__') || row.includes('rewriting')), 'the input left no trace');
+        assert.ok(!screen.some((row) => /^pid=/.test(row)), 'nothing ran');
       });
     } else {
       it('opens the input without taking the line, which stays as it is', async () => {
@@ -224,10 +252,11 @@ for (const shell of shells) {
 
         await session.type(HOTKEY);
         await session.waitFor((rows) => promptRow(rows).startsWith('$ echo half__'), 'the input after the line');
-        await session.type('make it louder\r');
+        await session.type('reply: # Loud enough already.\r');
         const screen = await session.waitFor(
-          (rows) => rows.some((row) => row.includes("isn't connected to an agent")) && promptRow(rows) === '$ echo half',
-          'the response and the line redrawn below it',
+          (rows) => rows.some((row) => row.trim() === 'Loud enough already.') && promptRow(rows) === '$ echo half',
+          'the answer and the line redrawn below it',
+          { timeoutMs: 20_000 },
         );
         assert.ok(!screen.includes('half'), 'the line did not run');
         await session.type('\r');
