@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { shellyPaths } from '../protocol/paths.js';
 import { probeSocket } from '../protocol/probe.js';
 
@@ -29,6 +31,42 @@ const DEFAULT_START_TIMEOUT_MS = 3000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const LOADER_FLAGS = new Set(['--import', '--loader', '--experimental-loader', '--require', '-r']);
+
+/** A module a loader flag names, made absolute so it still resolves from the daemon's own directory. */
+const absoluteSpecifier = (specifier: string, from: string): string => {
+  if (specifier.startsWith('file:') || isAbsolute(specifier)) {
+    return specifier;
+  }
+  if (specifier.startsWith('.')) {
+    return pathToFileURL(resolve(from, specifier)).href;
+  }
+  try {
+    return import.meta.resolve(specifier);
+  } catch {
+    return specifier;
+  }
+};
+
+/** This process's Node flags with loader modules (tsx in dev mode, say) resolved from `cwd`. */
+export const portableExecArgv = (execArgv: readonly string[], cwd = process.cwd()): string[] => {
+  const out: string[] = [];
+  for (let index = 0; index < execArgv.length; index++) {
+    const arg = execArgv[index]!;
+    const [flag, inline] = arg.includes('=') ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg, undefined];
+    if (!LOADER_FLAGS.has(flag)) {
+      out.push(arg);
+    } else if (inline !== undefined) {
+      out.push(`${flag}=${absoluteSpecifier(inline, cwd)}`);
+    } else if (index + 1 < execArgv.length) {
+      out.push(flag, absoluteSpecifier(execArgv[++index]!, cwd));
+    } else {
+      out.push(arg);
+    }
+  }
+  return out;
+};
+
 /** Start a daemon in the background, detached from this process, its output going to the log. */
 export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefined => {
   const env = options.env ?? process.env;
@@ -40,8 +78,11 @@ export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefine
   mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
   const log = openSync(paths.daemonLog, 'a', 0o600);
   try {
-    const child = spawn(process.execPath, [...(options.execArgv ?? process.execArgv), entry, 'daemon'], {
+    const child = spawn(process.execPath, [...portableExecArgv(options.execArgv ?? process.execArgv), resolve(entry), 'daemon'], {
+      // Its own session, so closing the terminal does not take it down, and
+      // its own directory, so it never holds on to the user's.
       detached: true,
+      cwd: paths.home,
       stdio: ['ignore', log, log],
       env,
     });

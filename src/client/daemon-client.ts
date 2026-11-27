@@ -41,6 +41,9 @@ import { type DaemonStartOptions, ensureDaemonStarted, waitForSocketGone } from 
  *
  * Errors: the daemon's typed errors (ThreadNotFound, ThreadBusy, …) are
  * thrown as they are; tell them apart by `_tag`.
+ *
+ * An open connection keeps Node's event loop alive (the socket and its
+ * keep-alive pings): call `dispose()` before the process means to exit.
  */
 
 export { ensureDaemonStarted } from './daemon-spawn.js';
