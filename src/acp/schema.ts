@@ -1,5 +1,5 @@
-export * from "./_generated/schema.gen.ts";
-export * from "./_generated/meta.gen.ts";
+export * from "./_generated/schema.gen.js";
+export * from "./_generated/meta.gen.js";
 
 export {
   CancelSessionNotification as CancelNotification,
@@ -10,4 +10,4 @@ export {
   ResumeSessionRequest as LoadSessionRequest,
   ResumeSessionResponse as LoadSessionResponse,
   UpdateSessionNotification as SessionNotification,
-} from "./_generated/schema.gen.ts";
+} from "./_generated/schema.gen.js";

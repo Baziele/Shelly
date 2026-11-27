@@ -10,18 +10,18 @@ import * as RpcClient from "effect/rpc/RpcClient";
 import * as RpcMessage from "effect/rpc/RpcMessage";
 import * as RpcServer from "effect/rpc/RpcServer";
 
-import * as AcpSchema from "./schema.ts";
-import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.ts";
-import * as AcpError from "./errors.ts";
-import * as AcpProtocol from "./protocol.ts";
-import * as AcpRpcs from "./rpc.ts";
+import * as AcpSchema from "./schema.js";
+import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.js";
+import * as AcpError from "./errors.js";
+import * as AcpProtocol from "./protocol.js";
+import * as AcpRpcs from "./rpc.js";
 import {
   callRpc,
   decodeExtNotificationRegistration,
   decodeExtRequestRegistration,
   isolateNotificationHandler,
   runHandler,
-} from "./_internal/shared.ts";
+} from "./_internal/shared.js";
 
 export interface AcpAgentOptions {
   readonly logIncoming?: boolean;

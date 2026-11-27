@@ -1,4 +1,4 @@
-import type * as AcpCompat from "./compat.ts";
+import type * as AcpCompat from "./compat.js";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -19,11 +19,11 @@ import * as RpcMessage from "effect/rpc/RpcMessage";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
 
-import * as AcpSchema from "./schema.ts";
-import * as AcpSchemaV1 from "./_generated/schema-v1.gen.ts";
-import { CLIENT_METHODS } from "./_generated/meta.gen.ts";
-import * as AcpError from "./errors.ts";
-import { isolateNotificationHandler } from "./_internal/shared.ts";
+import * as AcpSchema from "./schema.js";
+import * as AcpSchemaV1 from "./_generated/schema-v1.gen.js";
+import { CLIENT_METHODS } from "./_generated/meta.gen.js";
+import * as AcpError from "./errors.js";
+import { isolateNotificationHandler } from "./_internal/shared.js";
 const isAcpError = Schema.is(AcpError.AcpError);
 
 export interface AcpProtocolLogEvent {

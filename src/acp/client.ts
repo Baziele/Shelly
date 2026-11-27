@@ -13,21 +13,21 @@ import * as RpcMessage from "effect/rpc/RpcMessage";
 import * as RpcServer from "effect/rpc/RpcServer";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import * as AcpError from "./errors.ts";
-import * as AcpProtocol from "./protocol.ts";
-import * as AcpRpcs from "./rpc.ts";
-import * as AcpSchema from "./compat.ts";
-import * as AcpSchemaV1 from "./_generated/schema-v1.gen.ts";
-import * as AcpSchemaV2 from "./_generated/schema.gen.ts";
-import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.ts";
+import * as AcpError from "./errors.js";
+import * as AcpProtocol from "./protocol.js";
+import * as AcpRpcs from "./rpc.js";
+import * as AcpSchema from "./compat.js";
+import * as AcpSchemaV1 from "./_generated/schema-v1.gen.js";
+import * as AcpSchemaV2 from "./_generated/schema.gen.js";
+import { AGENT_METHODS, CLIENT_METHODS } from "./_generated/meta.gen.js";
 import {
   callRpc,
   decodeExtNotificationRegistration,
   decodeExtRequestRegistration,
   isolateNotificationHandler,
   runHandler,
-} from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+} from "./_internal/shared.js";
+import { makeChildStdio, makeTerminationError } from "./_internal/stdio.js";
 
 const decodeElicitationRequest = Schema.decodeUnknownEffect(
   Schema.Union([AcpSchemaV2.CreateElicitationRequest, AcpSchemaV1.CreateElicitationRequest]),

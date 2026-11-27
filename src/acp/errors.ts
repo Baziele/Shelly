@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
 import type * as SchemaIssue from "effect/SchemaIssue";
 
-import * as AcpSchema from "./_generated/schema.gen.ts";
+import * as AcpSchema from "./_generated/schema.gen.js";
 
 const AcpRequestOperation = Schema.Literals([
   "decode-extension-request-payload",

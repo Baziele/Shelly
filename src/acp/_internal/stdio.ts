@@ -6,7 +6,7 @@ import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import { ChildProcessSpawner } from "effect/process";
 
-import * as AcpError from "../errors.ts";
+import * as AcpError from "../errors.js";
 
 const encoder = new TextEncoder();
 

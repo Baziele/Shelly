@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import type * as V2 from "./_generated/schema.gen.ts";
+import type * as V2 from "./_generated/schema.gen.js";
 
 type Meta = AcpMeta | null;
 type AcpMeta = NonNullable<V2.InitializeRequest["_meta"]>;
