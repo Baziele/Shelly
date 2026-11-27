@@ -47,6 +47,31 @@ export interface Stack {
   stop(): Promise<void>;
 }
 
+/** A config.json with the fake ACP agent as the default agent. */
+export const fakeAgentConfig = (scenario = E2E_SCENARIO, promptLog?: string): Record<string, unknown> => ({
+  defaultAgent: 'fake',
+  agents: {
+    fake: {
+      name: 'Fake Agent',
+      command: process.execPath,
+      args: ['--import', TSX, FAKE_AGENT, '--scenario', scenario],
+      ...(promptLog ? { env: { FAKE_ACP_PROMPT_LOG: promptLog } } : {}),
+    },
+  },
+});
+
+/** Driver options for a scenario (`pnpm scenario`): the fake agent as default, and the fake claude on PATH. */
+export const scenarioOptions = (options: DriverOptions = {}): DriverOptions => {
+  const bin = mkdtempSync(join(tmpdir(), 'shelly-bin-'));
+  writeFakeClaude(bin);
+  process.once('exit', () => rmSync(bin, { recursive: true, force: true }));
+  return {
+    ...options,
+    config: { ...fakeAgentConfig(), ...options.config },
+    env: { PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`, ...options.env },
+  };
+};
+
 /** Put the fake `claude` (fast mode's stream-json protocol) in `bin`, for a PATH. */
 export const writeFakeClaude = (bin: string): void => {
   mkdirSync(bin, { recursive: true });
@@ -71,18 +96,7 @@ export const startStack = async (options: StackOptions = {}): Promise<Stack> => 
   };
   if (!options.realAgents) {
     writeFakeClaude(bin);
-    const config = {
-      defaultAgent: 'fake',
-      agents: {
-        fake: {
-          name: 'Fake Agent',
-          command: process.execPath,
-          args: ['--import', TSX, FAKE_AGENT, '--scenario', options.scenario ?? E2E_SCENARIO],
-          env: { FAKE_ACP_PROMPT_LOG: promptLog },
-        },
-      },
-      ...options.config,
-    };
+    const config = { ...fakeAgentConfig(options.scenario, promptLog), ...options.config };
     writeFileSync(join(shellyHome, 'config.json'), JSON.stringify(config, null, 2));
     env.PATH = `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`;
     Object.assign(env, options.fakeClaudeEnv);
