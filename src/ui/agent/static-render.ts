@@ -3,25 +3,34 @@ import { encodeRow } from '../../render/inline-painter.js';
 import type { PaintRow } from '../../render/live-region.js';
 import type { ColorDepth } from '../../render/sgr.js';
 import { HeadlessRenderer } from '../headless-renderer.js';
+import { seg } from './lines.js';
 import { createMarkdownStyle, MessageView } from './message-view.js';
+import { lineToPaintRow } from './paint-line.js';
 
 const FIRST_BUFFER_ROWS = 200;
+/**
+ * The tallest layout tried. Past it (a 20,000-row answer), the rows that fit
+ * are kept with a note saying how many were left out, rather than nothing.
+ */
+export const MAX_BUFFER_ROWS = 20_000;
 
 /**
  * Markdown laid out once at `width`, as paint rows: for output printed
- * statically (history, fast-mode answers) rather than streamed.
+ * statically (history, fast-mode answers) rather than streamed. The layout
+ * grows until the whole document fits.
  */
-export const renderMarkdownRows = async (markdown: string, width: number): Promise<PaintRow[]> => {
-  let bufferRows = FIRST_BUFFER_ROWS;
+export const renderMarkdownRows = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS): Promise<PaintRow[]> => {
+  let bufferRows = Math.min(FIRST_BUFFER_ROWS, maxRows);
   const headless = HeadlessRenderer.create({ width, height: bufferRows });
   try {
-    const root = new BoxRenderable(headless.renderer, { flexDirection: 'column', width: '100%' });
+    // flexShrink 0: the box must report its full height, not the buffer's, or a tall answer is cut short.
+    const root = new BoxRenderable(headless.renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
     const message = new MessageView(headless.renderer, createMarkdownStyle(headless.renderer));
     root.add(message.root);
     headless.renderer.root.add(root);
     message.update(markdown, true);
 
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (;;) {
       const frame = await new Promise<{ rows: PaintRow[]; height: number }>((resolve) => {
         headless.onFrame((captured) => resolve({ rows: captured.rows.map((row) => [...row]), height: root.height }));
         headless.requestRender();
@@ -29,10 +38,13 @@ export const renderMarkdownRows = async (markdown: string, width: number): Promi
       if (frame.height <= bufferRows) {
         return trimBlankRows(frame.rows.slice(0, frame.height));
       }
-      bufferRows = frame.height + 10;
+      if (bufferRows >= maxRows) {
+        const hidden = frame.height - bufferRows;
+        return [...trimBlankRows(frame.rows), lineToPaintRow([seg(`… (${hidden} more lines not shown)`, 'muted')])];
+      }
+      bufferRows = Math.min(maxRows, frame.height + 10);
       headless.resize({ width, height: bufferRows });
     }
-    return [];
   } finally {
     headless.destroy();
   }
