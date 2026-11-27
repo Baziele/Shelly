@@ -68,7 +68,16 @@ jobs:
       - name: Enforce the verdict
         env:
           OUTPUT: ${{ steps.review.outputs.structured_output }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # The action only runs a workflow identical to the default branch's,
+          # so a pull request cannot rewrite its own reviewer. Such a pull
+          # request gets no review; let it through with a warning, and fail
+          # every other run that produced no verdict.
+          if [ -z "$OUTPUT" ] && git diff --name-only "$BASE_SHA" HEAD | grep -qx '.github/workflows/claude-review.yml'; then
+            echo "::warning::This pull request changes the review workflow, so Claude did not review it. Review it by hand."
+            exit 0
+          fi
           verdict=$(printf '%s' "$OUTPUT" | jq -r '.verdict // empty')
           blocking=$(printf '%s' "$OUTPUT" | jq -r '.blocking_issues // empty')
           printf '%s' "$OUTPUT" | jq -r '.summary // empty' >> "$GITHUB_STEP_SUMMARY"
