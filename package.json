@@ -1,15 +1,24 @@
 {
   "name": "shelly",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
-    "build": "tsup src/index.ts --format esm --clean"
+  "version": "0.1.0",
+  "description": "An AI agent that lives invisibly inside your terminal.",
+  "type": "module",
+  "bin": {
+    "shelly": "./dist/index.js"
   },
-  "keywords": [],
-  "author": "",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=26.4.0"
+  },
+  "scripts": {
+    "start": "node --experimental-ffi --no-warnings --import tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --target node26 --clean",
+    "typecheck": "tsc",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test:e2e": "node --import tsx --test \"test/e2e/*.e2e.ts\""
+  },
   "license": "ISC",
   "devEngines": {
     "packageManager": {
@@ -18,14 +27,16 @@
       "onFail": "download"
     }
   },
-  "type": "module",
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.18.16",
+    "@opentui/core": "0.9.9",
+    "node-pty": "^1.1.0"
+  },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@xterm/headless": "6.0.0",
     "tsup": "^8.5.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
-  },
-  "dependencies": {
-    "node-pty": "^1.1.0"
   }
 }
