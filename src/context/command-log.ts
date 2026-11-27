@@ -21,7 +21,7 @@ export interface CommandLogOptions {
   /** Terminal width, used to replay output that redraws itself. */
   readonly columns: () => number;
   readonly maxCommands?: number;
-  /** Budget for raw output kept across all commands, in characters. */
+  /** Budget for output kept across all commands, raw and cleaned, in characters. */
   readonly maxStoredChars?: number;
   readonly now?: () => number;
   readonly render?: (snapshot: OutputSnapshot, columns: number) => Promise<string>;
@@ -47,7 +47,7 @@ interface Entry {
 }
 
 const DEFAULT_MAX_COMMANDS = 100;
-const DEFAULT_MAX_STORED_CHARS = 8 * 1024 * 1024;
+const DEFAULT_MAX_STORED_CHARS = 4 * 1024 * 1024;
 
 /**
  * The shell session's recent commands. Raw output is collected while a
@@ -173,6 +173,10 @@ export class CommandLog {
     } catch {
       entry.output = '[output could not be read]';
     }
+    if (this.entries.includes(entry)) {
+      this.storedChars += entry.output.length;
+      this.evict();
+    }
   }
 
   private evict(): void {
@@ -182,7 +186,7 @@ export class CommandLog {
     ) {
       const dropped = this.entries.shift();
       if (dropped) {
-        this.storedChars -= rawSize(dropped.raw);
+        this.storedChars -= rawSize(dropped.raw) + (dropped.output?.length ?? 0);
       }
     }
   }

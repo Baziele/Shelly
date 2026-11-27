@@ -1,6 +1,10 @@
-/** Characters kept from the start and from the end of one command's output. */
-export const CAPTURE_HEAD_CHARS = 128 * 1024;
-export const CAPTURE_TAIL_CHARS = 128 * 1024;
+/**
+ * Characters kept from the start and from the end of one command's output.
+ * An agent sees a few thousand characters per command at most, and can page
+ * through the rest; past this, the middle is dropped.
+ */
+export const CAPTURE_HEAD_CHARS = 64 * 1024;
+export const CAPTURE_TAIL_CHARS = 64 * 1024;
 
 export interface OutputSnapshot {
   readonly head: string;
@@ -22,85 +26,96 @@ const ALT_SCREEN_PREFIXES = ['\u001b[?1049', '\u001b[?1047', '\u001b[?47'].flatM
  * grows past the cap; errors and summaries tend to be at the end.
  */
 export class CapturedOutput {
-  private head = '';
-  private tail = '';
+  // Characters are copied into fixed buffers rather than keeping the strings
+  // the program wrote: capturing a flood of output allocates nothing, so the
+  // JavaScript heap does not grow with it.
+  private readonly head = new Uint16Array(CAPTURE_HEAD_CHARS);
+  private headLength = 0;
+  /** A ring: `tailNext` is where the next character goes, overwriting the oldest. */
+  private readonly tail = new Uint16Array(CAPTURE_TAIL_CHARS);
+  private tailNext = 0;
+  private tailLength = 0;
   private omitted = 0;
   private fullScreen = false;
   private usedFullScreen = false;
   /** A possibly incomplete alt-screen sequence at the end of the last chunk. */
   private carry = '';
 
-  get size(): number {
-    return this.head.length + this.tail.length + this.carry.length;
-  }
-
   append(data: string): void {
     const input = this.carry + data;
     this.carry = '';
 
-    let visible = '';
     let cursor = 0;
     for (const match of input.matchAll(ALT_SCREEN)) {
       if (!this.fullScreen) {
-        visible += input.slice(cursor, match.index);
+        this.store(input, cursor, match.index);
       }
       this.fullScreen = match[1] === 'h';
       this.usedFullScreen ||= this.fullScreen;
       cursor = match.index + match[0].length;
     }
 
-    let rest = input.slice(cursor);
-    const partial = trailingPrefixLength(rest);
-    this.carry = rest.slice(rest.length - partial);
-    rest = rest.slice(0, rest.length - partial);
+    const end = input.length - trailingPrefixLength(input, cursor);
+    this.carry = input.slice(end);
     if (!this.fullScreen) {
-      visible += rest;
+      this.store(input, cursor, end);
     }
-    this.store(visible);
   }
 
   /** The command has ended: keep any held-back text that turned out to be ordinary output. */
   finish(): void {
     if (!this.fullScreen) {
-      this.store(this.carry);
+      this.store(this.carry, 0, this.carry.length);
     }
     this.carry = '';
   }
 
   snapshot(): OutputSnapshot {
-    const overflow = Math.max(0, this.tail.length - CAPTURE_TAIL_CHARS);
+    const tail = this.tailLength < CAPTURE_TAIL_CHARS
+      ? decode(this.tail.subarray(0, this.tailLength))
+      : decode(this.tail.subarray(this.tailNext)) + decode(this.tail.subarray(0, this.tailNext));
     return {
-      head: this.head,
-      tail: this.tail.slice(overflow),
-      omittedChars: this.omitted + overflow,
+      head: decode(this.head.subarray(0, this.headLength)),
+      tail,
+      omittedChars: this.omitted,
       usedFullScreen: this.usedFullScreen,
     };
   }
 
-  private store(text: string): void {
-    if (!text) {
-      return;
+  private store(text: string, start: number, end: number): void {
+    let index = start;
+    while (index < end && this.headLength < CAPTURE_HEAD_CHARS) {
+      this.head[this.headLength++] = text.charCodeAt(index++);
     }
 
-    const room = CAPTURE_HEAD_CHARS - this.head.length;
-    if (room > 0) {
-      this.head += text.slice(0, room);
-      text = text.slice(room);
+    // Only the last CAPTURE_TAIL_CHARS of a long write can survive in the ring.
+    const skip = Math.max(0, end - index - CAPTURE_TAIL_CHARS);
+    if (skip > 0) {
+      this.omitted += skip + this.tailLength;
+      this.tailLength = 0;
+      this.tailNext = 0;
+      index += skip;
     }
 
-    this.tail += text;
-    // Trim lazily so a stream of small writes does not copy the tail each time.
-    if (this.tail.length > CAPTURE_TAIL_CHARS * 2) {
-      const drop = this.tail.length - CAPTURE_TAIL_CHARS;
-      this.omitted += drop;
-      this.tail = this.tail.slice(drop);
+    for (; index < end; index++) {
+      this.tail[this.tailNext] = text.charCodeAt(index);
+      this.tailNext = (this.tailNext + 1) % CAPTURE_TAIL_CHARS;
+      if (this.tailLength < CAPTURE_TAIL_CHARS) {
+        this.tailLength++;
+      } else {
+        this.omitted++;
+      }
     }
   }
 }
 
-const trailingPrefixLength = (text: string): number => {
+const utf16 = new TextDecoder('utf-16le');
+const decode = (units: Uint16Array): string => (units.length === 0 ? '' : utf16.decode(units));
+
+/** Length of a possibly unfinished alt-screen switch at the end of `text`, from `from` on. */
+const trailingPrefixLength = (text: string, from: number): number => {
   const escape = text.lastIndexOf('\u001b');
-  if (escape === -1 || text.length - escape > 7) {
+  if (escape < from || text.length - escape > 7) {
     return 0;
   }
   return ALT_SCREEN_PREFIXES.includes(text.slice(escape)) ? text.length - escape : 0;

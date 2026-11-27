@@ -16,6 +16,18 @@ describe('renderTerminalText', () => {
     assert.equal(await renderTerminalText(raw, 80), 'Downloading\n100%\nok');
   });
 
+  it('returns to the start of the wrapped row, as a terminal does', async () => {
+    assert.equal(await renderTerminalText(`${'x'.repeat(25)}\rAB\r\n`, 20), `${'x'.repeat(20)}ABxxx`);
+  });
+
+  it('follows tabs, column moves and erases within a line', async () => {
+    assert.equal(await renderTerminalText('a\tb\r\n12345\u001b[3G\u001b[KX\r\nab\u0008c\r\n', 80), 'a       b\n12X\nac');
+  });
+
+  it('treats a lone carriage return at the end as harmless', async () => {
+    assert.equal(await renderTerminalText('1\r\n2\r', 80), '1\n2');
+  });
+
   it('applies cursor movement, as when a tool rewrites earlier lines', async () => {
     const raw = 'step 1: pending\r\nstep 2: pending\r\n\u001b[2A\r\u001b[Kstep 1: done\r\n\u001b[Kstep 2: done\r\n';
     assert.equal(await renderTerminalText(raw, 80), 'step 1: done\nstep 2: done');
