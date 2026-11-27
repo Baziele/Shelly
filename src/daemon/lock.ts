@@ -329,12 +329,22 @@ export const acquireDaemonLock = async (
 
 /** A live holder younger than this may still be starting, whatever its socket says. */
 export const LOCK_GRACE_MS = 10_000;
-/** How long a daemon keeps trying for a lock whose holder serves nothing (it is stopping, or starting). */
-export const LOCK_WAIT_MS = 10_000;
+/**
+ * How long a daemon keeps trying for a lock whose holder serves nothing (it
+ * is stopping, or starting). It must cover a stopping daemon: up to 2 s for
+ * stuck turns (all at once), then its agents and store, well under 6 s. And
+ * it must end clearly before the client that started this daemon gives up
+ * (DEFAULT_START_TIMEOUT_MS in client/daemon-spawn.ts, 10 s), leaving this
+ * daemon about 4 s to start serving once it has the lock. Shortening this
+ * wait, rather than lengthening the client's, keeps a daemon that truly
+ * cannot start from making the user wait longer for the error.
+ */
+export const LOCK_WAIT_MS = 6_000;
 /**
  * A holder whose socket has refused connections this long, without a break,
  * is not a daemon any more: its pid was reused. Longer than a daemon takes
- * to stop once it has closed its socket.
+ * to stop once it has closed its socket, and shorter than LOCK_WAIT_MS, or
+ * no takeover would ever happen.
  */
 export const LOCK_ABANDONED_AFTER_MS = 5_000;
 const LOCK_RETRY_MS = 50;

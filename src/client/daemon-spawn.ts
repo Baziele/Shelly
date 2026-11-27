@@ -29,8 +29,10 @@ export class DaemonStartFailed extends Error {
 
 /**
  * Long enough for a daemon that is stopping to let go of its lock (it may
- * give stuck turns 2 s to end) and for the new one to start. A daemon that
- * fails to start exits, which ends the wait early.
+ * give stuck turns 2 s to end) and for the new one to start: longer than
+ * the new daemon's own wait for the lock (LOCK_WAIT_MS in daemon/lock.ts,
+ * 6 s) plus its startup. A daemon that fails to start exits, which ends the
+ * wait early.
  */
 const DEFAULT_START_TIMEOUT_MS = 10_000;
 /** After the spawned daemon exited: how long another daemon (the one it deferred to) gets to answer. */
