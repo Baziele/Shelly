@@ -66,6 +66,8 @@ export const layer = DaemonRpcs.toLayer(
       'thread.respond': (payload, options) => bind(options, payload.clientId).pipe(Effect.andThen(threads.respond(payload))),
       'thread.setMode': ({ threadId, clientId, modeId }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.setMode(threadId, clientId, modeId))),
+      'thread.modes': ({ threadId, clientId }, options) =>
+        bind(options, clientId).pipe(Effect.andThen(threads.modes(threadId, clientId))),
       'thread.rename': ({ threadId, clientId, title }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.rename(threadId, clientId, title))),
       'thread.delete': ({ threadId, clientId }, options) =>

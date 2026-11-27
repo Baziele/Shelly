@@ -15,6 +15,7 @@ import {
 import {
   AgentInfo,
   FastEvent,
+  ModeState,
   FastInput,
   PromptContext,
   ThreadEvent,
@@ -154,6 +155,17 @@ export const SetThreadMode = Rpc.make('thread.setMode', {
   error: Schema.Union([ThreadNotFound, ThreadBusy, AgentFailed]),
 });
 
+/**
+ * The thread's modes: the agent's current one and the ones it offers, null
+ * for an agent without modes. Opens the agent's session if it has none
+ * yet, so it can take a moment on a cold agent.
+ */
+export const ThreadModes = Rpc.make('thread.modes', {
+  payload: { threadId: Schema.String, clientId: Schema.String },
+  success: Schema.NullOr(ModeState),
+  error: Schema.Union([ThreadNotFound, ThreadBusy, AgentFailed]),
+});
+
 export const RenameThread = Rpc.make('thread.rename', {
   payload: { threadId: Schema.String, clientId: Schema.String, title: Schema.String },
   error: ThreadError,
@@ -247,6 +259,7 @@ export class DaemonRpcs extends RpcGroup.make(
   CancelTurn,
   RespondToPermission,
   SetThreadMode,
+  ThreadModes,
   RenameThread,
   DeleteThread,
   PrewarmThread,

@@ -6,8 +6,12 @@ import * as Schema from 'effect/Schema';
  * from ACP here, so clients never see an agent's own protocol.
  */
 
-/** Bumped whenever a schema in src/protocol changes incompatibly. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * Bumped whenever a schema in src/protocol changes incompatibly, or gains a
+ * call an older daemon would not know (2: `thread.modes`), so a client asks
+ * an older idle daemon to make way.
+ */
+export const PROTOCOL_VERSION = 2;
 
 // ─── Agents ─────────────────────────────────────────────────────────────────
 
@@ -88,6 +92,12 @@ export const AgentMode = Schema.Struct({
   description: Schema.NullOr(Schema.String),
 });
 export type AgentMode = typeof AgentMode.Type;
+
+export const ModeState = Schema.Struct({
+  currentModeId: Schema.String,
+  availableModes: Schema.Array(AgentMode),
+});
+export type ModeState = typeof ModeState.Type;
 
 // ─── Thread events (what clients render) ────────────────────────────────────
 

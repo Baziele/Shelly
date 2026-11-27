@@ -343,11 +343,14 @@ describe('ThreadService', () => {
       }), { fake });
   });
 
-  it('switches modes, renames and deletes', async () => {
+  it('lists and switches modes, renames and deletes', async () => {
     const fake = new FakeAgents();
     await withThreads((threads) =>
       Effect.gen(function* () {
         const thread = yield* createAttached(threads);
+        const offered = yield* threads.modes(thread.id, CLIENT);
+        assert.deepEqual(offered?.availableModes.map((mode) => mode.id), ['default', 'plan']);
+        assert.equal((yield* threads.modes(thread.id, 'other').pipe(Effect.flip))._tag, 'ThreadBusy');
         yield* threads.setMode(thread.id, CLIENT, 'plan');
         assert.deepEqual(fake.modes, ['plan']);
         const busy = yield* threads.setMode(thread.id, 'other', 'plan').pipe(Effect.flip);

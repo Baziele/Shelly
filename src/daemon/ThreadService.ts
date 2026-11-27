@@ -16,7 +16,7 @@ import {
   TurnInProgress,
   UnknownRequest,
 } from '../protocol/errors.js';
-import type { AgentMode, PromptContext, StopReason, ThreadEvent, ThreadLocation, ThreadSummary } from '../protocol/schema.js';
+import type { AgentMode, ModeState, PromptContext, StopReason, ThreadEvent, ThreadLocation, ThreadSummary } from '../protocol/schema.js';
 import { AgentDirectory } from './AgentDirectory.js';
 import { DaemonPaths } from './DaemonPaths.js';
 import { formatPromptForAgent } from './prompt.js';
@@ -113,6 +113,8 @@ export class ThreadService extends Context.Service<
       readonly optionId: string | null;
     }) => Effect.Effect<void, ThreadNotFound | ThreadBusy | UnknownRequest>;
     readonly setMode: (threadId: string, clientId: string, modeId: string) => Effect.Effect<void, ThreadNotFound | ThreadBusy | AgentFailed>;
+    /** The agent's modes for the thread, opening its session if need be; null when it has none. */
+    readonly modes: (threadId: string, clientId: string) => Effect.Effect<ModeState | null, ThreadNotFound | ThreadBusy | AgentFailed>;
     readonly rename: (threadId: string, clientId: string, title: string) => Effect.Effect<void, ThreadNotFound | ThreadBusy>;
     readonly remove: (threadId: string, clientId: string) => Effect.Effect<void, ThreadNotFound | ThreadBusy>;
     /** Start the agent (and the thread's session) in the background. Returns at once. */
@@ -654,13 +656,23 @@ const make = Effect.gen(function* () {
     yield* resolvePermission(input.threadId, thread, turn, input.requestId, input.optionId);
   });
 
+  /**
+   * The running turn's session, or the thread's session opened (or resumed)
+   * for a call outside a turn. The caller records a changed session id, under
+   * the thread's lock.
+   */
+  const sessionFor = (row: ThreadRow, thread: LiveThread) =>
+    thread.turn?.session
+      ? Effect.succeed(thread.turn.session)
+      : runtime.session(sessionRequest(row, row.lastShellCwd)).pipe(
+        Effect.catchTags({ AgentUnavailable: (error) => Effect.fail(new AgentFailed({ agentId: error.agentId, reason: error.reason })) }),
+      );
+
   const setMode = Effect.fn('ThreadService.setMode')(function* (threadId: string, clientId: string, modeId: string) {
     const row = yield* requireThread(threadId);
     const thread = yield* liveThread(threadId);
     yield* requireDriver(threadId, thread, clientId);
-    const session = thread.turn?.session ?? (yield* runtime.session(sessionRequest(row, row.lastShellCwd)).pipe(
-      Effect.catchTags({ AgentUnavailable: (error) => Effect.fail(new AgentFailed({ agentId: error.agentId, reason: error.reason })) }),
-    ));
+    const session = yield* sessionFor(row, thread);
     // The thread may have been deleted while the agent started: write nothing, and let go of the session.
     const gone = Effect.gen(function* () {
       yield* runtime.release(threadId);
@@ -682,6 +694,21 @@ const make = Effect.gen(function* () {
         yield* emitMode(threadId, thread, { currentModeId: modeId, availableModes: session.modes?.availableModes ?? [] });
       }),
     );
+  });
+
+  const modes = Effect.fn('ThreadService.modes')(function* (threadId: string, clientId: string) {
+    const row = yield* requireThread(threadId);
+    const thread = yield* liveThread(threadId);
+    yield* requireDriver(threadId, thread, clientId);
+    const session = yield* sessionFor(row, thread);
+    if (thread.deleted) {
+      yield* runtime.release(threadId);
+      return yield* new ThreadNotFound({ threadId });
+    }
+    if (session.nativeSessionId !== row.nativeSessionId) {
+      yield* Semaphore.withPermit(thread.lock, store.updateThread(threadId, { nativeSessionId: session.nativeSessionId }));
+    }
+    return session.modes;
   });
 
   const rename = Effect.fn('ThreadService.rename')(function* (threadId: string, clientId: string, title: string) {
@@ -771,6 +798,7 @@ const make = Effect.gen(function* () {
     cancel,
     respond,
     setMode,
+    modes,
     rename,
     remove,
     prewarm,
