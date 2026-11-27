@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import type { FlowHost, OpenInput, ReleaseOptions } from './client/flow-host.js';
 import type { Flows } from './client/flows.js';
-import { DaemonLink } from './client/daemon-link.js';
+import type { DaemonLink } from './client/daemon-link.js';
 import { BUILTIN_COMMANDS, CommandRegistry } from './commands/slash-commands.js';
 import { CommandLog } from './context/command-log.js';
 import { describeEnvironment, type EnvironmentInfo } from './context/environment.js';
@@ -51,7 +51,7 @@ export interface ShellyOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly triggers?: readonly string[];
   readonly rewriteHotkeys?: readonly string[];
-  /** The daemon connection; tests may pass their own. */
+  /** The daemon connection; tests may pass their own. Loaded after the shell is up otherwise. */
   readonly link?: DaemonLink;
 }
 
@@ -89,7 +89,9 @@ export class Shelly {
   /** Where keys go in `busy` mode; returns whether they were used. */
   private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
-  private readonly link: DaemonLink;
+  /** The daemon connection, loaded (with the UI) off the startup path. */
+  private linkLoad: Promise<DaemonLink> | undefined;
+  private link: DaemonLink | undefined;
   private readonly initialCwd: string;
   private flows: Flows | undefined;
   private warmupStarted = false;
@@ -119,7 +121,7 @@ export class Shelly {
     this.shellPath = options.shell;
     this.env = options.env;
     this.initialCwd = options.cwd;
-    this.link = options.link ?? new DaemonLink({ env: options.env });
+    this.link = options.link;
     this.colorDepth = detectColorDepth(options.env);
     const lineEditor = new LineEditor({
       write: (data) => this.shell.write(data),
@@ -168,7 +170,11 @@ export class Shelly {
 
   private async loadOverlay(): Promise<InlineOverlay | undefined> {
     try {
-      const [{ InlineOverlay }, { Flows }] = await Promise.all([import('./ui/inline-overlay.js'), import('./client/flows.js')]);
+      const [{ InlineOverlay }, { Flows }, link] = await Promise.all([
+        import('./ui/inline-overlay.js'),
+        import('./client/flows.js'),
+        this.loadLink(),
+      ]);
       if (this.disposed) {
         return undefined;
       }
@@ -177,7 +183,7 @@ export class Shelly {
         onCancel: () => this.open && this.flows?.cancel(this.open),
       });
       this.overlay = overlay;
-      this.flows = new Flows(this.flowHost(overlay));
+      this.flows = new Flows(this.flowHost(overlay, link));
       return overlay;
     } catch (error) {
       // Keep working as a plain shell; triggers simply pass through.
@@ -189,12 +195,23 @@ export class Shelly {
   }
 
   /** What the agent and fast flows get to work with. */
-  private flowHost(overlay: InlineOverlay): FlowHost {
+  /** The daemon link module is small and plain, but still not needed before the first prompt. */
+  private loadLink(): Promise<DaemonLink> {
+    this.linkLoad ??= this.link
+      ? Promise.resolve(this.link)
+      : import('./client/daemon-link.js').then(({ DaemonLink }) => {
+        this.link = new DaemonLink({ env: this.env });
+        return this.link;
+      });
+    return this.linkLoad;
+  }
+
+  private flowHost(overlay: InlineOverlay, link: DaemonLink): FlowHost {
     return {
       terminal: this.host,
       colorDepth: this.colorDepth,
       overlay,
-      link: this.link,
+      link,
       commands: this.commands,
       lineEditor: this.lineEditor,
       home: this.env.HOME || homedir(),
@@ -351,7 +368,7 @@ export class Shelly {
       return;
     }
     this.warmupStarted = true;
-    void this.link.startDaemon().catch(() => undefined);
+    void this.loadLink().then((link) => link.startDaemon()).catch(() => undefined);
     const whenIdle = (): void => {
       if (this.disposed) {
         return;
@@ -361,7 +378,7 @@ export class Shelly {
         this.warmupTimer = setTimeout(whenIdle, IDLE_MS - quietFor);
         return;
       }
-      void this.link.get().then((client) => this.flows?.connected(client), () => undefined);
+      void this.loadLink().then((link) => link.get()).then((client) => this.flows?.connected(client), () => undefined);
     };
     this.warmupTimer = setTimeout(whenIdle, IDLE_MS);
   }
@@ -629,6 +646,6 @@ export class Shelly {
     this.host.stop();
     // Detach the thread so another terminal can take it, and close the connection so the process can exit.
     const flows = this.flows;
-    await this.link.dispose(flows ? (client) => flows.goodbye(client) : undefined);
+    await this.link?.dispose(flows ? (client) => flows.goodbye(client) : undefined);
   }
 }
