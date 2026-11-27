@@ -8,7 +8,7 @@ describe('prepareShellIntegration', () => {
   it('finds the hook scripts shipped with Shelly', () => {
     const zsh = prepareShellIntegration('/bin/zsh', {});
     assert.ok(zsh);
-    assert.ok(existsSync(join(zsh.env.ZDOTDIR ?? '', '.zshrc')));
+    assert.ok(existsSync(join(zsh.env.ZDOTDIR ?? '', '.zshenv')));
   });
 
   it('points zsh at the hooks and remembers the user ZDOTDIR', () => {
@@ -23,7 +23,9 @@ describe('prepareShellIntegration', () => {
 
   it('loads the hooks as bash and fish startup files', () => {
     assert.deepEqual(prepareShellIntegration('/usr/local/bin/bash', {}, '/opt/shelly')?.args, ['--rcfile', '/opt/shelly/bash/shelly.bash']);
-    assert.deepEqual(prepareShellIntegration('fish', {}, "/opt/it's")?.args, ['--init-command', "source '/opt/it\\'s/fish/shelly.fish'"]);
+    const fish = prepareShellIntegration('fish', {}, "/opt/it's");
+    assert.deepEqual(fish?.args, ['--init-command', `set -g __shelly_nonce ${fish?.nonce}; source '/opt/it\\'s/fish/shelly.fish'`]);
+    assert.deepEqual(fish?.env, {}, 'the nonce stays out of the environment');
   });
 
   it('gives every session its own nonce', () => {
@@ -31,7 +33,7 @@ describe('prepareShellIntegration', () => {
     const second = prepareShellIntegration('/bin/bash', {}, '/opt/shelly');
     assert.match(first?.nonce ?? '', /^[0-9a-f]{24}$/);
     assert.notEqual(first?.nonce, second?.nonce);
-    assert.equal(first?.env.SHELLY_NONCE, first?.nonce);
+    assert.equal(first?.env.SHELLY_NONCE, first?.nonce, 'bash removes it from its environment first thing');
   });
 
   it('leaves other shells alone, and can be turned off', () => {

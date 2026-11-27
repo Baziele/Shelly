@@ -22,7 +22,7 @@ const findScriptsDir = (): string | undefined => {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 4; depth++) {
     const candidate = join(dir, SCRIPTS_DIR);
-    if (existsSync(join(candidate, 'zsh', '.zshrc'))) {
+    if (existsSync(join(candidate, 'zsh', '.zshenv'))) {
       return candidate;
     }
     dir = dirname(dir);
@@ -65,9 +65,11 @@ export const prepareShellIntegration = (
         nonce,
       };
     case 'fish':
+      // fish reads the hooks after config.fish, so the nonce travels in the
+      // command itself rather than through anything config.fish could start.
       return {
-        args: ['--init-command', `source ${fishQuote(join(scriptsDir, 'fish', 'shelly.fish'))}`],
-        env: { SHELLY_NONCE: nonce },
+        args: ['--init-command', `set -g __shelly_nonce ${nonce}; source ${fishQuote(join(scriptsDir, 'fish', 'shelly.fish'))}`],
+        env: {},
         nonce,
       };
     default:

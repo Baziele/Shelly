@@ -1,41 +1,33 @@
 # Shelly shell integration for zsh, loaded by pointing ZDOTDIR here.
 #
-# Each of these startup files runs the user's own copy from their real
-# ZDOTDIR, so the shell is configured exactly as it would be without Shelly.
-# .zshrc then hands ZDOTDIR back and installs hooks that report each command
-# to Shelly. The protocol is described in src/shell/shell-markers.ts.
+# This is the only file zsh reads from here: ZDOTDIR goes straight back to
+# the user's own value, then their .zshenv runs, and zsh goes on to read
+# .zprofile, .zshrc and .zlogin from their directory exactly as it would
+# without Shelly. Hooks are installed at the first prompt, once all of that
+# has run. The protocol is described in src/shell/shell-markers.ts.
+#
+# Everything here runs at the top level (not in a function) so the user's
+# files keep their usual scoping, and builtins are quoted so user aliases
+# cannot change what they do.
 
-typeset -g __shelly_dir="$ZDOTDIR"
-typeset -g __shelly_zdotdir="${SHELLY_USER_ZDOTDIR:-$HOME}"
-typeset -g __shelly_had_zdotdir="${SHELLY_USER_ZDOTDIR+1}"
-typeset -g __shelly_nonce="$SHELLY_NONCE"
-unset SHELLY_USER_ZDOTDIR SHELLY_NONCE
+if [[ -n "${SHELLY_USER_ZDOTDIR+x}" ]]; then
+  'builtin' 'export' ZDOTDIR="$SHELLY_USER_ZDOTDIR"
+else
+  'builtin' 'unset' 'ZDOTDIR'
+fi
+# Kept out of the environment before any of the user's startup commands run.
+'builtin' 'typeset' -g __shelly_nonce="${SHELLY_NONCE-}"
+'builtin' 'unset' 'SHELLY_USER_ZDOTDIR' 'SHELLY_NONCE'
 
-# Terminal.app keeps per-session history keyed by TERM_SESSION_ID, which this
-# shell inherits from the one Shelly was started in. Let that shell own it.
-[[ -z "${SHELL_SESSIONS_DISABLE+x}" ]] && SHELL_SESSIONS_DISABLE=1
-
-__shelly_source_user() {
-  [[ -f "$__shelly_zdotdir/$1" ]] || return 0
-  ZDOTDIR="$__shelly_zdotdir"
-  builtin source "$__shelly_zdotdir/$1"
-  # A user's .zshenv may move ZDOTDIR (to ~/.config/zsh, say); follow it.
-  if [[ "$ZDOTDIR" != "$__shelly_zdotdir" ]]; then
-    __shelly_zdotdir="$ZDOTDIR"
-    __shelly_had_zdotdir=1
-  fi
-  ZDOTDIR="$__shelly_dir"
-}
-
-__shelly_restore_zdotdir() {
-  if [[ -n "$__shelly_had_zdotdir" ]]; then
-    ZDOTDIR="$__shelly_zdotdir"
+{
+  'builtin' 'typeset' __shelly_file="${ZDOTDIR-$HOME}/.zshenv"
+  [[ ! -r "$__shelly_file" ]] || 'builtin' 'source' '--' "$__shelly_file"
+} always {
+  if [[ -o 'interactive' && -n "$__shelly_nonce" ]]; then
+    # This file's directory, whatever ZDOTDIR is now.
+    'builtin' 'source' '--' "${${(%):-%x}:A:h}/shelly-hooks.zsh"
   else
-    unset ZDOTDIR
+    'builtin' 'unset' '__shelly_nonce'
   fi
+  'builtin' 'unset' '__shelly_file'
 }
-
-__shelly_source_user .zshenv
-
-# Only interactive shells read .zshrc, where ZDOTDIR is normally restored.
-[[ -o interactive ]] || __shelly_restore_zdotdir

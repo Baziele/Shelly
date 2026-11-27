@@ -1,9 +1,8 @@
 # Shelly shell integration for fish, loaded with `fish --init-command`, which
-# runs after the user's own config. Reports each command to Shelly; the
-# protocol is described in src/shell/shell-markers.ts.
-
-set -g __shelly_nonce $SHELLY_NONCE
-set -e SHELLY_NONCE
+# runs after the user's own config. The same init command sets
+# __shelly_nonce, so it never sits in the environment of anything config.fish
+# starts. Reports each command to Shelly; the protocol is described in
+# src/shell/shell-markers.ts.
 
 if test -n "$__shelly_nonce"
     function __shelly_emit
@@ -11,8 +10,10 @@ if test -n "$__shelly_nonce"
     end
 
     function __shelly_preexec --on-event fish_preexec
-        set -l command (string escape --style=url -- $argv[1])
-        __shelly_emit "exec;$command"
+        # Long command lines (a pasted script, say) are kept to a sensible size.
+        set -l command (string sub --length 8192 -- $argv[1] | string collect)
+        set -l encoded (string escape --style=url -- "$command")
+        __shelly_emit "exec;$encoded"
     end
 
     function __shelly_postexec --on-event fish_postexec
