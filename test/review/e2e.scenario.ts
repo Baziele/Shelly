@@ -1,0 +1,22 @@
+import type { ScenarioDriver } from '../tools/scenario.js';
+export const options = { shell: '/bin/zsh', cols: 60, rows: 14 };
+export default async (driver: ScenarioDriver) => {
+  await driver.waitForText('$');
+  await driver.type('::');
+  await driver.waitForText(/Ask/);
+  await driver.type('hello');
+  await driver.screenshot('typed');
+  await driver.press('enter');
+  await driver.waitForStable({ quietMs: 400 });
+  await driver.type('__');
+  await driver.waitForText(/Describe/);
+  await driver.press('esc');
+  await driver.waitForStable({ quietMs: 300 });
+  await driver.screenshot('after');
+  await driver.type('exit\r');
+  const code = await driver.waitForExit();
+  const raw = driver.raw();
+  const count = (s: string) => raw.split(s).length - 1;
+  const lastHide = raw.lastIndexOf('\u001b[?25l'), lastShow = raw.lastIndexOf('\u001b[?25h');
+  console.log(JSON.stringify({ code, syncOn: count('\u001b[?2026h'), syncOff: count('\u001b[?2026l'), cursorHiddenAtEnd: lastHide > lastShow, tail: raw.slice(-120) }));
+};

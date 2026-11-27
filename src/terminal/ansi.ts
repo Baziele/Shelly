@@ -14,4 +14,6 @@ export const ansi = {
   beginSynchronizedUpdate: `${CSI}?2026h`,
   endSynchronizedUpdate: `${CSI}?2026l`,
   requestCursorPosition: `${CSI}6n`,
+  /** DECXCPR: answered as CSI ? row ; col R, which no key sends (see cursor-report.ts). */
+  requestDecCursorPosition: `${CSI}?6n`,
 } as const;
