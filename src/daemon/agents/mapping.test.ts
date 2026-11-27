@@ -151,3 +151,69 @@ describe('modes, permissions and stop reasons', () => {
     assert.equal(mapStopReason('something_new'), 'end_turn');
   });
 });
+
+describe('command output', () => {
+  const meta = (fields: Record<string, unknown>) => fields as never;
+  const terminal = (id: string) => ({ type: 'terminal' as const, terminalId: id });
+
+  it('appends deltas, drops the terminal placeholder, and shows the output as text', () => {
+    const tools = new ToolTracker();
+    tools.apply({
+      toolCallId: 'b', title: 'Terminal', kind: 'execute', status: 'pending',
+      content: [terminal('b')], _meta: meta({ terminal_info: { terminal_id: 'b' } }),
+    });
+    assert.deepEqual(tools.get('b')?.content, []);
+    tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output_delta: { terminal_id: 'b', data: 'one\n' } }) });
+    const running = tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output_delta: { terminal_id: 'b', data: 'two\n' } }) });
+    assert.deepEqual(running.content, [{ type: 'text', text: 'one\ntwo', truncated: false }]);
+    const done = tools.apply({
+      toolCallId: 'b', status: 'completed',
+      _meta: meta({ terminal_exit: { terminal_id: 'b', exit_code: 0, signal: null } }),
+    });
+    assert.deepEqual(done.content, [{ type: 'text', text: 'one\ntwo', truncated: false }]);
+  });
+
+  it('replaces the output with the whole form, keeping it across later content', () => {
+    const tools = new ToolTracker();
+    tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output_delta: { terminal_id: 'b', data: 'partial' } }) });
+    tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output: { terminal_id: 'b', data: 'the whole output\n' } }) });
+    const later = tools.apply({ toolCallId: 'b', content: [terminal('b'), { type: 'content', content: { type: 'text', text: 'note' } }] });
+    assert.deepEqual(later.content, [
+      { type: 'text', text: 'note', truncated: false },
+      { type: 'text', text: 'the whole output', truncated: false },
+    ]);
+  });
+
+  it('ends a failed command with its exit status, moving Claude Code\'s own line to the end', () => {
+    const tools = new ToolTracker();
+    tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output_delta: { terminal_id: 'b', data: 'Exit code 3\none\noops' } }) });
+    const failed = tools.apply({ toolCallId: 'b', status: 'failed', _meta: meta({ terminal_exit: { terminal_id: 'b', exit_code: 3, signal: null } }) });
+    assert.deepEqual(failed.content, [{ type: 'text', text: 'one\noops\nExit code 3', truncated: false }]);
+    const silent = new ToolTracker();
+    const exited = silent.apply({ toolCallId: 'c', _meta: meta({ terminal_exit: { terminal_id: 'c', exit_code: 1, signal: null } }) });
+    assert.deepEqual(exited.content, [{ type: 'text', text: 'Exit code 1', truncated: false }]);
+    const killed = silent.apply({ toolCallId: 'd', _meta: meta({ terminal_output: { data: 'x' }, terminal_exit: { exit_code: null, signal: 'SIGINT' } }) });
+    assert.deepEqual(killed.content, [{ type: 'text', text: 'x\nKilled by SIGINT', truncated: false }]);
+  });
+
+  it('keeps the end of long output, and says when it was cut', () => {
+    const tools = new ToolTracker();
+    let call = tools.apply({ toolCallId: 'b', _meta: meta({ terminal_info: { terminal_id: 'b' } }) });
+    for (let i = 0; i < 4_000; i++) {
+      call = tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output_delta: { terminal_id: 'b', data: `line ${i}\n` } }) });
+    }
+    const text = call.content[0];
+    assert.ok(text?.type === 'text');
+    assert.equal(text.truncated, true);
+    assert.ok(text.text.length <= 8 * 1024);
+    assert.ok(text.text.endsWith('line 3999'));
+    // A later whole output that fits is not cut.
+    const whole = tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output: { terminal_id: 'b', data: 'short' } }) });
+    assert.deepEqual(whole.content, [{ type: 'text', text: 'short', truncated: false }]);
+  });
+
+  it('leaves tools without terminal fields alone', () => {
+    const call = new ToolTracker().apply({ toolCallId: 'r', title: 'Read', _meta: meta({ claudeCode: { toolName: 'Read' } }) });
+    assert.deepEqual(call.content, []);
+  });
+});
