@@ -5,8 +5,12 @@ export interface DiffLine {
   readonly text: string;
 }
 
-/** Above this many cells in the comparison table, the middle is shown as replaced outright. */
-const MAX_TABLE_CELLS = 2_000_000;
+/**
+ * Above this many cells in the comparison table (about 500 × 500 changed
+ * lines), the middle is shown as replaced outright: a finer diff of a
+ * rewrite that size is not worth a frame.
+ */
+const MAX_TABLE_CELLS = 250_000;
 
 const splitLines = (text: string): string[] => {
   if (text === '') {
@@ -140,4 +144,19 @@ export const diffExcerpt = (lines: readonly DiffLine[], maxLines: number, contex
   const shownChanges = excerpt.filter((line) => line.kind !== 'context').length;
   const totalChanges = lines.filter((line) => line.kind !== 'context').length;
   return { lines: excerpt, moreChanges: totalChanges - shownChanges };
+};
+
+const cache = new WeakMap<object, readonly DiffLine[]>();
+
+/**
+ * `diffLines` for a tool's diff content, computed once per content object:
+ * a running tool is formatted again on every spinner frame.
+ */
+export const diffOf = (content: { readonly oldText: string | null; readonly newText: string }): readonly DiffLine[] => {
+  let lines = cache.get(content);
+  if (!lines) {
+    lines = diffLines(content.oldText, content.newText);
+    cache.set(content, lines);
+  }
+  return lines;
 };
