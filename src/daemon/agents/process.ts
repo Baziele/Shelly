@@ -21,6 +21,20 @@ import { type AgentDefinition, agentEnvironment } from './definitions.js';
 
 export const SHELLY_CLIENT_INFO = { name: 'shelly', version: '0.1.0' } as const;
 
+/**
+ * No client fs or terminals: agents use their own tools. `terminal_output_delta`
+ * (claude-agent-acp's display-terminal extension; other agents ignore it) makes
+ * Claude Code report a command's output in its tool call's `_meta`, streamed as
+ * it runs, instead of only a code block at the end. mapping.ts turns that into
+ * the tool's text. It changes only command tool calls: no diffs, permissions or
+ * other tools.
+ */
+export const SHELLY_CLIENT_CAPABILITIES = {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+  _meta: { terminal_output_delta: true },
+} as const;
+
 /** Keep this much of the agent's stderr, for logs when it dies. */
 const STDERR_TAIL_CHARS = 8 * 1024;
 const INITIALIZE_TIMEOUT = '60 seconds';
@@ -146,7 +160,7 @@ export const spawnAgentProcess = Effect.fn('AgentProcess.spawn')(function* (
       // v1 is what both built-in agents are measured and recorded on; v2 is still a draft.
       protocolVersion: 1,
       clientInfo: SHELLY_CLIENT_INFO,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientCapabilities: SHELLY_CLIENT_CAPABILITIES,
     }).pipe(
       Effect.timeoutOrElse({
         duration: INITIALIZE_TIMEOUT,

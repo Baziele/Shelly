@@ -89,6 +89,48 @@ describe('replayed Claude Code sessions', () => {
   });
 });
 
+describe('replayed shell commands', () => {
+  const lastTool = (updates: readonly AgentUpdate[]) => {
+    const tool = updates.findLast((update) => update.type === 'tool');
+    assert.ok(tool?.type === 'tool');
+    return tool.tool;
+  };
+
+  it("Claude Code's command output, as Shelly advertises terminal_output_delta", TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('claude', 'bash-caps-shelly', (session) =>
+      turn(session, 'run it', none).pipe(Effect.map((updates) => [updates])));
+    const tools = updates!.filter((update) => update.type === 'tool').map((update) => update.type === 'tool' ? update.tool : null);
+    // The output shows while the command runs, then ends with the exit status.
+    assert.ok(tools.some((tool) => tool?.status !== 'failed' && tool?.content[0]?.type === 'text'));
+    const tool = lastTool(updates!);
+    assert.equal(tool.kind, 'execute');
+    assert.equal(tool.status, 'failed');
+    assert.equal(tool.title, "printf 'one\\ntwo\\nthree\\n'; echo oops >&2; exit 3");
+    assert.deepEqual(tool.content, [{ type: 'text', text: 'one\ntwo\nthree\noops\nExit code 3', truncated: false }]);
+    assert.equal(endOf(updates!).stopReason, 'end_turn');
+  });
+
+  it("Claude Code's command output without the capability: a code block at the end", TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('claude', 'bash-caps-none', (session) =>
+      turn(session, 'run it', none).pipe(Effect.map((updates) => [updates])));
+    const tool = lastTool(updates!);
+    assert.equal(tool.status, 'failed');
+    assert.deepEqual(tool.content, [{ type: 'text', text: '```\nExit code 3\none\ntwo\nthree\noops\n```', truncated: false }]);
+  });
+
+  it("OpenCode's shell output arrives as text content", TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('opencode', 'bash-caps-shelly', (session) =>
+      turn(session, 'run it', none).pipe(Effect.map((updates) => [updates])));
+    const tool = lastTool(updates!);
+    assert.equal(tool.kind, 'execute');
+    assert.equal(tool.status, 'completed');
+    assert.deepEqual(tool.content, [
+      { type: 'text', text: 'one\ntwo\nthree\noops\n', truncated: false },
+      { type: 'text', text: 'Exit code: 3', truncated: false },
+    ]);
+  });
+});
+
 describe('replayed OpenCode sessions', () => {
   it('a rejected write: OpenCode cancels the turn, Shelly reports the rejection', TIMEOUT, async () => {
     const { session, turns: [updates] } = await replay('opencode', 'permission-reject', (session) =>

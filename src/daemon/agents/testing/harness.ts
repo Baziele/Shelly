@@ -36,6 +36,8 @@ export const configLayer = (file: ConfigFile): Layer.Layer<ShellyConfig> =>
 export interface RunOptions extends Runtime.AgentRuntimeOptions {
   /** Env overrides on top of process.env, e.g. idle timeouts. */
   readonly envOverrides?: Record<string, string>;
+  /** Extra services for the runtime and the program, e.g. a capturing logger. */
+  readonly provide?: Layer.Layer<never>;
 }
 
 /** Runs `program` with an AgentRuntime for `file`; the runtime (and every agent process) is gone afterwards. */
@@ -44,11 +46,11 @@ export const run = <A, E>(
   program: Effect.Effect<A, E, AgentRuntime>,
   options: RunOptions = {},
 ): Promise<A> => {
-  const { envOverrides, ...rest } = options;
+  const { envOverrides, provide, ...rest } = options;
   const runtime = Runtime.layerWith({ ...rest, env: { ...process.env, ...envOverrides } }).pipe(
     Layer.provide(Layer.mergeAll(configLayer(file), NodeServices.layer)),
   );
-  return Effect.runPromise(program.pipe(Effect.provide(runtime), Effect.scoped));
+  return Effect.runPromise(program.pipe(Effect.provide(runtime), Effect.scoped, Effect.provide(provide ?? Layer.empty)));
 };
 
 export const request = (overrides: Partial<AgentSessionRequest> & { readonly agentId: string }): AgentSessionRequest => ({

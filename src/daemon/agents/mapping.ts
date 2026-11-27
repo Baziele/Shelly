@@ -120,35 +120,130 @@ export const mapToolKind = (kind: string | null | undefined): ToolKind =>
 
 // ─── Tool calls ─────────────────────────────────────────────────────────────
 
+/*
+ * Command output. Shelly advertises `_meta.terminal_output_delta` (see
+ * process.ts), so claude-agent-acp reports a shell command's output in its
+ * tool call's `_meta`, keyed by `terminal_id` (the tool call id):
+ * `terminal_info` (a terminal starts), `terminal_output_delta` (append),
+ * `terminal_output` (the whole output so far, replacing it) and
+ * `terminal_exit` (`exit_code`, `signal`). The tool call's own content then
+ * holds only a `terminal` placeholder, which Shelly can't show. The tracker
+ * turns that output into the tool's last text content instead.
+ *
+ * The output is untrusted terminal text: it goes to clients, which sanitise
+ * it before drawing, and is never logged.
+ */
+
+/** Output kept per command while it runs: enough for the 8 KB shown, with room for an exit line. */
+const MAX_TERMINAL_BUFFER_CHARS = 2 * MAX_TOOL_TEXT_CHARS;
+
+interface TerminalState {
+  output: string;
+  /** Output was dropped from the start to bound the buffer. */
+  dropped: boolean;
+  exit: { readonly code: number | null; readonly signal: string | null } | null;
+}
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+
+const terminalData = (value: unknown): string | undefined => {
+  const data = record(value)?.data;
+  return typeof data === 'string' ? data : undefined;
+};
+
+/** Applies a tool call's `_meta` terminal fields; returns the new state, or the old one if it has none. */
+const applyTerminalMeta = (meta: unknown, previous: TerminalState | undefined): TerminalState | undefined => {
+  const fields = record(meta);
+  if (!fields || !('terminal_info' in fields || 'terminal_output' in fields
+    || 'terminal_output_delta' in fields || 'terminal_exit' in fields)) {
+    return previous;
+  }
+  const next: TerminalState = previous ? { ...previous } : { output: '', dropped: false, exit: null };
+  const whole = terminalData(fields.terminal_output);
+  if (whole !== undefined) {
+    next.output = whole;
+    next.dropped = false;
+  }
+  const delta = terminalData(fields.terminal_output_delta);
+  if (delta !== undefined) {
+    next.output += delta;
+  }
+  if (next.output.length > MAX_TERMINAL_BUFFER_CHARS) {
+    next.output = next.output.slice(next.output.length - MAX_TERMINAL_BUFFER_CHARS);
+    next.dropped = true;
+  }
+  const exit = record(fields.terminal_exit);
+  if (exit) {
+    next.exit = {
+      code: typeof exit.exit_code === 'number' ? exit.exit_code : null,
+      signal: typeof exit.signal === 'string' ? exit.signal : null,
+    };
+  }
+  return next;
+};
+
+/**
+ * The command's output as tool text: its end, with the exit status of a
+ * failed command as the last line (Claude Code puts its own "Exit code N"
+ * first, where a short preview would never show it).
+ */
+export const terminalText = (terminal: TerminalState): Extract<ToolContent, { type: 'text' }> | null => {
+  let output = terminal.output;
+  const { code, signal } = terminal.exit ?? { code: null, signal: null };
+  let status: string | null = null;
+  if (signal !== null) {
+    status = `Killed by ${signal}`;
+  } else if (code !== null && code !== 0) {
+    status = `Exit code ${code}`;
+    if (output.startsWith(`${status}\n`)) {
+      output = output.slice(status.length + 1);
+    } else if (output === status) {
+      output = '';
+    }
+  }
+  output = output.replace(/\n+$/, '');
+  const text = [output, status].filter((part): part is string => part !== null && part !== '').join('\n');
+  if (text === '') {
+    return null;
+  }
+  const cut = truncateText(text);
+  return { type: 'text', text: cut.text, truncated: cut.truncated || terminal.dropped };
+};
+
 /**
  * Merges `tool_call` and `tool_call_update` into each call's whole state.
  * ACP updates carry only the fields that changed; `content` and `locations`
- * replace the previous lists when present.
+ * replace the previous lists when present. Command output (see above) is
+ * kept apart and shown after the content.
  */
 export class ToolTracker {
-  readonly #tools = new Map<string, ToolCall>();
+  readonly #tools = new Map<string, { readonly call: ToolCall; readonly content: readonly ToolContent[]; readonly terminal: TerminalState | undefined }>();
 
   apply(update: Acp.ToolCallUpdate, replace = false): ToolCall {
     const previous = replace ? undefined : this.#tools.get(update.toolCallId);
     const status = update.status && TOOL_STATUSES.has(update.status) ? update.status as ToolStatus : undefined;
-    const next: ToolCall = {
+    const content = update.content
+      ? update.content.flatMap((item) => mapToolContent(item) ?? [])
+      : previous?.content ?? [];
+    const terminal = applyTerminalMeta(update._meta, previous?.terminal);
+    const output = terminal ? terminalText(terminal) : null;
+    const call: ToolCall = {
       id: update.toolCallId,
-      title: update.title ?? previous?.title ?? update.name ?? 'Tool',
-      kind: update.kind ? mapToolKind(update.kind) : previous?.kind ?? 'other',
-      status: status ?? previous?.status ?? 'pending',
+      title: update.title ?? previous?.call.title ?? update.name ?? 'Tool',
+      kind: update.kind ? mapToolKind(update.kind) : previous?.call.kind ?? 'other',
+      status: status ?? previous?.call.status ?? 'pending',
       locations: update.locations
         ? update.locations.map((location) => ({ path: location.path, line: location.line ?? null }))
-        : previous?.locations ?? [],
-      content: update.content
-        ? update.content.flatMap((item) => mapToolContent(item) ?? [])
-        : previous?.content ?? [],
+        : previous?.call.locations ?? [],
+      content: output ? [...content, output] : content,
     };
-    this.#tools.set(next.id, next);
-    return next;
+    this.#tools.set(call.id, { call, content, terminal });
+    return call;
   }
 
   get(id: string): ToolCall | undefined {
-    return this.#tools.get(id);
+    return this.#tools.get(id)?.call;
   }
 }
 

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import * as Effect from 'effect/Effect';
 import * as Fiber from 'effect/Fiber';
+import * as Logger from 'effect/Logger';
+import * as References from 'effect/References';
 import * as Stream from 'effect/Stream';
 import { AgentRuntime, type AgentSession, type AgentSettings, type AgentUpdate } from '../services.js';
 import { collect, endOf, fakeAgent, isRunning, request, run, textOf } from './testing/harness.js';
@@ -87,6 +89,7 @@ describe('AgentRuntime processes and sessions', () => {
     assert.deepEqual((initialize?.params as { clientCapabilities: unknown }).clientCapabilities, {
       fs: { readTextFile: false, writeTextFile: false },
       terminal: false,
+      _meta: { terminal_output_delta: true },
     });
     assert.deepEqual(fake.methods(), ['initialize', 'session/new']);
     // The runtime's scope is closed: the process group is gone.
@@ -516,6 +519,36 @@ describe('AgentRuntime turns', () => {
     assert.equal(endOf(result.rejected).stopReason, 'cancelled');
     assert.equal(endOf(result.cancelled).stopReason, 'cancelled');
     assert.ok(!result.cancelled.some((update) => update.type === 'notice'));
+  });
+});
+
+describe('AgentRuntime command output', () => {
+  it('shows command output as tool text, and never logs it', TIMEOUT, async () => {
+    const fake = logged();
+    const lines: string[] = [];
+    const capture = Logger.make((entry) => {
+      const annotations = entry.fiber.getRef(References.CurrentLogAnnotations);
+      lines.push(JSON.stringify({ message: entry.message, annotations }), String(entry.cause));
+    });
+    const updates = await run({ agents: { fake: fake.agent } }, Effect.gen(function* () {
+      const runtime = yield* AgentRuntime;
+      const session = yield* runtime.session(request({ agentId: 'fake' }));
+      return yield* collect(session.prompt('please run a command'));
+    }).pipe(Effect.provideService(References.MinimumLogLevel, 'All')), {
+      provide: Logger.layer([capture]),
+      envOverrides: { SHELLY_AGENT_SESSION_IDLE_MS: '50', SHELLY_AGENT_PROCESS_IDLE_MS: '50' },
+    });
+    const tool = updates.findLast((update) => update.type === 'tool');
+    assert.ok(tool?.type === 'tool');
+    assert.equal(tool.tool.status, 'failed');
+    assert.deepEqual(tool.tool.content, [{
+      type: 'text',
+      // Raw terminal text: the client sanitises it before drawing.
+      text: 'OUTPUT-MARKER line one\n\u001b[31mOUTPUT-MARKER failed\u001b[0m\nExit code 2',
+      truncated: false,
+    }]);
+    assert.ok(lines.length > 0, 'the capturing logger saw nothing');
+    assert.ok(!lines.some((line) => line.includes('OUTPUT-MARKER')), 'command output reached the logs');
   });
 });
 
