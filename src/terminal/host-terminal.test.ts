@@ -204,3 +204,56 @@ describe('HostTerminal.stop', () => {
     assert.ok(written().endsWith('partial\u001b[?2026l\u001b[0m\u001b[?25h'), 'a second stop writes nothing');
   });
 });
+
+describe('HostTerminal teardown', () => {
+  /** A started HostTerminal over `output`, recording each raw mode it sets. */
+  const started = (output: PassThrough) => {
+    const modes: boolean[] = [];
+    const input = Object.assign(new PassThrough(), {
+      isTTY: true,
+      setRawMode(mode: boolean) {
+        modes.push(mode);
+        return this;
+      },
+    });
+    const host = new HostTerminal(input as never, Object.assign(output, { isTTY: true, columns: 80, rows: 24 }) as never);
+    host.start(() => undefined);
+    return { host, modes };
+  };
+
+  it('restores the mode first, then survives an output that fails as it is written to (EPIPE)', () => {
+    const output = new PassThrough();
+    let writes = 0;
+    output.write = (() => {
+      writes++;
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    }) as never;
+    const { host, modes } = started(output);
+    assert.doesNotThrow(() => host.stop());
+    assert.deepEqual(modes, [true, false]);
+    assert.equal(writes, 1);
+    assert.doesNotThrow(() => host.stop());
+    assert.equal(writes, 1, 'a second stop writes nothing');
+  });
+
+  for (const ending of ['destroyed', 'ended'] as const) {
+    it(`restores the mode and raises no error with the output already ${ending}`, async () => {
+      const output = new PassThrough();
+      const errors: Error[] = [];
+      output.on('error', (error) => errors.push(error));
+      output.resume();
+      const { host, modes } = started(output);
+      if (ending === 'destroyed') {
+        output.destroy();
+      } else {
+        output.end();
+      }
+      await sleep(5);
+      host.stop();
+      host.stop();
+      await sleep(5);
+      assert.deepEqual(modes, [true, false, false]);
+      assert.deepEqual(errors, []);
+    });
+  }
+});
