@@ -29,6 +29,8 @@ export interface ToolBlock {
   final: boolean;
   /** The turn ended before the tool did. */
   stopped: boolean;
+  /** How the user answered the permission prompt about this tool, if there was one. */
+  permission?: PermissionOption['kind'] | null;
   version: number;
 }
 
@@ -220,25 +222,23 @@ export class TurnModel {
       return;
     }
     const [request] = this.permissions.splice(index, 1);
-    const option = request!.options.find((candidate) => candidate.optionId === optionId);
-    const line: LineBlock = {
+    const outcome = request!.options.find((candidate) => candidate.optionId === optionId)?.kind ?? null;
+
+    // A prompt about a tool still on screen collapses into that tool's row.
+    const tool = request!.toolCallId ? this.findTool(request!.toolCallId) : undefined;
+    if (tool && this.blocks.indexOf(tool) >= this.committed) {
+      tool.permission = outcome;
+      tool.version++;
+      return;
+    }
+    this.finalizeMessages();
+    this.blocks.push({
       kind: 'line',
       key: this.key(),
-      content: { type: 'permission', title: request!.title, outcome: option?.kind ?? null },
+      content: { type: 'permission', title: request!.title, outcome },
       final: true,
       version: 0,
-    };
-
-    // The outcome reads best just above the tool it was about, while that tool is still live.
-    const tool = request!.toolCallId ? this.findTool(request!.toolCallId) : undefined;
-    // A finished tool may be on its way to scrollback, so the line goes after it then.
-    const toolIndex = tool && !tool.final ? this.blocks.indexOf(tool) : -1;
-    if (toolIndex >= this.committed) {
-      this.blocks.splice(toolIndex, 0, line);
-    } else {
-      this.finalizeMessages();
-      this.blocks.push(line);
-    }
+    });
   }
 
   private appendLine(content: LineBlockContent): void {

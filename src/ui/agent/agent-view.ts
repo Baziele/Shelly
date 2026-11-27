@@ -610,7 +610,7 @@ export class AgentView {
   private blockLines(block: Block, context: FormatContext): Line[] {
     switch (block.kind) {
       case 'tool':
-        return formatTool(block.tool, context, { stopped: block.stopped });
+        return formatTool(block.tool, context, { stopped: block.stopped, permission: block.permission });
       case 'line':
         return lineBlockLines(block, context);
       case 'message':
@@ -657,7 +657,9 @@ export class AgentView {
       lines.push(formatStatus({
         phase: phaseText(phase, this.options.agentName, context),
         elapsedMs: this.now() - Math.min(startedAt, this.now()),
-        hints: phase.type === 'waiting' ? '←→ select · enter confirm · esc reject' : phase.type === 'stopping' ? '' : 'esc background · ^c stop',
+        hints: phase.type === 'waiting'
+          ? ['←→ select · enter confirm · esc reject', 'enter confirm · esc reject', 'enter · esc']
+          : phase.type === 'stopping' ? [] : ['esc background · ^c stop', 'esc · ^c'],
       }, context));
     }
     return lines;

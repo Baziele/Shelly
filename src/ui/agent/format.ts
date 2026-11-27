@@ -174,13 +174,25 @@ export const firstErrorLine = (tool: ToolCall): string | undefined => {
 export interface ToolFormatOptions {
   /** The turn ended while the tool was still pending or running. */
   readonly stopped?: boolean;
+  /** How the user answered a permission prompt about the tool; null when it was cancelled. */
+  readonly permission?: PermissionOption['kind'] | null;
 }
+
+const PERMISSION_NOTE: Record<PermissionOption['kind'], string> = {
+  allow_once: 'allowed once',
+  allow_always: 'always allowed',
+  reject_once: 'rejected',
+  reject_always: 'always rejected',
+};
 
 /** A tool call as a title row and compact detail rows. */
 export const formatTool = (tool: ToolCall, context: FormatContext, options: ToolFormatOptions = {}): Line[] => {
   const { width } = context;
   const glyph = toolGlyph(tool, context.spinner, options.stopped ?? false);
-  const suffix = toolSuffix(tool);
+  const permission = options.permission === undefined
+    ? []
+    : [seg(` · ${options.permission === null ? 'cancelled' : PERMISSION_NOTE[options.permission]}`, 'muted')];
+  const suffix = [...toolSuffix(tool), ...permission];
   const title = tidyTitle(tool.title, context);
   // Commands read as commands.
   const prompt: Segment[] = tool.kind === 'execute' ? [seg('$ ', 'muted')] : [];
@@ -208,10 +220,11 @@ export const formatTool = (tool: ToolCall, context: FormatContext, options: Tool
     rows.push(...outputTail(text, width, tool.status === 'failed'));
     return rows;
   }
-  if (tool.status === 'failed') {
+  const rejected = options.permission === null || options.permission?.startsWith('reject');
+  if (tool.status === 'failed' && !rejected) {
     const error = firstErrorLine(tool);
     if (error) {
-      rows.push(fitLine([seg(DETAIL_INDENT), seg(error, 'error')], width));
+      rows.push(fitLine([seg(DETAIL_INDENT), seg(shortenPathsIn(error, context), 'error')], width));
     }
   }
   return rows;
@@ -289,8 +302,8 @@ export const formatPermission = (prompt: PermissionView, context: FormatContext)
     ? [seg('❯ ', 'accent', { bold: true }), seg(label, 'accent', { bold: true })]
     : [seg('  '), seg(label)];
 
-  const across: Segment[] = [seg('  ')];
-  labels.forEach((label, index) => across.push(...option(label, index), seg(' ')));
+  const across: Segment[] = [];
+  labels.forEach((label, index) => across.push(seg(index === 0 ? '' : '  '), ...option(label, index)));
   if (lineWidth(across) <= width) {
     return [question, across];
   }
@@ -351,7 +364,8 @@ export const relativeTime = (at: number, now: number): string => {
 export interface StatusLineView {
   readonly phase: string;
   readonly elapsedMs: number;
-  readonly hints: string;
+  /** Key hints, longest first; the first that fits is shown. */
+  readonly hints: readonly string[];
 }
 
 /** The live status row: spinner, phase and time on the left, key hints on the right when they fit. */
@@ -362,7 +376,8 @@ export const formatStatus = (status: StatusLineView, context: FormatContext): Li
     seg(status.phase),
     seg(` · ${formatDuration(status.elapsedMs)}`, 'muted'),
   ];
-  return alignRight(left, status.hints ? [seg(status.hints, 'muted')] : [], context.width);
+  const hints = status.hints.find((candidate) => lineWidth(left) + 2 + lineWidth([seg(candidate)]) <= context.width);
+  return alignRight(left, hints ? [seg(hints, 'muted')] : [], context.width);
 };
 
 export interface TurnOutcome {
