@@ -13,7 +13,10 @@ import { lastPromptRow, startShelly, type ShellyHarness, type ShellyOptions } fr
  */
 
 const STARTUP_FILES: Record<string, Record<string, string>> = {
-  zsh: { '.zshrc': "PS1='$ '\nalias hi='echo from-rc'\n" },
+  // macOS's /etc/zshrc sets HISTFILE this way and Linux distributions do
+  // not; setting it the same way here keeps the history test portable while
+  // still catching a ZDOTDIR that leaked from Shelly's shim.
+  zsh: { '.zshrc': "PS1='$ '\nalias hi='echo from-rc'\nHISTFILE=${HISTFILE:-${ZDOTDIR:-$HOME}/.zsh_history}\n" },
   bash: { '.bashrc': "PS1='$ '\nalias hi='echo from-rc'\n" },
   fish: {
     '.config/fish/config.fish': "function fish_prompt; echo -n '$ '; end\nfunction fish_greeting; end\nalias hi 'echo from-rc'\n",

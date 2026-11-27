@@ -52,7 +52,15 @@ jobs:
 
       - run: node --run test
 
+      # zsh's system config runs compinit, which stops to ask about
+      # "insecure directories" when completion dirs are group-writable; the
+      # tests would sit at that prompt. Show what this runner has.
+      - name: Check zsh's completion directories
+        if: runner.os == 'Linux'
+        run: zsh -fc 'autoload -U compaudit; compaudit' || true
+
       - name: End-to-end tests
+        timeout-minutes: 10
         env:
           SHELLY_E2E_SHELLS: ${{ runner.os == 'Linux' && '/usr/bin/fish' || '' }}
         run: node --run test:e2e

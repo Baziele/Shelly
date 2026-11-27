@@ -38,7 +38,8 @@ const startHooks = async (shell: string, files: Record<string, string>, env: Rec
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     HOME: home,
     TERM: 'xterm-256color',
-    LANG: 'en_US.UTF-8',
+    // A UTF-8 locale that exists: Linux images often lack en_US.UTF-8.
+    LANG: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
     BASH_SILENCE_DEPRECATION_WARNING: '1',
     ...env,
   };
