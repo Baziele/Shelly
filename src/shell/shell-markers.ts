@@ -8,10 +8,11 @@
  *   done;<status>   the shell is back at a prompt; the last command exited
  *   cwd;<path>      the shell's working directory
  *
- * Payloads are percent-encoded. The nonce is chosen per session and never
- * exported, so output from programs (`cat` of a crafted file, say) cannot
- * forge events. Shelly strips its own markers; everything else, including
- * sequences that merely look like them, reaches the terminal unchanged.
+ * Payloads are percent-encoded. The nonce is chosen per session and taken
+ * out of the environment before the user's startup files run, so programs
+ * the user runs (`cat` of a crafted file, say) cannot forge events. Shelly
+ * strips its own markers; everything else, including sequences that merely
+ * look like them, reaches the terminal unchanged.
  */
 
 export const MARKER_OSC = 6973;
@@ -35,8 +36,13 @@ const MAX_MARKER_LENGTH = 64 * 1024;
 export class ShellMarkerParser {
   /** Text held back because it may be the start of a marker. */
   private pending = '';
+  /** Inside one of our markers that grew too long; dropped up to its end. */
+  private discarding = false;
+  private readonly ownPrefix: string;
 
-  constructor(private readonly nonce: string) {}
+  constructor(private readonly nonce: string) {
+    this.ownPrefix = `${nonce};`;
+  }
 
   /**
    * True when only a few bytes that might begin a marker are held back. A
@@ -49,8 +55,18 @@ export class ShellMarkerParser {
   }
 
   push(data: string): ShellOutputSegment[] {
-    const input = this.pending + data;
+    let input = this.pending + data;
     this.pending = '';
+    if (this.discarding) {
+      const end = input.search(/[\u0007\u001b]/);
+      if (end === -1) {
+        return [];
+      }
+      this.discarding = false;
+      // BEL or ST ends the marker; any other ESC starts ordinary output again.
+      const skip = input[end] === BEL ? 1 : input[end + 1] === '\\' ? 2 : 0;
+      input = input.slice(end + skip);
+    }
     const segments: ShellOutputSegment[] = [];
     const output = (text: string): void => {
       if (text) {
@@ -72,29 +88,35 @@ export class ShellMarkerParser {
       const bodyStart = start + PREFIX.length;
       const end = findTerminator(input, bodyStart);
 
-      if (end === 'incomplete') {
-        if (input.length - start > MAX_MARKER_LENGTH) {
-          output(PREFIX);
-          cursor = bodyStart;
-          continue;
+      if (end !== 'incomplete' && end !== 'malformed') {
+        const parsed = this.parseBody(input.slice(bodyStart, end.index));
+        if (parsed === 'foreign') {
+          output(input.slice(start, end.index + end.length));
+        } else if (parsed !== 'ignored') {
+          segments.push({ type: 'event', event: parsed });
         }
-        this.pending = input.slice(start);
-        break;
+        cursor = end.index + end.length;
+        continue;
       }
 
-      if (end === 'malformed') {
+      // Unfinished or broken. Someone else's lookalike goes to the terminal
+      // as soon as it is clearly not ours, rather than holding output back.
+      if (!this.couldBeOurs(input, bodyStart)) {
         output(PREFIX);
         cursor = bodyStart;
         continue;
       }
-
-      const parsed = this.parseBody(input.slice(bodyStart, end.index));
-      if (parsed === 'foreign') {
-        output(input.slice(start, end.index + end.length));
-      } else if (parsed !== 'ignored') {
-        segments.push({ type: 'event', event: parsed });
+      if (end === 'malformed') {
+        // Ours, but cut short: drop it, never show the nonce.
+        cursor = input.indexOf(ESC, bodyStart);
+        continue;
       }
-      cursor = end.index + end.length;
+      if (input.length - start > MAX_MARKER_LENGTH) {
+        this.discarding = true;
+        break;
+      }
+      this.pending = input.slice(start);
+      break;
     }
 
     return mergeOutput(segments);
@@ -105,6 +127,12 @@ export class ShellMarkerParser {
     const held = this.pending;
     this.pending = '';
     return held ? [{ type: 'output', data: held }] : [];
+  }
+
+  /** The text from `from` on is, or may still become, `<nonce>;…`. */
+  private couldBeOurs(input: string, from: number): boolean {
+    const seen = input.slice(from, from + this.ownPrefix.length);
+    return this.ownPrefix.startsWith(seen);
   }
 
   private parseBody(body: string): ShellEvent | 'foreign' | 'ignored' {

@@ -69,10 +69,25 @@ describe('ShellMarkerParser', () => {
     assert.deepEqual(parser.push(`a${marker('future;x')}b`), [{ type: 'output', data: 'ab' }]);
   });
 
-  it('gives up on a marker that never ends', () => {
+  it('drops one of its own markers that grows too long, never showing the nonce', () => {
     const parser = new ShellMarkerParser(NONCE);
-    const runaway = `\u001b]6973;${NONCE};exec;${'x'.repeat(70_000)}`;
-    assert.equal(output(parser.push(runaway)), runaway);
+    const segments = [
+      ...parser.push(`before\u001b]6973;${NONCE};exec;${'x'.repeat(70_000)}`),
+      ...parser.push(`${'y'.repeat(100)}\u0007after`),
+    ];
+    assert.equal(output(segments), 'beforeafter');
+    assert.deepEqual(events(segments), []);
+  });
+
+  it('releases a lookalike as soon as it is clearly not ours', () => {
+    const parser = new ShellMarkerParser(NONCE);
+    assert.equal(output(parser.push('\u001b]6973;not-it Password: ')), '\u001b]6973;not-it Password: ');
+    assert.equal(output(parser.push('typed')), 'typed');
+  });
+
+  it('drops one of its own markers that is cut short by another sequence', () => {
+    const parser = new ShellMarkerParser(NONCE);
+    assert.equal(output(parser.push(`a\u001b]6973;${NONCE};exec;ls\u001b[31mred`)), 'a\u001b[31mred');
   });
 });
 
