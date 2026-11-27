@@ -1,0 +1,59 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import type { PromptContext } from '../protocol/schema.js';
+import { formatPromptForAgent } from './prompt.js';
+
+const CONTEXT: PromptContext = {
+  cwd: '/work/app',
+  environment: { os: 'macOS 25.0 (arm64)', shell: 'zsh', shellVersion: 'zsh 5.9', terminal: null },
+  commands: [
+    {
+      id: 1,
+      command: 'npm test',
+      cwd: '/work/app',
+      exitCode: 1,
+      durationMs: 2300,
+      output: 'FAIL a.test.ts\nexpected 1, got 2',
+      omittedLines: 12,
+      usedFullScreen: false,
+    },
+    { id: 2, command: 'vim a.ts', cwd: '/work/app', exitCode: null, durationMs: 40, output: '', omittedLines: 0, usedFullScreen: true },
+  ],
+};
+
+describe('formatPromptForAgent', () => {
+  it('puts the context in a delimited block and the request after it', () => {
+    const text = formatPromptForAgent(CONTEXT, '  why did it fail?  ');
+    assert.equal(
+      text,
+      [
+        '<shelly_context>',
+        "The user is speaking to you from their terminal through Shelly. Below is their terminal session: the environment, the shell's current directory, and the commands run since you last heard from them, with exit codes and the end of each output.",
+        '',
+        'OS: macOS 25.0 (arm64)',
+        'Shell: zsh 5.9',
+        'Working directory: /work/app',
+        '',
+        'Recent commands, oldest first:',
+        '',
+        '$ npm test',
+        '  [exit 1 · 2.3s · /work/app]',
+        '  [… 12 earlier lines omitted]',
+        '  FAIL a.test.ts',
+        '  expected 1, got 2',
+        '',
+        '$ vim a.ts',
+        '  [exit status unknown · 40ms · /work/app]',
+        '  [full-screen program; its screen is not recorded]',
+        '</shelly_context>',
+        '',
+        'why did it fail?',
+      ].join('\n'),
+    );
+  });
+
+  it('says so when nothing new ran', () => {
+    const text = formatPromptForAgent({ ...CONTEXT, commands: [] }, 'hi');
+    assert.match(text, /No new commands since the last message\.\n<\/shelly_context>\n\nhi$/);
+  });
+});

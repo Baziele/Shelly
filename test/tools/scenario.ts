@@ -134,7 +134,8 @@ export class ScenarioDriver {
         SHELLY_HOME: this.shellyHome,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor',
-        LANG: 'en_US.UTF-8',
+        // A UTF-8 locale that exists: Linux images often lack en_US.UTF-8.
+        LANG: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
         SHELL: this.shell,
         PS1: PROMPT,
         // macOS's bash 3.2 otherwise opens with a notice about zsh.

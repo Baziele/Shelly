@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import * as pty from 'node-pty';
 import type { TerminalSize } from '../terminal/host-terminal.js';
+import { ensurePtyHelperExecutable } from './pty-helper.js';
 
 export interface ShellSessionOptions {
   readonly shell: string;
@@ -27,6 +28,7 @@ export class ShellSession {
   ) {}
 
   static spawn(options: ShellSessionOptions): ShellSession {
+    ensurePtyHelperExecutable();
     const env = Object.fromEntries(
       Object.entries(options.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
     );
