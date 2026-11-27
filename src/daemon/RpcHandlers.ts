@@ -66,6 +66,8 @@ export const layer = DaemonRpcs.toLayer(
       'thread.respond': (payload, options) => bind(options, payload.clientId).pipe(Effect.andThen(threads.respond(payload))),
       'thread.setMode': ({ threadId, clientId, modeId }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.setMode(threadId, clientId, modeId))),
+      'thread.modes': ({ threadId, clientId }, options) =>
+        bind(options, clientId).pipe(Effect.andThen(threads.modes(threadId, clientId))),
       'thread.rename': ({ threadId, clientId, title }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.rename(threadId, clientId, title))),
       'thread.delete': ({ threadId, clientId }, options) =>
@@ -73,14 +75,14 @@ export const layer = DaemonRpcs.toLayer(
       'thread.prewarm': ({ threadId, agentId, cwd }) => threads.prewarm({ threadId, agentId, cwd }),
 
       'fast.prewarm': ({ agentId }) =>
-        directory.resolve(agentId).pipe(
+        directory.resolveFast(agentId).pipe(
           Effect.flatMap(fast.prewarm),
           Effect.ignoreCause({ log: 'Debug' }),
           Effect.forkIn(scope),
           Effect.asVoid,
         ),
       'fast.request': ({ agentId, sessionKey, input }) =>
-        counted(Stream.unwrap(directory.resolve(agentId).pipe(Effect.map((agentId) => fast.request({ agentId, sessionKey, input }))))),
+        counted(Stream.unwrap(directory.resolveFast(agentId).pipe(Effect.map((agentId) => fast.request({ agentId, sessionKey, input }))))),
       'fast.end': ({ sessionKey }) => fast.end(sessionKey),
 
       'daemon.status': () =>

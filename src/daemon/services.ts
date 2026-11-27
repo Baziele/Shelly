@@ -37,6 +37,11 @@ export const AgentSettings = Schema.Struct({
   command: Schema.optionalKey(Schema.String),
   args: Schema.optionalKey(Schema.Array(Schema.String)),
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  /**
+   * The model agent mode uses, as the agent names it (`haiku`, `opencode-go/hy4-flash-free`).
+   * Omitted: the agent's own default.
+   */
+  model: Schema.optionalKey(Schema.String),
   /** The model fast mode uses; agents without one have no fast mode. */
   fastModel: Schema.optionalKey(Schema.String),
   /** false hides the agent. */

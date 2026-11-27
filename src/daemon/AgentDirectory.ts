@@ -14,6 +14,12 @@ export class AgentDirectory extends Context.Service<
     readonly defaultAgentId: Effect.Effect<string>;
     /** The agent to use for a request that may name one. */
     readonly resolve: (agentId: string | undefined) => Effect.Effect<string>;
+    /**
+     * The agent for a fast request that may name one: the default agent when
+     * it has a fast mode, else the first available agent that does, else the
+     * default (whose request then says why it can't).
+     */
+    readonly resolveFast: (agentId: string | undefined) => Effect.Effect<string>;
     /** Like `resolve`, but fails when the agent is unknown or cannot be used now. */
     readonly requireAvailable: (agentId: string | undefined) => Effect.Effect<AgentInfo, AgentUnavailable>;
     readonly setDefault: (agentId: string) => Effect.Effect<void, AgentUnavailable>;
@@ -42,11 +48,27 @@ export const layer: Layer.Layer<AgentDirectory, never, AgentRuntime | ShellyConf
 
     const resolve = (agentId: string | undefined) => (agentId ? Effect.succeed(agentId) : defaultAgentId);
 
+    const resolveFast = (agentId: string | undefined) =>
+      agentId
+        ? Effect.succeed(agentId)
+        : Effect.gen(function* () {
+          const [agents, file] = yield* Effect.all([runtime.agents, config.get]);
+          const fallback = pickDefault(agents, file.defaultAgent);
+          const preferred = agents.find((agent) => agent.id === fallback);
+          if (preferred?.supportsFast && preferred.available) {
+            return fallback;
+          }
+          return agents.find((agent) => agent.supportsFast && agent.available)?.id ?? fallback;
+        });
+
     const find = Effect.fn('AgentDirectory.find')(function* (agentId: string) {
       const agents = yield* runtime.agents;
       const agent = agents.find((candidate) => candidate.id === agentId);
       if (!agent) {
-        return yield* new AgentUnavailable({ agentId, reason: `Shelly does not know an agent called "${agentId}".` });
+        const reason = agents.length === 0
+          ? "No agent is set up. Install Claude Code or OpenCode, or add an agent to Shelly's config.json."
+          : `Shelly does not know an agent called "${agentId}".`;
+        return yield* new AgentUnavailable({ agentId, reason });
       }
       return agent;
     });
@@ -67,6 +89,6 @@ export const layer: Layer.Layer<AgentDirectory, never, AgentRuntime | ShellyConf
       yield* config.setDefaultAgent(agentId);
     });
 
-    return AgentDirectory.of({ list: runtime.agents, defaultAgentId, resolve, requireAvailable, setDefault });
+    return AgentDirectory.of({ list: runtime.agents, defaultAgentId, resolve, resolveFast, requireAvailable, setDefault });
   }),
 );

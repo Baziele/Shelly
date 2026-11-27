@@ -53,6 +53,17 @@ const agents = AgentRuntimeAcp.layer;
   `setMode` uses `session/set_mode` or `session/set_config_option` to match. Shelly never picks
   a mode itself.
 
+## Configuration
+
+`$SHELLY_HOME/config.json` may set, per agent, `model`: the model agent mode uses, as the agent names it.
+Claude Code gets it as `_meta.claudeCode.options.model` on session/new and resume, and as the `model`
+config option (so what the session reports matches); OpenCode and custom agents get the `model` config
+option. Without it, the agent's own default applies.
+
+```json
+{ "agents": { "claude": { "model": "haiku" }, "opencode": { "model": "opencode-go/hy4-flash-free" } } }
+```
+
 ## Quirks
 
 Each lives in `definitions.ts` as data, never as an id check:

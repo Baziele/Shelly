@@ -27,7 +27,15 @@ export interface ThreadRow {
   readonly updatedAt: number;
   readonly status: ThreadStatus;
   readonly turnCount: number;
+  /**
+   * Where the title came from: the first prompt, the agent naming the
+   * conversation, or the user renaming it (which the agent never overrides).
+   * Absent on insert means `prompt`.
+   */
+  readonly titleSource?: TitleSource;
 }
+
+export type TitleSource = 'prompt' | 'agent' | 'user';
 
 export type ThreadPatch = Partial<Omit<ThreadRow, 'id' | 'createdAt'>>;
 
@@ -87,6 +95,9 @@ const MIGRATIONS: readonly string[] = [
   ) WITHOUT ROWID;
   CREATE INDEX thread_events_turn ON thread_events (thread_id, turn_id, seq);
   `,
+  `
+  ALTER TABLE threads ADD COLUMN title_source TEXT NOT NULL DEFAULT 'prompt';
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -144,6 +155,7 @@ interface ThreadRecord {
   updated_at: number;
   status: string;
   turn_count: number;
+  title_source: string;
 }
 
 const fromRecord = (record: ThreadRecord): ThreadRow => ({
@@ -158,6 +170,7 @@ const fromRecord = (record: ThreadRecord): ThreadRow => ({
   updatedAt: Number(record.updated_at),
   status: record.status as ThreadStatus,
   turnCount: Number(record.turn_count),
+  titleSource: record.title_source as TitleSource,
 });
 
 const COLUMNS: Record<keyof ThreadPatch, string> = {
@@ -170,6 +183,7 @@ const COLUMNS: Record<keyof ThreadPatch, string> = {
   updatedAt: 'updated_at',
   status: 'status',
   turnCount: 'turn_count',
+  titleSource: 'title_source',
 };
 
 const turnIdOf = (event: ThreadEvent): string | null => ('turnId' in event ? event.turnId : null);
@@ -182,8 +196,8 @@ const parseEvents = (rows: readonly unknown[]): ThreadEvent[] =>
 export const make = (db: DatabaseSync): ThreadStore['Service'] => {
   const statements = {
     insertThread: db.prepare(
-      `INSERT INTO threads (id, title, agent_id, location, cwd, native_session_id, last_shell_cwd, created_at, updated_at, status, turn_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO threads (id, title, agent_id, location, cwd, native_session_id, last_shell_cwd, created_at, updated_at, status, turn_count, title_source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
     getThread: db.prepare('SELECT * FROM threads WHERE id = ?'),
     listThreads: db.prepare('SELECT * FROM threads ORDER BY updated_at DESC, created_at DESC LIMIT ?'),
@@ -280,7 +294,7 @@ export const make = (db: DatabaseSync): ThreadStore['Service'] => {
       Effect.sync(() => {
         statements.insertThread.run(
           row.id, row.title, row.agentId, row.location, row.cwd, row.nativeSessionId, row.lastShellCwd,
-          row.createdAt, row.updatedAt, row.status, row.turnCount,
+          row.createdAt, row.updatedAt, row.status, row.turnCount, row.titleSource ?? 'prompt',
         );
       }),
     getThread: (id) =>

@@ -75,7 +75,7 @@ describe('protocol schemas', () => {
     assert.deepEqual([...DaemonRpcs.requests.keys()].sort(), [
       'agents.list', 'agents.setDefault', 'daemon.shutdown', 'daemon.status', 'fast.end', 'fast.prewarm',
       'fast.request', 'hello', 'thread.attach', 'thread.cancel', 'thread.create', 'thread.delete',
-      'thread.detach', 'thread.list', 'thread.prewarm', 'thread.prompt', 'thread.rename', 'thread.respond',
+      'thread.detach', 'thread.list', 'thread.modes', 'thread.prewarm', 'thread.prompt', 'thread.rename', 'thread.respond',
       'thread.setMode', 'thread.watch',
     ]);
   });

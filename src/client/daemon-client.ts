@@ -19,6 +19,7 @@ import {
   type AgentInfo,
   type FastEvent,
   type FastInput,
+  type ModeState,
   PROTOCOL_VERSION,
   type PromptContext,
   type ThreadEvent,
@@ -430,6 +431,11 @@ export class DaemonClient {
 
   setMode(threadId: string, modeId: string): Promise<void> {
     return this.call((client) => client['thread.setMode']({ threadId, clientId: this.clientId, modeId }));
+  }
+
+  /** The thread's modes (opening the agent's session if need be); null for an agent without modes. */
+  threadModes(threadId: string): Promise<ModeState | null> {
+    return this.call((client) => client['thread.modes']({ threadId, clientId: this.clientId }));
   }
 
   rename(threadId: string, title: string): Promise<void> {

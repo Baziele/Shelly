@@ -59,7 +59,7 @@ describe('ThreadStore', () => {
     run(store.insertThread({ ...THREAD, id: 'th2', updatedAt: 5 }));
     assert.deepEqual(run(store.listThreads(10)).map((row) => row.id), ['th2', 'th1']);
     run(store.updateThread('th1', { title: 'Fix the build', updatedAt: 9, nativeSessionId: 'native-1' }));
-    assert.deepEqual(run(store.getThread('th1')), { ...THREAD, title: 'Fix the build', updatedAt: 9, nativeSessionId: 'native-1' });
+    assert.deepEqual(run(store.getThread('th1')), { ...THREAD, title: 'Fix the build', updatedAt: 9, nativeSessionId: 'native-1', titleSource: 'prompt' });
     assert.deepEqual(run(store.listThreads(1)).map((row) => row.id), ['th1']);
     run(store.appendEvents('th1', turn(1, 't1', ['a'])));
     run(store.deleteThread('th1'));
