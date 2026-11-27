@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +18,8 @@ export interface FakeAgentOptions {
   readonly log?: (message: string) => void;
   /** Persist session histories here so session/load works across restarts. */
   readonly stateDir?: string;
+  /** Append each prompt here as a JSON line (`{ sessionId, text }`), so a test can see what the agent was sent. */
+  readonly promptLog?: string;
 }
 
 interface Session {
@@ -375,6 +377,9 @@ export const createFakeAgent = (scenario: FakeAgentScenario, options: FakeAgentO
       }
 
       const text = promptText(params.prompt);
+      if (options.promptLog) {
+        appendFileSync(options.promptLog, `${JSON.stringify({ sessionId: session.id, text })}\n`);
+      }
       const rule = scenario.rules?.find((candidate) => matches(candidate, text));
       log(`session/prompt ${session.id}: ${rule ? `rule ${JSON.stringify(rule.match)}` : 'default script'}`);
       try {
