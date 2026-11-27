@@ -55,3 +55,10 @@ const trimBlankRows = (rows: PaintRow[]): PaintRow[] => {
 /** Rows as text for the terminal: one line each, CRLF-terminated (the terminal is in raw mode). */
 export const rowsToText = (rows: readonly PaintRow[], colorDepth: ColorDepth): string =>
   rows.map((row) => `${encodeRow(row, colorDepth)}\u001b[0m\r\n`).join('');
+
+/**
+ * A fast-mode answer (or any finished markdown) as terminal text, CRLF per
+ * row, ready to print below the echoed request.
+ */
+export const renderAnswer = async (markdown: string, width: number, colorDepth: ColorDepth): Promise<string> =>
+  rowsToText(await renderMarkdownRows(markdown, width), colorDepth);

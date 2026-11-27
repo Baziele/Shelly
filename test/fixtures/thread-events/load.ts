@@ -11,7 +11,8 @@ import type { FastEvent, ThreadEvent } from '../../../src/protocol/schema.js';
  * - `event`: a ThreadEvent without `seq` (numbered automatically);
  * - `stream`: text sent as many `message.chunk` events, `chunk` characters every `every` ms;
  * - `keys`: keystrokes as if the user typed them (for permission prompts);
- * - `fast`: a fast-mode event (`delta` or `done`); `fastStream` streams deltas like `stream`.
+ * - `fast`: a fast-mode event (`delta` or `done`); `fastStream` streams deltas like `stream`;
+ *   `fastError`: the request fails with this message.
  * `at` in turn.started is filled in with the time it is played.
  */
 
@@ -31,6 +32,7 @@ export type FixtureStep =
   | { readonly after?: number; readonly stream: StreamStep }
   | { readonly after?: number; readonly keys: string }
   | { readonly after?: number; readonly fast: FastEvent }
+  | { readonly after?: number; readonly fastError: string }
   | { readonly after?: number; readonly fastStream: { readonly text: string; readonly chunk?: number; readonly every?: number } };
 
 export interface Fixture {
@@ -53,7 +55,8 @@ export interface Fixture {
 export type TimedAction =
   | { readonly at: number; readonly type: 'event'; readonly event: ThreadEvent }
   | { readonly at: number; readonly type: 'keys'; readonly keys: string }
-  | { readonly at: number; readonly type: 'fast'; readonly event: FastEvent };
+  | { readonly at: number; readonly type: 'fast'; readonly event: FastEvent }
+  | { readonly at: number; readonly type: 'fast-error'; readonly message: string };
 
 const DIRECTORY = dirname(fileURLToPath(import.meta.url));
 
@@ -107,6 +110,8 @@ export const timeline = (fixture: Fixture, { speed = 1, startedAt = Date.now() }
       actions.push({ at: time, type: 'keys', keys: step.keys });
     } else if ('fast' in step) {
       actions.push({ at: time, type: 'fast', event: step.fast });
+    } else if ('fastError' in step) {
+      actions.push({ at: time, type: 'fast-error', message: step.fastError });
     } else {
       const { text, chunk = 4, every = 20 } = step.fastStream;
       splitText(text, chunk).forEach((piece, index) => {

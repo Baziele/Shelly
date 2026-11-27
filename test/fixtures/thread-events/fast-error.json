@@ -7,13 +7,8 @@
   "prompt": "compress this folder",
   "steps": [
     {
-      "after": 600,
-      "event": {
-        "type": "notice",
-        "turnId": null,
-        "level": "error",
-        "text": "Fast mode is unavailable: claude is not signed in (run `claude login`)."
-      }
+      "after": 700,
+      "fastError": "Fast mode is unavailable: claude is not signed in (run `claude login`)."
     }
   ]
 }
