@@ -13,6 +13,10 @@ import { type FastBackend, type FastWorker, isWorkerFailure, type Turn, type Tur
  *   session's idle time, or when the session ends.
  * - At most `maxSessions` conversations keep a worker; a new one ends the
  *   least recently used idle one.
+ * - A turn that does not finish (cancelled, or replaced by a newer request
+ *   on the same key) ends its conversation: the worker would keep the half
+ *   turn in its context and answer the next request about it. The next
+ *   request takes the warm worker, so this costs no latency.
  */
 
 export interface PoolTimings {
@@ -74,7 +78,8 @@ export class FastPool {
     this.touch(pool);
 
     let session = this.sessions.get(sessionKey);
-    if (session && (!session.worker.alive || session.agentId !== agentId || session.backendKey !== backend.key)) {
+    // A running turn is replaced: its conversation goes with it, and its request fails.
+    if (session && (session.turn !== null || !session.worker.alive || session.agentId !== agentId || session.backendKey !== backend.key)) {
       this.end(sessionKey);
       session = undefined;
     }
@@ -123,8 +128,11 @@ export class FastPool {
     owner.turn = turn;
     return {
       cancel: () => {
+        if (owner.turn !== turn) return;
         turn.cancel();
         settle();
+        if (this.sessions.get(sessionKey) === owner) this.end(sessionKey);
+        else owner.worker.kill();
       },
     };
   }

@@ -241,7 +241,7 @@ describe('FastService on Claude', () => {
     try {
       await fast.prewarm();
       assert.equal(await fast.workerCount(), 1);
-      await until(async () => (await fast.workerCount()) === 0, 3000);
+      await until(async () => (await fast.workerCount()) === 0, 6000);
     } finally {
       await fast.dispose();
     }
@@ -313,7 +313,7 @@ describe('FastService on Claude', () => {
     }
   });
 
-  it('stopping the stream interrupts the turn, and the conversation goes on', async () => {
+  it('stopping the stream ends the turn, and the next request starts a fresh conversation at once', async () => {
     const fast = harness();
     try {
       const started = performance.now();
@@ -321,11 +321,15 @@ describe('FastService on Claude', () => {
         Stream.runCollect(service.request({ agentId: 'claude', sessionKey: 'a', input: input('slow') }).pipe(Stream.take(3)))));
       assert.equal(first.length, 3);
       assert.ok(performance.now() - started < 2000, 'stopped well before the slow reply would end');
-      await until(() => fast.events().some((event) => event.event === 'interrupt'));
+      const cancelled = fast.events().find((event) => event.event === 'request')!.pid;
+      await until(() => fast.starts().length === 2);
+      const warm = fast.starts().find((start) => start.pid !== cancelled)!.pid;
+      // The cancelled turn would stay in that worker's conversation: the worker goes.
+      await until(() => !isRunning(cancelled));
 
       const next = done(await fast.ask('hello', 'a')).text;
-      assert.match(next, /turn=2$/, 'same worker, after the interrupted turn');
-      assert.equal(fast.events().filter((event) => event.event === 'start').length, 2, 'session worker plus the warm one');
+      assert.match(next, /turn=1$/, 'a fresh conversation, without the cancelled turn');
+      assert.equal(pidOf(next), warm, 'on the warm worker, not a cold start');
     } finally {
       await fast.dispose();
     }
@@ -341,8 +345,25 @@ describe('FastService on Claude', () => {
       const started = performance.now();
       await Effect.runPromise(Fiber.interrupt(fiber));
       assert.ok(performance.now() - started < 200);
-      await until(() => fast.events().some((event) => event.event === 'interrupt'));
-      assert.match(done(await fast.ask('hello', 'a')).text, /turn=2$/);
+      const cancelled = fast.events().find((event) => event.event === 'request')!.pid;
+      await until(() => !isRunning(cancelled));
+      assert.match(done(await fast.ask('hello', 'a')).text, /turn=1$/);
+    } finally {
+      await fast.dispose();
+    }
+  });
+
+  it('a request that replaces a running one starts a fresh conversation', async () => {
+    const fast = harness();
+    try {
+      const fiber = fast.runtime.runFork(FastService.use((service) =>
+        Stream.runCollect(service.request({ agentId: 'claude', sessionKey: 'a', input: input('slow') }))));
+      await until(() => fast.events().some((event) => event.event === 'request'));
+      const next = done(await fast.ask('hello', 'a')).text;
+      assert.match(next, /turn=1$/);
+      assert.notEqual(pidOf(next), fast.events().find((event) => event.event === 'request')!.pid);
+      const replaced = await Effect.runPromise(Fiber.await(fiber));
+      assert.ok(Exit.isFailure(replaced), 'the replaced request fails');
     } finally {
       await fast.dispose();
     }

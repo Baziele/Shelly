@@ -241,16 +241,33 @@ describe('FastService on OpenCode', () => {
     }
   });
 
-  it('stopping the stream interrupts the turn, and the conversation goes on', async () => {
+  it('stopping the stream interrupts the turn and drops its session; the next request takes the warm one', async () => {
     const fast = await harness();
     try {
       const started = performance.now();
       const first = await fast.run(fast.collect('slow', 'a', 3));
       assert.equal(first.length, 3);
       assert.ok(performance.now() - started < 2000);
-      await until(() => fast.posts('/interrupt').length === 1);
+      await until(() => fast.posts('/interrupt').length >= 1);
+      assert.equal(fast.posts('/api/session').length, 2, "the request's session and a warm one");
+      // The cancelled turn would stay in the conversation: that session goes.
+      await until(() => fast.fake.sessions.size === 1);
       const next = done(await fast.ask('hello', 'a')).text;
-      assert.match(next, /turn=2$/, 'same session, after the interrupted turn');
+      assert.match(next, /turn=1$/, 'a fresh conversation, without the cancelled turn');
+      assert.equal(fast.posts('/api/session').length, 3, 'it took the warm session, and a new warm one was made');
+    } finally {
+      await fast.dispose();
+    }
+  });
+
+  it('a request that replaces a running one starts a fresh session', async () => {
+    const fast = await harness();
+    try {
+      const running = fast.askExit('slow', 'a');
+      await until(() => fast.posts('/prompt').length === 1);
+      const next = done(await fast.ask('hello', 'a')).text;
+      assert.match(next, /turn=1$/);
+      assert.ok(Exit.isFailure(await running), 'the replaced request fails');
     } finally {
       await fast.dispose();
     }
