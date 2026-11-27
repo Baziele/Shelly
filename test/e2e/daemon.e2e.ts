@@ -425,6 +425,46 @@ describe('daemon lifecycle', () => {
   });
 });
 
+describe('daemon upgrades', () => {
+  it('replaces an idle daemon older than the client, without failing the request', async () => {
+    const home = newHome();
+    const old = await connect(newClient(home));
+    const thread = await newClient(home).createThread({ location: 'home', cwd: '/work' });
+
+    const upgraded = newClient(home, { version: '99.0.0' });
+    // The first call after the upgrade works, on a new daemon.
+    assert.deepEqual((await upgraded.listThreads()).map((summary) => summary.id), [thread.id]);
+    const hello = await connect(upgraded);
+    assert.notEqual(hello.pid, old.pid);
+    await waitFor(() => !isProcessAlive(old.pid), 'the old daemon to exit');
+  });
+
+  it('keeps using an older daemon that is running a turn', async () => {
+    const home = newHome();
+    const driver = newClient(home);
+    const old = await connect(driver);
+    const thread = await driver.createThread({ location: 'home', cwd: '/work' });
+    await driver.attachThread(thread.id);
+    for await (const event of driver.prompt(thread.id, 'wait for me', CONTEXT)) {
+      if (event.type === 'message.chunk') {
+        break;
+      }
+    }
+    const upgraded = newClient(home, { version: '99.0.0' });
+    assert.equal((await upgraded.listThreads()).length, 1);
+    assert.equal((await connect(upgraded)).pid, old.pid);
+    assert.equal((await upgraded.status()).runningTurns, 1, 'the turn carries on');
+  });
+
+  it('never replaces a daemon newer than the client', async () => {
+    const home = newHome();
+    const current = await connect(newClient(home));
+    const older = newClient(home, { version: '0.0.1' });
+    assert.equal((await connect(older)).pid, current.pid);
+    assert.ok(isProcessAlive(current.pid));
+  });
+});
+
 describe('shelly daemon status and stop', () => {
   it('reports and stops the running daemon', async () => {
     const home = newHome();

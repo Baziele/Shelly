@@ -35,7 +35,9 @@ import { type DaemonStartOptions, ensureDaemonStarted, waitForSocketGone } from 
  * shell is up, never on the startup path.
  *
  * Connecting is lazy: the first call connects (starting the daemon if
- * nothing answers) and says hello. If the daemon goes away, streams in
+ * nothing answers) and says hello. A daemon older than this client (Shelly
+ * was upgraded under it) is asked to make way if it is idle, and a new one
+ * started; a busy one is used as it is. If the daemon goes away, streams in
  * flight fail with DaemonDisconnected and the next call connects again.
  * Breaking out of a stream stops listening; it never cancels a turn.
  *
@@ -72,6 +74,8 @@ export interface DaemonClientOptions extends DaemonStartOptions {
   readonly autoStart?: boolean | undefined;
   /** Defaults to a random id for this process. */
   readonly clientId?: string | undefined;
+  /** For tests: the Shelly version this client reports and compares with the daemon's (SHELLY_VERSION). */
+  readonly version?: string | undefined;
 }
 
 export interface HelloResult {
@@ -108,8 +112,36 @@ const isProtocolMismatch = (error: unknown): boolean =>
 /** A new daemon after a protocol change: how long the old one gets to exit. */
 const OLD_DAEMON_EXIT_TIMEOUT_MS = 3000;
 
+const parseVersion = (version: string): { readonly parts: number[]; readonly pre: string } | undefined => {
+  const match = /^(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(version.trim());
+  return match ? { parts: match[1]!.split('.').map(Number), pre: match[2] ?? '' } : undefined;
+};
+
+/**
+ * Negative when `a` is older than `b`, positive when newer, 0 when equal or
+ * either cannot be read. A pre-release comes before its release.
+ */
+export const compareVersions = (a: string, b: string): number => {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  if (!left || !right) {
+    return 0;
+  }
+  for (let index = 0; index < Math.max(left.parts.length, right.parts.length); index++) {
+    const difference = (left.parts[index] ?? 0) - (right.parts[index] ?? 0);
+    if (difference !== 0) {
+      return Math.sign(difference);
+    }
+  }
+  if (left.pre === right.pre) {
+    return 0;
+  }
+  return left.pre === '' ? 1 : right.pre === '' ? -1 : left.pre < right.pre ? -1 : 1;
+};
+
 export class DaemonClient {
   readonly clientId: string;
+  private readonly version: string;
   private readonly options: DaemonClientOptions;
   private readonly socketPath: string;
   private readonly runtime = ManagedRuntime.make(Layer.empty);
@@ -119,6 +151,7 @@ export class DaemonClient {
   constructor(options: DaemonClientOptions = {}) {
     this.options = options;
     this.clientId = options.clientId ?? randomUUID();
+    this.version = options.version ?? SHELLY_VERSION;
     this.socketPath = shellyPaths(options.env ?? process.env).socket;
   }
 
@@ -186,28 +219,49 @@ export class DaemonClient {
     const connection = await this.openSocket();
     try {
       connection.hello = await this.hello(connection);
-      return connection;
     } catch (error) {
       if (!isProtocolMismatch(error) || this.options.autoStart === false) {
         await this.closeConnection(connection);
         throw error;
       }
-      // An older (or newer) daemon: ask it to make way, unless it is busy.
-      const willStop = await this.run(connection, connection.client['daemon.shutdown']({ ifIdle: true })).catch(() => false);
-      await this.closeConnection(connection);
-      if (!willStop) {
+      // An older (or newer) daemon that speaks another protocol: ask it to make way, unless it is busy.
+      const fresh = await this.replaceDaemon(connection);
+      if (!fresh) {
+        await this.closeConnection(connection);
         throw error;
       }
-      await waitForSocketGone(this.socketPath, OLD_DAEMON_EXIT_TIMEOUT_MS);
-      await this.startOrFind();
-      const fresh = await this.openSocket();
-      try {
-        fresh.hello = await this.hello(fresh);
-        return fresh;
-      } catch (retryError) {
-        await this.closeConnection(fresh);
-        throw retryError;
-      }
+      return fresh;
+    }
+    if (this.options.autoStart !== false && compareVersions(connection.hello.daemonVersion, this.version) < 0) {
+      // Shelly was upgraded while this daemon ran. Same protocol, so a busy
+      // one can go on serving; an idle one makes way for the new version.
+      // Only ever an older daemon: two versions in use at once must not keep
+      // replacing each other's.
+      return (await this.replaceDaemon(connection)) ?? connection;
+    }
+    return connection;
+  }
+
+  /**
+   * Ask the daemon behind `connection` to stop if it is idle, then start a
+   * new one and connect to it. Undefined, with `connection` left open, when
+   * it will not stop.
+   */
+  private async replaceDaemon(connection: Connection): Promise<Connection | undefined> {
+    const willStop = await this.run(connection, connection.client['daemon.shutdown']({ ifIdle: true })).catch(() => false);
+    if (!willStop) {
+      return undefined;
+    }
+    await this.closeConnection(connection);
+    await waitForSocketGone(this.socketPath, OLD_DAEMON_EXIT_TIMEOUT_MS);
+    await this.startOrFind();
+    const fresh = await this.openSocket();
+    try {
+      fresh.hello = await this.hello(fresh);
+      return fresh;
+    } catch (error) {
+      await this.closeConnection(fresh);
+      throw error;
     }
   }
 
@@ -216,7 +270,7 @@ export class DaemonClient {
       connection,
       connection.client.hello({
         protocolVersion: PROTOCOL_VERSION,
-        clientVersion: SHELLY_VERSION,
+        clientVersion: this.version,
         clientId: this.clientId,
         pid: process.pid,
       }),
