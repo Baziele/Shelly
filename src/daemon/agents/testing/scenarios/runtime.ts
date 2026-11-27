@@ -85,5 +85,35 @@ export default defineScenario({
       ],
     },
     { match: 'refuse', script: [{ type: 'message', text: 'no' }, { type: 'end', stopReason: 'refusal' }] },
+    {
+      // Claude Code's command output, as Shelly asks for it (terminal_output_delta).
+      match: 'run a command',
+      script: [
+        {
+          type: 'update',
+          update: {
+            sessionUpdate: 'tool_call', toolCallId: 'sh-1', title: 'Terminal', kind: 'execute', status: 'pending',
+            content: [{ type: 'terminal', terminalId: 'sh-1' }],
+            _meta: { terminal_info: { terminal_id: 'sh-1' } },
+          },
+        },
+        { type: 'update', update: { sessionUpdate: 'tool_call_update', toolCallId: 'sh-1', status: 'in_progress', title: 'make test' } },
+        {
+          type: 'update',
+          update: {
+            sessionUpdate: 'tool_call_update', toolCallId: 'sh-1',
+            _meta: { terminal_output_delta: { terminal_id: 'sh-1', data: 'Exit code 2\nOUTPUT-MARKER line one\n\u001b[31mOUTPUT-MARKER failed\u001b[0m\n' } },
+          },
+        },
+        {
+          type: 'update',
+          update: {
+            sessionUpdate: 'tool_call_update', toolCallId: 'sh-1', status: 'failed',
+            _meta: { terminal_exit: { terminal_id: 'sh-1', exit_code: 2, signal: null } },
+          },
+        },
+        { type: 'message', text: 'It failed.' },
+      ],
+    },
   ],
 });
