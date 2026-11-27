@@ -92,6 +92,34 @@ agent last heard. Fast mode carries the line being edited, the directory, and
 the last command or two. Secrets are masked before anything leaves the client,
 and commands typed with a leading space are never recorded.
 
+## The shell's input line
+
+Fast mode reads the line being edited and leaves its answer on the shell's
+own input line, ready to edit or run, never run for the user
+(`src/shell/line-editor.ts`). Shelly sends the shell private keys no terminal
+sends (F12, F11, F10, F9 with every modifier held, the one kind of key that
+zle, readline and fish 4 can all bind), and the hooks bind them in every
+keymap (emacs and vi):
+
+- **capture**: the hooks report the line and cursor with a `line` marker and
+  clear the line, so Shelly can draw there.
+- **set**: Shelly writes the text to a file and the hooks put it on the line
+  verbatim, then delete the file. Text never travels as keystrokes, so quotes,
+  `$`, `!`, tabs and newlines mean nothing to the line editor. The file sits in
+  a 0700 directory with a fresh random name per session, and exists only
+  until the shell reads it.
+
+| Shell | Capture | Replace |
+|---|---|---|
+| zsh, fish 4, bash 4+ | yes | set exactly, multi-line included |
+| bash 3.2 (macOS) | no (no `READLINE_LINE`) | clear the line and type: a bracketed paste if the shell turned it on, else one line, control characters removed |
+
+Shelly takes these keys out of what the user types at the prompt, and only
+sends them while the shell is at its prompt (after `cwd`, before `exec`,
+with nothing else in the foreground). The rewrite hotkey, Ctrl+], works the
+same way: at the prompt, Shelly takes it and captures the line; anywhere
+else, it reaches the program untouched.
+
 ## Rendering
 
 Agent output is drawn inline on the main screen, never on the alternate
