@@ -18,7 +18,7 @@ describe('LineEditor', () => {
   /** Called with each write, as the shell would see it. */
   let shell: (data: string) => void;
 
-  const create = (features: string[], options: { timeoutMs?: number } = {}): LineEditor => {
+  const create = (features: string[], options: { timeoutMs?: number; enterQuietMs?: number } = {}): LineEditor => {
     editor = new LineEditor({ write: (data) => { written.push(data); shell(data); }, runtimeDir, settleMs: 1, ...options });
     editor.handleEvent({ type: 'line-editor', features });
     editor.handleEvent({ type: 'cwd', path: '/' });
@@ -209,7 +209,38 @@ describe('LineEditor', () => {
     assert.equal(subject.isAtPrompt, true, 'a pasted newline is not Enter');
     subject.filterInput('ls\r');
     assert.equal(subject.isAtPrompt, false);
+    assert.equal(subject.filterInput(LINE_KEYS.capture), '', 'still removed until the shell reports a command');
+    subject.handleEvent({ type: 'exec', command: 'ls' });
     assert.equal(subject.filterInput(LINE_KEYS.capture), LINE_KEYS.capture, 'a running program gets every key');
+  });
+
+  it('is back at the prompt once an Enter has run nothing for a while', async () => {
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const subject = create(['capture', 'set'], { enterQuietMs: 40 });
+    // An open quote: the shell asks for more, at the same prompt, with no marker.
+    subject.filterInput("echo 'a\r");
+    assert.equal(subject.isAtPrompt, false, 'right after Enter, the shell may be starting a command');
+    await wait(25);
+    subject.observeOutput('\r\nquote> ');
+    await wait(25);
+    assert.equal(subject.isAtPrompt, false, 'its output pushes the wait back');
+    await wait(40);
+    assert.equal(subject.isAtPrompt, true, 'quiet, with no command reported');
+    assert.equal(subject.filterInput(LINE_KEYS.capture), '');
+
+    // A command reported in time keeps it off the prompt for good.
+    subject.filterInput("b'\r");
+    subject.handleEvent({ type: 'exec', command: "echo 'a\nb'" });
+    await wait(60);
+    assert.equal(subject.isAtPrompt, false);
+    subject.handleEvent({ type: 'done', exitCode: 0 });
+    subject.handleEvent({ type: 'cwd', path: '/' });
+    assert.equal(subject.isAtPrompt, true);
+
+    // As does a new prompt, at once (an empty line, say).
+    subject.filterInput('\r');
+    subject.handleEvent({ type: 'cwd', path: '/' });
+    assert.equal(subject.isAtPrompt, true);
   });
 
   it('matches each answer to its request, and puts back only one that came too late', async () => {
