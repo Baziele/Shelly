@@ -1,0 +1,88 @@
+name: Claude review
+
+# Claude reviews every pull request that is ready for review, leaves inline
+# comments and a summary, and fails this check when it finds blocking issues.
+# Mark "Claude review / review" as a required check so nothing merges past it.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Review
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            BASE: ${{ github.event.pull_request.base.ref }}
+
+            You are reviewing a pull request to Shelly, a terminal wrapper
+            (Node/TypeScript, node-pty, OpenTUI, Effect v4) that lets people
+            ask coding agents for help from their shell. The pull request was
+            most likely written by an AI agent, so read it skeptically.
+
+            Read the diff with `gh pr diff`, and read the surrounding code in
+            the checkout whenever a change depends on it. Look for, in order:
+            1. Bugs: wrong behaviour, unhandled errors, races, leaks, broken
+               terminal state (raw mode, cursor, stray escape sequences).
+            2. Security and privacy: secrets or personal data in code, logs,
+               fixtures or prompts; unsafe shell or process handling.
+            3. Performance problems on hot paths (keystrokes, shell output,
+               rendering, startup).
+            4. Missing or weak tests for the behaviour the change adds.
+
+            Post each real issue as an inline comment on the line it concerns,
+            saying what goes wrong and when. Skip style nits and anything a
+            linter or type checker would catch. Then post one short summary
+            comment with `gh pr comment`.
+
+            Finish with the structured verdict: "changes_requested" if any
+            issue would cause a bug, a security or privacy problem, or a
+            serious performance regression; otherwise "pass".
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","changes_requested"]},"blocking_issues":{"type":"integer","minimum":0},"summary":{"type":"string"}},"required":["verdict","blocking_issues","summary"]}'
+
+      - name: Enforce the verdict
+        env:
+          OUTPUT: ${{ steps.review.outputs.structured_output }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # The action only runs a workflow identical to the default branch's,
+          # so a pull request cannot rewrite its own reviewer. Such a pull
+          # request gets no review; let it through with a warning, and fail
+          # every other run that produced no verdict.
+          if [ -z "$OUTPUT" ] && git diff --name-only "$BASE_SHA" HEAD | grep -qx '.github/workflows/claude-review.yml'; then
+            echo "::warning::This pull request changes the review workflow, so Claude did not review it. Review it by hand."
+            exit 0
+          fi
+          verdict=$(printf '%s' "$OUTPUT" | jq -r '.verdict // empty')
+          blocking=$(printf '%s' "$OUTPUT" | jq -r '.blocking_issues // empty')
+          printf '%s' "$OUTPUT" | jq -r '.summary // empty' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$verdict" != "pass" ]; then
+            echo "::error::Claude review verdict: ${verdict:-none} (${blocking:-?} blocking issues)"
+            exit 1
+          fi
+          echo "Claude review passed."
