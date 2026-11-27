@@ -78,6 +78,30 @@ describe('HostTerminal cursor queries', () => {
     assert.deepEqual(typed.join(''), 'ls');
   });
 
+  it('lets a Shift+F3 through after a DEC answer whose plain echo never came', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const query = host.queryCursorPosition();
+    await answer('\u001b[?5;9R');
+    await query;
+    await answer('\u001b[1;2R');
+    host.stop();
+    assert.deepEqual(typed, ['\u001b[1;2R'], 'the key was taken for the late echo');
+  });
+
+  it('lets a key-shaped report through after a timeout, but swallows a late DEC answer and its echo', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    await assert.rejects(host.queryCursorPosition(30));
+    await answer('\u001b[1;2R');
+    host.stop();
+    assert.deepEqual(typed, ['\u001b[1;2R']);
+
+    const second = fakeTerminal();
+    await assert.rejects(second.host.queryCursorPosition(30));
+    await second.answer('\u001b[?1;3R\u001b[1;3R');
+    second.host.stop();
+    assert.deepEqual(second.typed, []);
+  });
+
   it('passes keystrokes typed during a query through once it is answered', async () => {
     const { host, typed, answer } = fakeTerminal();
     const query = host.queryCursorPosition();

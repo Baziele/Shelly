@@ -1,5 +1,5 @@
 import { ansi } from './ansi.js';
-import { dropCursorReports, extractCursorReport, type CursorPosition } from './cursor-report.js';
+import { extractCursorReport, type CursorPosition } from './cursor-report.js';
 
 export interface TerminalSize {
   readonly cols: number;
@@ -29,8 +29,12 @@ const LATE_REPLY_WINDOW_MS = 3000;
 export class HostTerminal {
   private inputListener: ((data: string) => void) | undefined;
   private pendingCursorQuery: PendingCursorQuery | undefined;
-  /** Replies still owed for settled queries (the plain echo of a DEC answer, or a late one). */
-  private expectedLateReplies = { count: 0, until: 0 };
+  /**
+   * Replies still owed for settled queries: the plain echo of a DEC answer
+   * (at `position`), or both replies of a query that timed out (position
+   * unknown). Only replies that cannot be a key are taken out (see dropLateReplies).
+   */
+  private expectedLateReplies: { count: number; until: number; position: CursorPosition | undefined } = { count: 0, until: 0, position: undefined };
   private started = false;
 
   constructor(
@@ -142,7 +146,7 @@ export class HostTerminal {
       query.buffered = (query.held?.text ?? '') + report.before + report.after;
       if (report.kind === 'dec') {
         // A terminal that answers the DEC form also answers the plain one, right behind it.
-        this.expectLateReplies(1);
+        this.expectLateReplies(1, report.position);
       }
       this.settleQuery(report.position);
       return;
@@ -164,20 +168,42 @@ export class HostTerminal {
     this.deliver(this.dropLateReplies(query.buffered));
   }
 
-  private expectLateReplies(count: number): void {
-    this.expectedLateReplies = { count: this.expectedLateReplies.count + count, until: Date.now() + LATE_REPLY_WINDOW_MS };
+  private expectLateReplies(count: number, position?: CursorPosition): void {
+    this.expectedLateReplies = { count, until: Date.now() + LATE_REPLY_WINDOW_MS, position };
   }
 
-  /** Take replies owed for settled queries out of `text`. */
+  /**
+   * Take replies owed for settled queries out of `text`. A DEC report is
+   * always a reply (no key sends one). A plain report is taken only when it
+   * matches the position just answered, or when it could not be a key; one
+   * shaped like Shift+F3 (CSI 1;2R) that matches nothing reaches the shell.
+   */
   private dropLateReplies(text: string): string {
     const late = this.expectedLateReplies;
     if (late.count === 0 || Date.now() > late.until) {
-      this.expectedLateReplies = { count: 0, until: 0 };
+      this.expectedLateReplies = { count: 0, until: 0, position: undefined };
       return text;
     }
-    const { text: rest, dropped } = dropCursorReports(text, late.count);
-    late.count -= dropped;
-    return rest;
+    let rest = text;
+    let kept = '';
+    while (late.count > 0) {
+      const report = extractCursorReport(rest);
+      if (!report) {
+        break;
+      }
+      const matches = late.position !== undefined && report.position.row === late.position.row && report.position.col === late.position.col;
+      if (report.kind === 'dec' || matches || !report.ambiguous) {
+        late.count--;
+        if (report.kind === 'dec') {
+          late.position = report.position;
+        }
+        kept += report.before;
+      } else {
+        kept += report.before + rest.slice(report.before.length, rest.length - report.after.length);
+      }
+      rest = report.after;
+    }
+    return kept + rest;
   }
 
   private deliver(text: string): void {
