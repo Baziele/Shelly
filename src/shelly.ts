@@ -19,6 +19,8 @@ const TRIGGER_HOLD_MS = 400;
 const RESIZE_SETTLE_MS = 50;
 /** How long output that might begin a shell marker is held before it goes to the terminal anyway. */
 const MARKER_HOLD_MS = 50;
+/** A response that takes longer gives the terminal back rather than holding input. */
+const RESPONSE_TIMEOUT_MS = 5000;
 
 export interface ShellyOptions {
   readonly host: HostTerminal;
@@ -229,7 +231,10 @@ export class Shelly {
     this.overlay?.close();
     this.mode = 'responding';
     this.host.write(`\u001b[1;35m${this.activeTrigger}\u001b[0m ${toTerminalText(text)}\r\n`);
-    void this.respond(text)
+    void Promise.race([
+      this.respond(text),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('it took too long')), RESPONSE_TIMEOUT_MS).unref()),
+    ])
       .catch((error: unknown) => `Shelly could not answer: ${error instanceof Error ? error.message : String(error)}`)
       .then((response) => {
         if (this.disposed) {

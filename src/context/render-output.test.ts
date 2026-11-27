@@ -50,6 +50,11 @@ describe('renderOutput', () => {
     assert.equal(await renderOutput(snapshot, 80), 'first\n[… 12,345 characters of output omitted …]\nlast');
   });
 
+  it('keeps the end of one huge line instead of dropping it at the cut', async () => {
+    const snapshot = { head: 'x'.repeat(5000), tail: `${'x'.repeat(5000)}END\r\n`, omittedChars: 99, usedFullScreen: false };
+    assert.ok((await renderOutput(snapshot, 80)).endsWith('xEND'));
+  });
+
   it('finds the zsh marker after a title set by precmd()', async () => {
     assert.equal(await renderOutput(plain(`partial${ZSH_NO_NEWLINE_MARK}\u001b]0;~/repo\u0007`), 80), 'partial');
   });

@@ -52,15 +52,36 @@ export const renderOutput = async (snapshot: OutputSnapshot, columns: number): P
     return renderTerminalText(stripShellArtifacts(snapshot.head + snapshot.tail), columns);
   }
 
-  // Each side of the cut loses its partial line, which could hold half an
-  // escape sequence or half a character.
-  const headEnd = snapshot.head.lastIndexOf('\n');
-  const tailStart = snapshot.tail.indexOf('\n');
   const [head, tail] = await Promise.all([
-    renderTerminalText(headEnd === -1 ? snapshot.head : snapshot.head.slice(0, headEnd + 1), columns),
-    renderTerminalText(stripShellArtifacts(tailStart === -1 ? snapshot.tail : snapshot.tail.slice(tailStart + 1)), columns),
+    renderTerminalText(trimHeadAtCut(snapshot.head), columns),
+    renderTerminalText(stripShellArtifacts(trimTailAtCut(snapshot.tail)), columns),
   ]);
   return `${head}\n[… ${snapshot.omittedChars.toLocaleString('en-US')} characters of output omitted …]\n${tail}`;
+};
+
+/** A partial line next to the cut is dropped when it is short; a long one is cut cleanly instead. */
+const SEAM_LINE_CHARS = 1024;
+
+const trimHeadAtCut = (head: string): string => {
+  const newline = head.lastIndexOf('\n');
+  if (newline !== -1 && head.length - newline <= SEAM_LINE_CHARS) {
+    return head.slice(0, newline + 1);
+  }
+  // Mid-line: do not end inside an escape sequence or between surrogates.
+  const escape = head.lastIndexOf('\u001b');
+  let end = escape !== -1 && head.length - escape < 64 ? escape : head.length;
+  if (end > 0 && /[\ud800-\udbff]/.test(head[end - 1] ?? '')) {
+    end--;
+  }
+  return head.slice(0, end);
+};
+
+const trimTailAtCut = (tail: string): string => {
+  const newline = tail.indexOf('\n');
+  if (newline !== -1 && newline < SEAM_LINE_CHARS) {
+    return tail.slice(newline + 1);
+  }
+  return /^[\udc00-\udfff]/.test(tail) ? tail.slice(1) : tail;
 };
 
 const stripShellArtifacts = (raw: string): string => {
