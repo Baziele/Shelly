@@ -16,6 +16,8 @@ export interface RendererSize {
  */
 const PROCESS_EVENTS_OWNED_BY_SHELLY = ['warning', 'uncaughtException', 'unhandledRejection'] as const;
 
+let live = 0;
+
 type FakeTerminalOutput = Writable & { columns: number; rows: number; isTTY: true };
 
 /**
@@ -29,7 +31,13 @@ type FakeTerminalOutput = Writable & { columns: number; rows: number; isTTY: tru
  * styling while Shelly handles placement.
  */
 export class HeadlessRenderer {
+  /** Renderers created and not yet destroyed, process-wide: for leak checks. */
+  static get liveCount(): number {
+    return live;
+  }
+
   private frameListener: ((frame: PaintFrame) => void) | undefined;
+  private destroyed = false;
 
   private constructor(
     readonly renderer: CliRenderer,
@@ -75,6 +83,7 @@ export class HeadlessRenderer {
       }
     }
 
+    live++;
     return new HeadlessRenderer(renderer, input, output);
   }
 
@@ -101,6 +110,12 @@ export class HeadlessRenderer {
   }
 
   destroy(): void {
+    if (this.destroyed) {
+      return;
+    }
+    this.destroyed = true;
+    live--;
+    this.frameListener = undefined;
     this.renderer.destroy();
   }
 

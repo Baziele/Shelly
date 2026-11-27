@@ -155,6 +155,7 @@ export class AgentView {
   private tickStartedAt = 0;
   private idleWaiters: Array<() => void> = [];
   private stats = { frames: 0, renderMs: 0, firstPaintMs: -1 };
+  private released = false;
 
   constructor(
     private readonly host: AgentViewHost,
@@ -366,6 +367,7 @@ export class AgentView {
     this.schedule();
   }
 
+  /** Stop at once and free the renderer, without committing anything more. */
   destroy(): void {
     if (this.state === 'running' || this.state === 'finishing') {
       // Torn down mid-turn (an error, the shell exiting): no live rows or hidden cursor left behind.
@@ -380,7 +382,7 @@ export class AgentView {
     clearTimeout(this.frameTimer);
     this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
-    this.headless.destroy();
+    this.releaseRenderer();
   }
 
   /** Rendering costs so far, for measurements. */
@@ -799,6 +801,19 @@ export class AgentView {
     this.frameTimer = undefined;
     this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
+    this.releaseRenderer();
+  }
+
+  /** A finished view keeps nothing: its block views and its OpenTUI renderer go. */
+  private releaseRenderer(): void {
+    if (this.released) {
+      return;
+    }
+    this.released = true;
+    for (const [key, view] of this.views) {
+      this.destroyView(key, view);
+    }
+    this.headless.destroy();
   }
 
   // ─── Formatting ───────────────────────────────────────────────────────────

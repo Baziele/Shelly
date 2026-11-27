@@ -6,6 +6,7 @@ import { eventually } from '../../../test/support/eventually.js';
 import { playFixture } from '../../../test/support/play.js';
 import type { ThreadEvent } from '../../protocol/schema.js';
 import type { ColorDepth } from '../../render/sgr.js';
+import { HeadlessRenderer } from '../headless-renderer.js';
 import { AgentView, type AgentAction } from './agent-view.js';
 
 const ECHO = '~/acme-web $ :: ';
@@ -180,6 +181,26 @@ describe('AgentView', { timeout: 30_000 }, () => {
   it('leaves ordinary typing alone while a turn runs', async () => {
     const { view } = await setup(80, 12, 'q');
     assert.equal(view.handleInput('ls'), false);
+  });
+
+  it('frees its renderer when a turn finishes or goes to the background, turn after turn', async () => {
+    const before = HeadlessRenderer.liveCount;
+    for (let turn = 0; turn < 50; turn++) {
+      const { view } = await setup(80, 12, `q${turn}`);
+      view.apply(event({ type: 'turn.started', text: 'q', at: Date.now() }));
+      view.apply(event({ type: 'message.chunk', messageId: `m${turn}`, kind: 'text', text: 'An **answer**.' }));
+      if (turn % 2 === 0) {
+        view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 5 }));
+        await view.finish();
+      } else {
+        view.handleInput('\u001b');
+        // A lone Esc acts once it is clear no escape sequence follows.
+        for (let waited = 0; waited < 1000 && HeadlessRenderer.liveCount !== before; waited += 10) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      assert.equal(HeadlessRenderer.liveCount, before, `turn ${turn} left a renderer behind`);
+    }
   });
 
   it('keeps render stats: frames counted, first paint and frame cost measured', async () => {
