@@ -108,6 +108,8 @@ for (const shell of E2E_SHELLS) {
         await driver.press('enter');
         await driver.waitForText('fake wants to: Edit .env.example', { timeoutMs: TURN_MS });
         await driver.waitForText(/Waiting for you/);
+        // A prompt ignores keys for its first 300 ms on screen, so a key typed ahead cannot answer it.
+        await sleep(500);
         await driver.type(key);
         const lines = await waitForTurnEnd(driver, text, '✓');
         assert.ok(lines.some((line) => outcome.test(line)), `${outcome}:\n${lines.join('\n')}`);
