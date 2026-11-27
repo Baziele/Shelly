@@ -23,5 +23,5 @@
   },
   "include": ["src", "test"],
   // Needs @effect/openapi-generator, which is only installed to regenerate; see src/acp/README.md.
-  "exclude": ["src/acp/scripts"]
+  "exclude": ["src/acp/scripts/generate.ts"]
 }
