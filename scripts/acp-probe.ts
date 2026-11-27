@@ -19,7 +19,8 @@
  *   --lean                 Claude: tools, MCP and settings off, short system
  *                          prompt, haiku. OpenCode: the `shelly-fast` agent from
  *                          an opencode.json in the probe dir.
- *   --caps fs|none|all     Client capabilities to offer (default fs).
+ *   --caps fs|none         Client capabilities to offer (default fs). The probe
+ *                          never offers terminals: neither agent uses them.
  *   --model <id>           Model (claude default "haiku", opencode default
  *                          "opencode-go/hy4-flash-free").
  *   --runs <n>             Runs for `latency` (default 3).
@@ -37,10 +38,10 @@
  * prompts to a small model.
  */
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -57,7 +58,7 @@ import {
 // CLI
 
 type AgentName = "claude" | "opencode";
-type Caps = "fs" | "none" | "all";
+type Caps = "fs" | "none";
 
 const { values: argv } = parseArgs({
   options: {
@@ -187,13 +188,40 @@ type PermissionPolicy = "allow_once" | "reject_once";
 class Probe {
   rec = new Recorder();
   permissionPolicy: PermissionPolicy = "allow_once";
-  terminals = new Map<string, { child: ChildProcess; output: string; exit: Promise<{ exitCode: number | null; signal: string | null }> }>();
   current?: Spawned;
   expectingExit = false;
   unexpectedExits: { code: number | null; signal: string | null; at: number; stderrTail: string }[] = [];
-  private termSeq = 0;
 
   constructor(readonly cwd: string) {}
+
+  /**
+   * `path`, resolved, if it lies inside the probe directory; a request error
+   * otherwise. Compares real, resolved paths, so `..` and a sibling directory
+   * that shares the prefix cannot get out.
+   */
+  insideProbeDir(path: string): string {
+    const root = realpathSync(this.cwd);
+    const target = resolve(root, path);
+    let real = target;
+    try {
+      real = realpathSync(target);
+    } catch {
+      // A dangling symlink would let a write land wherever it points.
+      if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        throw RequestError.invalidParams({ path }, "a symlink that points nowhere");
+      }
+      // A file about to be written: check its directory instead.
+      try {
+        real = join(realpathSync(dirname(target)), target.slice(dirname(target).length + 1));
+      } catch {
+        // Its directory does not exist either; the resolved path decides.
+      }
+    }
+    if (real !== root && !real.startsWith(root + sep)) {
+      throw RequestError.invalidParams({ path }, "outside the probe directory");
+    }
+    return real;
+  }
 
   spawn(): Spawned {
     const { command, args, env } = agentCommand();
@@ -220,54 +248,14 @@ class Probe {
         return { outcome: { outcome: "selected", optionId: option.optionId } };
       })
       .onRequest("fs/read_text_file", ({ params }) => {
-        const text = readFileSync(params.path, "utf8");
+        const text = readFileSync(this.insideProbeDir(params.path), "utf8");
         if (params.line == null && params.limit == null) return { content: text };
         const lines = text.split("\n");
         const start = Math.max(0, (params.line ?? 1) - 1);
         return { content: lines.slice(start, params.limit == null ? undefined : start + params.limit).join("\n") };
       })
       .onRequest("fs/write_text_file", ({ params }) => {
-        if (!params.path.startsWith(this.cwd)) throw RequestError.invalidParams({ path: params.path }, "outside the probe directory");
-        writeFileSync(params.path, params.content);
-        return {};
-      })
-      .onRequest("terminal/create", ({ params }) => {
-        const id = `term-${++this.termSeq}`;
-        const proc = spawn(params.command, params.args ?? [], {
-          cwd: params.cwd ?? this.cwd,
-          env: { ...process.env, ...Object.fromEntries((params.env ?? []).map((e) => [e.name, e.value])) },
-          shell: (params.args ?? []).length === 0,
-        });
-        const entry = {
-          child: proc,
-          output: "",
-          exit: new Promise<{ exitCode: number | null; signal: string | null }>((res) =>
-            proc.on("exit", (exitCode, signal) => res({ exitCode, signal })),
-          ),
-        };
-        proc.stdout?.on("data", (d: Buffer) => (entry.output += d.toString()));
-        proc.stderr?.on("data", (d: Buffer) => (entry.output += d.toString()));
-        this.terminals.set(id, entry);
-        return { terminalId: id };
-      })
-      .onRequest("terminal/output", async ({ params }) => {
-        const t = this.terminals.get(params.terminalId);
-        if (!t) throw RequestError.resourceNotFound(params.terminalId);
-        const done = t.child.exitCode !== null || t.child.signalCode !== null;
-        return { output: t.output, truncated: false, ...(done ? { exitStatus: await t.exit } : {}) };
-      })
-      .onRequest("terminal/wait_for_exit", async ({ params }) => {
-        const t = this.terminals.get(params.terminalId);
-        if (!t) throw RequestError.resourceNotFound(params.terminalId);
-        return await t.exit;
-      })
-      .onRequest("terminal/kill", ({ params }) => {
-        this.terminals.get(params.terminalId)?.child.kill();
-        return {};
-      })
-      .onRequest("terminal/release", ({ params }) => {
-        this.terminals.get(params.terminalId)?.child.kill();
-        this.terminals.delete(params.terminalId);
+        writeFileSync(this.insideProbeDir(params.path), params.content);
         return {};
       })
       .onRequest("*", ({ method }) => {
@@ -360,7 +348,6 @@ class Probe {
         } catch {}
       }
     }
-    for (const t of this.terminals.values()) t.child.kill();
     this.current = undefined;
     this.expectingExit = false;
   }
@@ -381,7 +368,7 @@ function errInfo(error: unknown): unknown {
 function clientCapabilities(): Record<string, unknown> {
   if (caps === "none") return {};
   const fs = { readTextFile: true, writeTextFile: true };
-  return caps === "all" ? { fs, terminal: true } : { fs };
+  return { fs };
 }
 
 async function initialize(p: Probe) {
@@ -912,7 +899,7 @@ async function main(): Promise<void> {
   if (agentName !== "claude" && agentName !== "opencode") throw new Error("--agent must be claude or opencode");
   const run = scenarios[scenarioName];
   if (!run) throw new Error(`--scenario must be one of: ${Object.keys(scenarios).join(", ")}`);
-  if (!["fs", "none", "all"].includes(caps)) throw new Error("--caps must be fs, none or all");
+  if (!["fs", "none"].includes(caps)) throw new Error("--caps must be fs or none");
   const dir = makeProbeDir();
   const p = new Probe(dir);
   let failed: unknown;
@@ -923,7 +910,8 @@ async function main(): Promise<void> {
   } finally {
     await p.shutdown().catch(() => {});
   }
-  if (scenarioName !== "latency" && scenarioName !== "rss") {
+  // A failed run keeps the checked-in fixture; its recording is not one.
+  if (!failed && scenarioName !== "latency" && scenarioName !== "rss") {
     const suffix = [lean ? "lean" : "", caps !== "fs" ? `caps-${caps}` : ""].filter(Boolean).join("-");
     writeFixture(p, suffix ? `${scenarioName}-${suffix}` : scenarioName);
   }
