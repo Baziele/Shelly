@@ -19,6 +19,15 @@ describe('TriggerDetector', () => {
     assert.deepEqual(detector().push('::how do I'), [{ type: 'trigger', trigger: '::', remainder: 'how do I' }]);
   });
 
+  it('knows a line Shelly set, so clearing it brings the triggers back', () => {
+    const subject = detector();
+    subject.markLineTyped(3);
+    assert.equal(triggered(subject.push('::')), undefined, 'not at an empty line');
+    subject.markLineTyped(3);
+    subject.push('\u0015');
+    assert.equal(triggered(subject.push('__'))?.type, 'trigger');
+  });
+
   it('ignores triggers in the middle of a command', () => {
     const subject = detector();
     assert.equal(forwarded(subject.push('std::vector')), 'std::vector');

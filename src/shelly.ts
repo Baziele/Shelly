@@ -511,7 +511,12 @@ export class Shelly {
       this.mode = 'shell';
       this.detector.markLineEmpty();
       if (line.type === 'set') {
-        this.detector.markLineUnknown();
+        // Set exactly, cursor at the end; a multi-line command is beyond what the detector follows.
+        if (line.text.includes('\n')) {
+          this.detector.markLineUnknown();
+        } else {
+          this.detector.markLineTyped([...line.text].length);
+        }
         this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
       } else if (rewrite) {
         this.putLineBack(rewrite);
