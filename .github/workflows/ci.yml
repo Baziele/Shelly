@@ -59,7 +59,7 @@ jobs:
       - name: Secure zsh's completion directories
         if: runner.os == 'Linux'
         run: |
-          zsh -fc 'autoload -U compaudit; compaudit' | tail -n +2 | xargs -r sudo chmod g-w,o-w
+          zsh -fc 'autoload -U compaudit; compaudit' 2>/dev/null | grep '^/' | xargs -r sudo chmod g-w,o-w
           zsh -fc 'autoload -U compaudit; compaudit' && echo "No insecure directories left."
 
       - name: End-to-end tests
