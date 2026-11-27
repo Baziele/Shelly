@@ -614,6 +614,20 @@ describe('ThreadService under races and shutdown', () => {
       }), { fake });
   });
 
+  it('keeps nothing in memory for a prompt to a thread that does not exist', async () => {
+    const looked: string[] = [];
+    const wrapStore: StoreWrapper = (store) => ({
+      ...store,
+      lastSeq: (threadId) => Effect.sync(() => looked.push(threadId)).pipe(Effect.andThen(store.lastSeq(threadId))),
+    });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const failure = yield* threads.prompt(promptInput('nope', 'hi')).pipe(Stream.runDrain, Effect.flip);
+        assert.equal(failure._tag, 'ThreadNotFound');
+        assert.deepEqual(looked, [], 'no live state was set up for it');
+      }), { wrapStore });
+  });
+
   it('gives up waiting on an agent that ignores cancel, and frees the thread', async () => {
     const fake = new FakeAgents({ ignoresCancel: () => true });
     await withThreads((threads) =>

@@ -544,6 +544,8 @@ const make = Effect.gen(function* () {
   const prompt = (input: PromptInput) =>
     Stream.unwrap(
       Effect.gen(function* () {
+        // Before liveThread, which would keep state for a thread that does not exist.
+        yield* requireThread(input.threadId);
         const thread = yield* liveThread(input.threadId);
         // Subscribe before the turn starts so the stream sees all of it.
         const subscription = yield* PubSub.subscribe(thread.events);
