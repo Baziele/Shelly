@@ -4,6 +4,8 @@ import xterm from '@xterm/headless';
 import * as pty from 'node-pty';
 
 const ENTRY = fileURLToPath(new URL('../../src/index.ts', import.meta.url));
+// Resolved here, since Shelly may be started from a directory that cannot see this project's packages.
+const TSX = import.meta.resolve('tsx');
 const PROMPT = '$ ';
 
 export interface ShellyHarness {
@@ -14,34 +16,56 @@ export interface ShellyHarness {
   cursor(): Promise<{ row: number; col: number }>;
   /** Poll the screen until `predicate` holds, or fail with the last screen. */
   waitFor(predicate: (screen: string[]) => boolean, description: string): Promise<string[]>;
+  /** Everything Shelly wrote to the terminal so far. */
+  raw(): string;
   close(): Promise<number>;
+}
+
+export interface ShellyOptions {
+  readonly cols?: number;
+  readonly rows?: number;
+  readonly shell?: string;
+  /** A throwaway HOME holding the shell's startup files. */
+  readonly home?: string;
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 /**
  * Runs Shelly in a pseudo-terminal attached to an emulated terminal
- * (xterm.js), which answers cursor position queries like a real one. Uses
- * plain `sh` with a fixed prompt so results do not depend on the user's
- * shell configuration.
+ * (xterm.js), which answers cursor position and other queries like a real
+ * one. Defaults to plain `sh` with a fixed prompt so results do not depend on
+ * the user's shell configuration; other shells should get a throwaway HOME
+ * whose startup files set the same prompt.
  */
-export const startShelly = async ({ cols = 80, rows = 12 } = {}): Promise<ShellyHarness> => {
+export const startShelly = async (
+  { cols = 80, rows = 12, shell = '/bin/sh', home, env = {} }: ShellyOptions = {},
+): Promise<ShellyHarness> => {
   const terminal = new xterm.Terminal({ cols, rows, allowProposedApi: true });
-  const child = pty.spawn(process.execPath, ['--experimental-ffi', '--no-warnings', '--import', 'tsx', ENTRY], {
+  const child = pty.spawn(process.execPath, ['--experimental-ffi', '--no-warnings', '--import', TSX, ENTRY], {
     name: 'xterm-256color',
     cols,
     rows,
-    cwd: process.cwd(),
+    cwd: home ?? process.cwd(),
     env: {
       PATH: process.env.PATH ?? '/usr/bin:/bin',
-      HOME: process.env.HOME ?? '/tmp',
+      HOME: home ?? process.env.HOME ?? '/tmp',
       TERM: 'xterm-256color',
-      SHELL: '/bin/sh',
+      LANG: 'en_US.UTF-8',
+      SHELL: shell,
       PS1: PROMPT,
+      // macOS's bash 3.2 otherwise opens with a notice about zsh.
+      BASH_SILENCE_DEPRECATION_WARNING: '1',
+      ...env,
     },
   });
 
   let exited: Promise<number> | undefined;
   const exitCode = new Promise<number>((resolve) => child.onExit(({ exitCode: code }) => resolve(code)));
-  child.onData((data) => terminal.write(data));
+  let raw = '';
+  child.onData((data) => {
+    raw += data;
+    terminal.write(data);
+  });
   terminal.onData((reply) => child.write(reply));
 
   const flush = (): Promise<void> => new Promise((resolve) => terminal.write('', resolve));
@@ -75,6 +99,7 @@ export const startShelly = async ({ cols = 80, rows = 12 } = {}): Promise<Shelly
       }
       throw new Error(`Timed out waiting for ${description}. Screen:\n${screen.join('\n')}`);
     },
+    raw: () => raw,
     close() {
       exited ??= (async () => {
         try {

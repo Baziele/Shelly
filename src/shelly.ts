@@ -1,6 +1,11 @@
 import { BUILTIN_COMMANDS, CommandRegistry } from './commands/slash-commands.js';
+import { CommandLog } from './context/command-log.js';
+import { describeEnvironment, type EnvironmentInfo } from './context/environment.js';
+import { buildAskContext, formatAskContext } from './context/session-context.js';
 import { TriggerDetector, type TriggerAction } from './input/trigger-detector.js';
 import { detectColorDepth, type ColorDepth } from './render/sgr.js';
+import { prepareShellIntegration } from './shell/shell-integration.js';
+import { ShellMarkerParser, type ShellOutputSegment } from './shell/shell-markers.js';
 import { ShellSession } from './shell/shell-session.js';
 import type { CursorPosition } from './terminal/cursor-report.js';
 import type { HostTerminal, TerminalSize } from './terminal/host-terminal.js';
@@ -12,6 +17,10 @@ export const DEFAULT_TRIGGERS = ['::', '__'] as const;
 /** How long a possible trigger's first character is held back before it goes to the shell. */
 const TRIGGER_HOLD_MS = 400;
 const RESIZE_SETTLE_MS = 50;
+/** How long output that might begin a shell marker is held before it goes to the terminal anyway. */
+const MARKER_HOLD_MS = 50;
+/** A response that takes longer gives the terminal back rather than holding input. */
+const RESPONSE_TIMEOUT_MS = 5000;
 
 export interface ShellyOptions {
   readonly host: HostTerminal;
@@ -26,8 +35,11 @@ export interface ShellyOptions {
  * - shell:   straight to the shell, watching for a trigger.
  * - opening: a trigger fired and Shelly is getting ready to draw; input is queued.
  * - overlay: to Shelly's input line.
+ * - responding: Shelly is writing a response below the prompt; input is
+ *   queued (and shell output held) until it is done and the shell has its
+ *   line back.
  */
-type Mode = 'shell' | 'opening' | 'overlay';
+type Mode = 'shell' | 'opening' | 'overlay' | 'responding';
 
 /**
  * A transparent proxy between the terminal and the user's shell. Until a
@@ -38,6 +50,13 @@ export class Shelly {
   private readonly shell: ShellSession;
   private readonly detector: TriggerDetector;
   private readonly colorDepth: ColorDepth;
+  /** Reads the shell hooks' markers; absent for shells without hooks. */
+  private readonly markers: ShellMarkerParser | undefined;
+  private readonly commands: CommandLog;
+  private readonly shellPath: string;
+  private readonly env: NodeJS.ProcessEnv;
+  /** Looked up in the background once the shell is running. */
+  private environment: Promise<EnvironmentInfo> | undefined;
   /** The UI loads in the background so the shell starts without waiting for it. */
   private overlay: InlineOverlay | undefined;
   private overlayLoad: Promise<InlineOverlay | undefined> = Promise.resolve(undefined);
@@ -50,14 +69,21 @@ export class Shelly {
   private heldShellOutput: string[] = [];
   private triggerHoldTimer: NodeJS.Timeout | undefined;
   private resizeTimer: NodeJS.Timeout | undefined;
+  private markerHoldTimer: NodeJS.Timeout | undefined;
 
   constructor(options: ShellyOptions) {
     this.host = options.host;
+    this.shellPath = options.shell;
+    this.env = options.env;
     this.colorDepth = detectColorDepth(options.env);
+    const integration = prepareShellIntegration(options.shell, options.env);
+    this.markers = integration && new ShellMarkerParser(integration.nonce);
+    this.commands = new CommandLog({ columns: () => this.host.size.cols });
     this.shell = ShellSession.spawn({
       shell: options.shell,
+      args: integration?.args ?? [],
       cwd: options.cwd,
-      env: { ...options.env, SHELLY: '1' },
+      env: { ...options.env, ...integration?.env, SHELLY: '1' },
       size: options.host.size,
     });
     this.detector = new TriggerDetector({
@@ -78,6 +104,7 @@ export class Shelly {
       });
       this.host.start((data) => this.handleInput(data));
       this.overlayLoad = this.loadOverlay();
+      this.environment = describeEnvironment(this.shellPath, this.env);
     });
   }
 
@@ -112,6 +139,7 @@ export class Shelly {
         this.routeToShell(this.detector.push(data));
         break;
       case 'opening':
+      case 'responding':
         this.queuedInput += data;
         break;
       case 'overlay':
@@ -138,6 +166,31 @@ export class Shelly {
   }
 
   private handleShellOutput(data: string): void {
+    if (!this.markers) {
+      this.forwardShellOutput(data);
+      return;
+    }
+
+    clearTimeout(this.markerHoldTimer);
+    this.applyShellOutput(this.markers.push(data));
+    if (this.markers.isHoldingPartialPrefix) {
+      const markers = this.markers;
+      this.markerHoldTimer = setTimeout(() => this.applyShellOutput(markers.flush()), MARKER_HOLD_MS);
+    }
+  }
+
+  private applyShellOutput(segments: ShellOutputSegment[]): void {
+    for (const segment of segments) {
+      if (segment.type === 'event') {
+        this.commands.handle(segment.event);
+      } else {
+        this.commands.recordOutput(segment.data);
+        this.forwardShellOutput(segment.data);
+      }
+    }
+  }
+
+  private forwardShellOutput(data: string): void {
     if (this.mode === 'shell') {
       this.host.write(data);
     } else {
@@ -176,14 +229,40 @@ export class Shelly {
 
   private handleSubmit(text: string): void {
     this.overlay?.close();
-    this.returnToShell();
-    // Agent integration is not built yet: record the request, then have the
-    // shell draw a fresh prompt below it.
-    this.host.write(
-      `\u001b[1;35m${this.activeTrigger}\u001b[0m ${text}\r\n`
-        + `\u001b[90mShelly isn't connected to an agent yet.\u001b[0m`,
-    );
-    this.shell.write('\r');
+    this.mode = 'responding';
+    this.host.write(`\u001b[1;35m${this.activeTrigger}\u001b[0m ${toTerminalText(text)}\r\n`);
+    void Promise.race([
+      this.respond(text),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('it took too long')), RESPONSE_TIMEOUT_MS).unref()),
+    ])
+      .catch((error: unknown) => `Shelly could not answer: ${error instanceof Error ? error.message : String(error)}`)
+      .then((response) => {
+        if (this.disposed) {
+          return;
+        }
+        this.host.write(`\u001b[90m${toTerminalText(response)}\u001b[0m`);
+        // Have the shell draw a fresh prompt below the response, then pass on
+        // anything typed in the meantime.
+        this.shell.write('\r');
+        const typed = this.queuedInput;
+        this.queuedInput = '';
+        this.returnToShell();
+        if (typed) {
+          this.handleInput(typed);
+        }
+      });
+  }
+
+  /** Agent integration is not built yet; /context shows what it would be told. */
+  private async respond(text: string): Promise<string> {
+    if (text !== '/context') {
+      return "Shelly isn't connected to an agent yet.";
+    }
+    if (!this.markers) {
+      return `Commands are not recorded in ${this.shellPath}; Shelly can hook into zsh, bash and fish.`;
+    }
+    this.environment ??= describeEnvironment(this.shellPath, this.env);
+    return formatAskContext(await buildAskContext(this.commands, await this.environment));
   }
 
   private returnToShell(): void {
@@ -220,7 +299,13 @@ export class Shelly {
     this.disposed = true;
     clearTimeout(this.triggerHoldTimer);
     clearTimeout(this.resizeTimer);
+    clearTimeout(this.markerHoldTimer);
     this.overlay?.destroy();
     this.host.stop();
   }
 }
+
+/** Text for the terminal: line breaks as CRLF, and no stray control characters (C0, DEL, C1). */
+const toTerminalText = (text: string): string => text
+  .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
+  .replace(/\n/g, '\r\n');

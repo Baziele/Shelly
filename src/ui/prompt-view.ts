@@ -156,8 +156,13 @@ export class PromptView {
           claim(() => this.moveSelection(1));
           return;
         case 'tab':
-        case 'return':
           claim(() => this.completeSelection());
+          return;
+        case 'return':
+          // Enter runs a command already typed out in full; otherwise it completes the selection.
+          claim(() => (this.input.value === `/${this.matches[this.selectedIndex]?.name}`
+            ? this.submit(this.input.value)
+            : this.completeSelection()));
           return;
         case 'escape':
           claim(() => {
