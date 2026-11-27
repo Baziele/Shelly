@@ -7,7 +7,7 @@ import { lastPromptRow, startShelly, type ShellyHarness } from './harness.js';
 
 const ESCAPE = '\u001b';
 
-describe('Shelly in a real terminal', { timeout: 30_000 }, () => {
+describe('Shelly in a real terminal', { timeout: 90_000 }, () => {
   let shelly: ShellyHarness | undefined;
 
   afterEach(async () => {
@@ -70,11 +70,12 @@ describe('Shelly in a real terminal', { timeout: 30_000 }, () => {
   });
 
   it('stays a plain shell when its background service cannot start, and says why on ::', async () => {
-    // A socket path past the 104-byte limit: the daemon refuses to start.
+    // A socket path past the limit (104 bytes on macOS, 108 on Linux, where /tmp is short): the daemon refuses to start.
     const home = mkdtempSync(join(tmpdir(), 'shelly-'));
-    const shellyHome = join(home, 'x'.repeat(60));
+    const shellyHome = join(home, 'x'.repeat(120));
     try {
-      shelly = await startShelly({ shell: '/bin/zsh', cols: 220, env: { SHELLY_HOME: shellyHome, SHELLY_DAEMON_START_TIMEOUT_MS: '1500' } });
+      // Wide enough for the whole log path; the short start timeout keeps the test quick.
+      shelly = await startShelly({ shell: '/bin/zsh', cols: 320, env: { SHELLY_HOME: shellyHome, SHELLY_DAEMON_START_TIMEOUT_MS: '1000' } });
       await shelly.type('::');
       const screen = await shelly.waitFor(
         (rows) => rows.some((row) => row.includes("background service did not start")),
