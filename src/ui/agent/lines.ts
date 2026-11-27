@@ -1,3 +1,4 @@
+import { sanitizeTerminalText, stripEscapeSequences } from '../../render/sanitize.js';
 import { displayWidth, truncateEnd } from '../../render/text-width.js';
 import type { Tone } from '../theme.js';
 
@@ -55,18 +56,18 @@ export const alignRight = (left: Line, right: Line, width: number): Line => {
   return [...left, seg(' '.repeat(gap)), ...right];
 };
 
-/** Control characters and escape sequences removed, tabs expanded, carriage-return overwrites resolved. */
-export const sanitizeText = (text: string): string => text
-  .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
-  .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
-  .replace(/\u001b[@-_]/g, '')
-  .replace(/\r\n/g, '\n')
-  .split('\n')
-  // A progress bar redraws its line with `\r`; only the last state matters.
-  .map((line) => (line.includes('\r') ? line.slice(line.lastIndexOf('\r') + 1) : line))
-  .join('\n')
-  .replace(/\t/g, '  ')
-  .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, '');
+/**
+ * Tool output made safe and plain: escape sequences and control characters
+ * removed, carriage-return overwrites resolved (a progress bar keeps its last
+ * state), tabs expanded.
+ */
+export const sanitizeText = (text: string): string => sanitizeTerminalText(
+  stripEscapeSequences(text)
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => (line.includes('\r') ? line.slice(line.lastIndexOf('\r') + 1) : line))
+    .join('\n'),
+).replace(/\t/g, '  ');
 
 /** A single line: whitespace (newlines included) collapsed. */
 export const oneLine = (text: string): string => sanitizeText(text).replace(/\s+/g, ' ').trim();

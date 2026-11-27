@@ -97,8 +97,9 @@ export const renderHistory = async (events: readonly ThreadEvent[], options: His
   const now = options.now ?? Date.now();
   const maxAnswerRows = options.maxAnswerRows ?? 20;
   const maxTools = options.maxTools ?? 6;
-  const context: FormatContext = { cwd: options.cwd, home: options.home, width: options.width, agentName: options.agentName, spinner: '·' };
-  const rows: PaintRow[] = [lineToPaintRow(headerRule(options, now))];
+  const agentName = oneLine(options.agentName) || 'agent';
+  const context: FormatContext = { cwd: options.cwd, home: options.home, width: options.width, agentName, spinner: '·' };
+  const rows: PaintRow[] = [lineToPaintRow(headerRule({ ...options, agentName }, now))];
   const exchange = lastExchange(events);
   if (!exchange) {
     rows.push(lineToPaintRow([seg('Nothing here yet.', 'muted')]));

@@ -1,6 +1,6 @@
 import { BoxRenderable, TextRenderable, type CliRenderer } from '@opentui/core';
 import { displayWidth, padEnd, truncateEnd } from '../render/text-width.js';
-import { fitLine, seg, type Line, type Segment } from './agent/lines.js';
+import { fitLine, oneLine, seg, type Line, type Segment } from './agent/lines.js';
 import { toStyledText } from './agent/styled.js';
 
 export interface PickerItem {
@@ -45,11 +45,13 @@ const MIN_LAST_COLUMN_CELLS = 8;
 
 /** One picker row per visible item: a selection marker, the label, then muted columns. */
 export const formatPickerRows = (
-  items: readonly PickerItem[],
+  unsafeItems: readonly PickerItem[],
   selected: number,
   width: number,
   emptyText: string,
 ): Line[] => {
+  // Labels come from threads, agents and modes: one line each, nothing the terminal would act on.
+  const items = unsafeItems.map((item) => ({ ...item, label: oneLine(item.label), columns: item.columns?.map(oneLine) }));
   if (items.length === 0) {
     return [fitLine([seg(`  ${emptyText}`, 'muted')], width)];
   }

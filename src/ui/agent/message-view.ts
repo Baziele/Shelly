@@ -8,6 +8,7 @@ import {
   type Renderable,
 } from '@opentui/core';
 import { theme } from '../theme.js';
+import { sanitizeTerminalText } from '../../render/sanitize.js';
 import { highlightCodeLine } from './code-highlight.js';
 import { sanitizeText } from './lines.js';
 import { toStyledText } from './styled.js';
@@ -63,6 +64,7 @@ export class MessageView {
   /** UTF-16 offset into the message text where the shown source starts. */
   private shownFrom = 0;
   private text = '';
+  private rawText = '';
   private readonly codeBlocks = new Map<number, CodeBlockView>();
 
   constructor(private readonly renderer: CliRenderer, style: SyntaxStyle) {
@@ -85,10 +87,13 @@ export class MessageView {
     this.root.marginTop = gap && this.shownFrom === 0 ? 1 : 0;
   }
 
+  /** `text` is the whole message so far, as the agent sent it; it is sanitized here. */
   update(text: string, final: boolean): void {
-    if (text !== this.text) {
-      this.text = text;
-      this.markdown.content = text.slice(this.shownFrom);
+    if (text !== this.rawText) {
+      this.rawText = text;
+      // Markdown syntax stays; escape sequences and control characters go.
+      this.text = sanitizeTerminalText(text);
+      this.markdown.content = this.text.slice(this.shownFrom);
     }
     this.markdown.streaming = !final;
   }

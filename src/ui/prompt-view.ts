@@ -161,7 +161,7 @@ export class PromptView {
     this.busy = false;
     this.preview = '';
     this.error = undefined;
-    this.hint = placement.hint;
+    this.hint = placement.hint === undefined ? undefined : oneLine(placement.hint);
     this.inputRow.paddingLeft = placement.inputCol - 1;
     const color = this.mode === 'fast' ? theme.fast : theme.accent;
     this.marker.content = t`${bold(fg(color)(placement.trigger))} `;
@@ -202,7 +202,7 @@ export class PromptView {
 
   /** Where `::` will go, right-aligned on the input row; undefined hides it. */
   setHint(hint: string | undefined): void {
-    this.hint = hint;
+    this.hint = hint === undefined ? undefined : oneLine(hint);
     this.refresh();
   }
 
@@ -231,7 +231,7 @@ export class PromptView {
 
   /** Show a list to pick from; the input becomes its filter. */
   openPicker(request: PickerRequest): void {
-    this.picker = request;
+    this.picker = { ...request, placeholder: oneLine(request.placeholder), emptyText: request.emptyText && oneLine(request.emptyText) };
     this.input.value = '';
     this.refresh();
   }

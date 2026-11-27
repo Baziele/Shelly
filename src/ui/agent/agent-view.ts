@@ -22,7 +22,7 @@ import {
   type FormatContext,
 } from './format.js';
 import { parseKeys } from './keys.js';
-import { seg, type Line } from './lines.js';
+import { oneLine, seg, type Line } from './lines.js';
 import { createMarkdownStyle, MessageView, type StableSplit } from './message-view.js';
 import { lineToPaintRow } from './paint-line.js';
 import { toStyledText } from './styled.js';
@@ -102,6 +102,8 @@ export class AgentView {
   private readonly views = new Map<string, BlockView>();
   private readonly listeners = new Set<(action: AgentAction) => void>();
   private readonly now: () => number;
+  /** The agent's name as shown: it comes from config or the daemon, so it is sanitized. */
+  private readonly agentName: string;
 
   private state: State = 'created';
   private startedAt = 0;
@@ -126,6 +128,7 @@ export class AgentView {
     private readonly options: AgentViewOptions,
   ) {
     this.now = options.now ?? Date.now;
+    this.agentName = oneLine(options.agentName) || 'agent';
     this.bufferRows = Math.max(48, host.size.rows * 2);
     this.headless = HeadlessRenderer.create({ width: host.size.cols, height: this.bufferRows });
     this.region = new LiveRegion(host, colorDepth, { marginRows: options.marginRows ?? 2 });
@@ -602,7 +605,7 @@ export class AgentView {
       cwd: this.options.cwd,
       home: this.options.home,
       width: this.host.size.cols,
-      agentName: this.options.agentName,
+      agentName: this.agentName,
       spinner: spinnerFrame(this.now()),
     };
   }
@@ -655,7 +658,7 @@ export class AgentView {
       }
       const startedAt = this.model.startedAt ?? this.startedAt;
       lines.push(formatStatus({
-        phase: phaseText(phase, this.options.agentName, context),
+        phase: phaseText(phase, this.agentName, context),
         elapsedMs: this.now() - Math.min(startedAt, this.now()),
         hints: phase.type === 'waiting'
           ? ['←→ select · enter confirm · esc reject', 'enter confirm · esc reject', 'enter · esc']

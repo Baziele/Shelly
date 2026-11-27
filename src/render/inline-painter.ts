@@ -1,5 +1,6 @@
 import { ansi } from '../terminal/ansi.js';
 import type { CursorPosition } from '../terminal/cursor-report.js';
+import { hasCellControls, stripCellControls } from './sanitize.js';
 import { isBlankStyle, styleToSgr, type CellStyle, type ColorDepth } from './sgr.js';
 
 /** A run of identically styled cells. */
@@ -88,8 +89,10 @@ export const encodeRow = (spans: ReadonlyArray<PaintSpan>, colorDepth: ColorDept
   let lastSgr = '';
   for (const span of visible) {
     const sgr = styleToSgr(span.style, colorDepth);
+    // The last stop before the terminal: a control character in cell text would act, not show.
+    const text = hasCellControls(span.text) ? stripCellControls(span.text) : span.text;
     // Neighbouring spans that encode alike (common at reduced colour depths) share one sequence.
-    output += (sgr === lastSgr ? '' : sgr) + span.text;
+    output += (sgr === lastSgr ? '' : sgr) + text;
     lastSgr = sgr;
   }
   return output;
