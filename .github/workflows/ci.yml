@@ -38,11 +38,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm typecheck
+      # pnpm 11 refuses to run scripts here because devEngines does not pin
+      # its exact version; node --run runs the same scripts with
+      # node_modules/.bin on PATH.
+      - run: node --run typecheck
 
-      - run: pnpm test
+      - run: node --run test
 
       - name: End-to-end tests
         env:
           SHELLY_E2E_SHELLS: ${{ runner.os == 'Linux' && '/usr/bin/fish' || '' }}
-        run: pnpm test:e2e
+        run: node --run test:e2e
