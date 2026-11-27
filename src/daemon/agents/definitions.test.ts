@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
+import { HOST_SESSION_VARIABLES } from '../claude-env.js';
+import { claudeEnvironment } from '../fast/claude-worker.js';
 import { agentDefinitions, agentEnvironment, agentInfos, defaultAgentId } from './definitions.js';
 
 const bin = mkdtempSync(join(tmpdir(), 'shelly-bin-'));
@@ -47,7 +49,7 @@ describe('agent definitions', () => {
     assert.equal(claude.launch.command, process.execPath);
     assert.match(claude.launch.args[0] ?? '', /claude-agent-acp/);
     assert.equal(claude.env.CLAUDE_CODE_EXECUTABLE, join(bin, 'claude'));
-    const bundled = agentDefinitions({}, empty).find((definition) => definition.id === 'claude');
+    const bundled = agentDefinitions({}, { ...empty, HOME: join(bin, 'no-home') }).find((definition) => definition.id === 'claude');
     assert.equal(bundled?.env.CLAUDE_CODE_EXECUTABLE, undefined);
   });
 
@@ -61,6 +63,48 @@ describe('agent definitions', () => {
       HOME: '/home/user',
     });
     assert.deepEqual(env, { PATH: '/bin', HOME: '/home/user', CLAUDE_CODE_EXECUTABLE: join(bin, 'claude'), EXTRA: '1' });
+  });
+
+  it('strips the same host-session variables as fast mode, including CLAUDE_CODE_CHILD_NOTES_DIR', () => {
+    const host = Object.fromEntries(HOST_SESSION_VARIABLES.map((name) => [name, 'from the host']));
+    assert.ok(HOST_SESSION_VARIABLES.includes('CLAUDE_CODE_CHILD_NOTES_DIR'));
+    const claude = agentDefinitions({}, withTools)[0]!;
+    const agentEnv = agentEnvironment(claude, { PATH: '/bin', ...host });
+    const fastEnv = claudeEnvironment({ PATH: '/bin', ...host });
+    for (const name of HOST_SESSION_VARIABLES) {
+      assert.equal(agentEnv[name], undefined, `agent mode kept ${name}`);
+      assert.equal(fastEnv[name], undefined, `fast mode kept ${name}`);
+    }
+  });
+
+  it('ignores an empty or stale inherited CLAUDE_CODE_EXECUTABLE', () => {
+    for (const value of ['', '  ', join(bin, 'no-such-claude')]) {
+      const env = { ...withTools, CLAUDE_CODE_EXECUTABLE: value };
+      const claude = agentDefinitions({}, env)[0]!;
+      assert.equal(claude.env.CLAUDE_CODE_EXECUTABLE, join(bin, 'claude'), `for ${JSON.stringify(value)}`);
+      assert.equal(agentEnvironment(claude, env).CLAUDE_CODE_EXECUTABLE, join(bin, 'claude'));
+    }
+    // With no claude anywhere, the stale value doesn't reach the adapter: it uses its bundled claude.
+    const nowhere = { ...empty, HOME: join(bin, 'no-home'), CLAUDE_CODE_EXECUTABLE: '/stale/claude' };
+    const bundled = agentDefinitions({}, nowhere)[0]!;
+    assert.equal(bundled.env.CLAUDE_CODE_EXECUTABLE, undefined);
+    assert.equal(agentEnvironment(bundled, nowhere).CLAUDE_CODE_EXECUTABLE, undefined);
+    // A real one is honoured.
+    const mine = join(bin, 'my-agent');
+    assert.equal(agentDefinitions({}, { ...withTools, CLAUDE_CODE_EXECUTABLE: mine })[0]!.env.CLAUDE_CODE_EXECUTABLE, mine);
+  });
+
+  it("finds the installer's claude in ~/.local/bin when it isn't on PATH", () => {
+    const home = mkdtempSync(join(tmpdir(), 'shelly-home-'));
+    try {
+      mkdirSync(join(home, '.local', 'bin'), { recursive: true });
+      writeFileSync(join(home, '.local', 'bin', 'claude'), '#!/bin/sh\n');
+      chmodSync(join(home, '.local', 'bin', 'claude'), 0o755);
+      const claude = agentDefinitions({}, { ...empty, HOME: home })[0]!;
+      assert.equal(claude.env.CLAUDE_CODE_EXECUTABLE, join(home, '.local', 'bin', 'claude'));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('picks the default agent', () => {
