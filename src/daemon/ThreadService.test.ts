@@ -643,4 +643,33 @@ describe('ThreadService under races and shutdown', () => {
         yield* threads.rename(thread.id, CLIENT, 'Still here').pipe(Effect.timeout('1 second'));
       }), { fake });
   });
+
+  it('publishes events in seq order while several fibers emit at once', async () => {
+    const fake = new FakeAgents();
+    // A slow disk on every other event: an emitter that stored first may publish last.
+    const wrapStore: StoreWrapper = (store) => ({
+      ...store,
+      appendEvents: (threadId, events) =>
+        store.appendEvents(threadId, events).pipe(Effect.andThen(Effect.sleep((events[0]?.seq ?? 0) % 2 === 1 ? '6 millis' : '0 millis'))),
+    });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const collecting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'busy'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.turns.length === 1);
+        const modes = yield* Effect.forEach(
+          Array.from({ length: 10 }, (_, index) => (index % 2 === 0 ? 'plan' : 'default')),
+          (mode) => threads.setMode(thread.id, CLIENT, mode).pipe(Effect.andThen(Effect.sleep('2 millis'))),
+          { discard: true },
+        ).pipe(Effect.forkChild);
+        for (let index = 0; index < 10; index++) {
+          fake.lastTurn!.push({ type: 'chunk', kind: index % 2 === 0 ? 'text' : 'thought', text: `${index}` });
+        }
+        yield* Fiber.join(modes);
+        fake.lastTurn!.push({ type: 'end', stopReason: 'end_turn', error: null });
+        const seqs = Array.from(yield* Fiber.join(collecting)).map((event) => event.seq);
+        assert.ok(seqs.length > 20);
+        assert.deepEqual(seqs, seqs.toSorted((a, b) => a - b));
+      }), { fake, wrapStore });
+  });
 });

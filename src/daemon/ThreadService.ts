@@ -30,8 +30,8 @@ import { initialTitle } from './titles.js';
  * A turn runs in a fiber the daemon owns, not in the request that started
  * it, so it carries on when the prompt's stream goes away (the client broke
  * out of it, or disconnected). Each event is numbered per thread, stored,
- * then published to everyone following the thread: the prompt's stream and
- * any watchers.
+ * then published to everyone following the thread (the prompt's stream and
+ * any watchers), one event at a time per thread so they arrive in order.
  *
  * Privacy: never log prompt text, agent output or command output here.
  */
@@ -70,6 +70,8 @@ interface LiveThread {
    * rename and cancel, so none of them lands in the middle of the setup.
    */
   readonly lock: Semaphore.Semaphore;
+  /** Held from numbering an event until it is published, so followers get events in seq order. */
+  readonly emitting: Semaphore.Semaphore;
 }
 
 export interface CreateThreadInput {
@@ -176,6 +178,7 @@ const make = Effect.gen(function* () {
       currentModeId: null,
       events,
       lock: Semaphore.makeUnsafe(1),
+      emitting: Semaphore.makeUnsafe(1),
     };
     live.set(threadId, created);
     return created;
@@ -214,19 +217,27 @@ const make = Effect.gen(function* () {
     nativeSessionId: row.nativeSessionId,
   });
 
-  // Per event, so untraced: number it and store it.
+  // Per event, so untraced: number it and store it. Callers hold `thread.emitting`.
   const record = Effect.fnUntraced(function* (threadId: string, thread: LiveThread, input: EventInput) {
     const event = { ...input, seq: thread.nextSeq++ } as ThreadEvent;
     yield* store.appendEvents(threadId, [event]);
     return event;
   });
 
-  /** Store an event, then tell everyone following the thread. */
-  const emit = Effect.fnUntraced(function* (threadId: string, thread: LiveThread, input: EventInput) {
-    const event = yield* record(threadId, thread, input);
-    yield* PubSub.publish(thread.events, event);
-    return event;
-  });
+  /**
+   * Store an event, then tell everyone following the thread. Turns, respond
+   * and setMode emit from different fibers: numbering through publishing is
+   * one step per thread, or a later event could be published first.
+   */
+  const emit = (threadId: string, thread: LiveThread, input: EventInput) =>
+    Semaphore.withPermit(
+      thread.emitting,
+      Effect.gen(function* () {
+        const event = yield* record(threadId, thread, input);
+        yield* PubSub.publish(thread.events, event);
+        return event;
+      }),
+    );
 
   const setStatus = (threadId: string, status: ThreadRow['status']) => store.updateThread(threadId, { status });
 
@@ -248,21 +259,26 @@ const make = Effect.gen(function* () {
     }
     turn.pending.clear();
     const now = Date.now();
-    const ended = yield* record(threadId, thread, {
-      type: 'turn.ended',
-      turnId: turn.turnId,
-      stopReason,
-      error,
-      durationMs: Math.max(0, now - turn.startedAt),
-    });
-    // Settle the thread before anyone hears the turn ended, so a client
-    // that prompts again straight away finds it idle.
-    yield* store.compactTurn(threadId, turn.turnId);
-    yield* store.updateThread(threadId, { status: 'idle', updatedAt: now });
-    if (thread.turn === turn) {
-      thread.turn = null;
-    }
-    yield* PubSub.publish(thread.events, ended);
+    yield* Semaphore.withPermit(
+      thread.emitting,
+      Effect.gen(function* () {
+        const ended = yield* record(threadId, thread, {
+          type: 'turn.ended',
+          turnId: turn.turnId,
+          stopReason,
+          error,
+          durationMs: Math.max(0, now - turn.startedAt),
+        });
+        // Settle the thread before anyone hears the turn ended, so a client
+        // that prompts again straight away finds it idle.
+        yield* store.compactTurn(threadId, turn.turnId);
+        yield* store.updateThread(threadId, { status: 'idle', updatedAt: now });
+        if (thread.turn === turn) {
+          thread.turn = null;
+        }
+        yield* PubSub.publish(thread.events, ended);
+      }),
+    );
     yield* Effect.logInfo(`turn ended thread=${threadId} turn=${turn.turnId} stopReason=${stopReason}`);
   });
 
