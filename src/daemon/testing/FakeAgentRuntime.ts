@@ -31,20 +31,25 @@ export class FakeAgents {
   readonly modes: string[] = [];
   readonly released: string[] = [];
   readonly prewarmed: { agentId: string; threadId: string | null }[] = [];
+  /** The session requests prewarm was given, in the order they came. */
+  readonly prewarmSessions: AgentSessionRequest[] = [];
   readonly fastRequests: string[] = [];
   cancels = 0;
   /** When set, every turn answers itself with these updates (then waits for more, unless one is `end`). */
   script: ((prompt: string) => readonly AgentUpdate[]) | undefined;
   /** When set, `session` fails with it. */
   sessionError: AgentUnavailable | undefined;
-  /** When set, `session` waits for it before answering (a cold agent starting). */
+  /** When set, `session` and `prewarm` wait for it before answering (a cold agent starting). */
   sessionGate: Promise<void> | undefined;
+  /** When it returns true for a turn's prompt, `cancel` never returns and the turn never ends (a stuck agent). */
+  ignoresCancel: ((prompt: string) => boolean) | undefined;
   private nativeCounter = 0;
   private waiters: ((turn: FakeTurn) => void)[] = [];
   private current: Queue.Queue<AgentUpdate> | undefined;
 
-  constructor(options: { script?: (prompt: string) => readonly AgentUpdate[] } = {}) {
+  constructor(options: { script?: (prompt: string) => readonly AgentUpdate[]; ignoresCancel?: (prompt: string) => boolean } = {}) {
     this.script = options.script;
+    this.ignoresCancel = options.ignoresCancel;
   }
 
   /** The next turn the agent receives (or the latest, if it already arrived and nobody took it). */
@@ -78,6 +83,7 @@ export class FakeAgents {
           return Effect.fail(this.sessionError);
         }
         const nativeSessionId = request.nativeSessionId ?? `native-${++this.nativeCounter}`;
+        let lastPrompt = '';
         return Effect.succeed({
           nativeSessionId,
           startedFresh: request.nativeSessionId === null,
@@ -85,15 +91,20 @@ export class FakeAgents {
           prompt: (text: string) =>
             Stream.unwrap(
               Queue.unbounded<AgentUpdate>().pipe(Effect.map((queue) => {
+                lastPrompt = text;
                 this.startTurn(text, request, queue);
                 return Stream.fromQueue(queue).pipe(Stream.takeUntil((update) => update.type === 'end'));
               })),
             ),
-          cancel: Effect.sync(() => {
+          cancel: Effect.suspend(() => {
             this.cancels++;
+            if (this.ignoresCancel?.(lastPrompt)) {
+              return Effect.never;
+            }
             if (this.current) {
               Queue.offerUnsafe(this.current, { type: 'end', stopReason: 'cancelled', error: null });
             }
+            return Effect.void;
           }),
           respond: (requestId: string, optionId: string | null) =>
             requestId.startsWith('unknown')
@@ -112,9 +123,16 @@ export class FakeAgents {
           }),
         });
       })),
-    prewarm: ({ agentId, session }) => Effect.sync(() => {
-      this.prewarmed.push({ agentId, threadId: session?.threadId ?? null });
-    }),
+    prewarm: ({ agentId, session }) =>
+      Effect.suspend(() => {
+        const gate = this.sessionGate;
+        return gate ? Effect.promise(() => gate) : Effect.void;
+      }).pipe(Effect.andThen(Effect.sync(() => {
+        this.prewarmed.push({ agentId, threadId: session?.threadId ?? null });
+        if (session) {
+          this.prewarmSessions.push(session);
+        }
+      }))),
     release: (threadId) => Effect.sync(() => {
       this.released.push(threadId);
     }),
@@ -133,7 +151,10 @@ export class FakeAgents {
           { type: 'delta', text: '-la' },
           { type: 'done', text: 'ls -la', kind: 'command', durationMs: 1 },
         ];
-        return Stream.fromIterable(events);
+        // "slow": the first delta, then nothing until the caller lets go (a request in flight).
+        return input.instruction.includes('slow')
+          ? Stream.concat(Stream.fromIterable(events.slice(0, 1)), Stream.never)
+          : Stream.fromIterable(events);
       }),
     prewarm: () => Effect.void,
     end: () => Effect.void,

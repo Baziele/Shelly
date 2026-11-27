@@ -1,8 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { findExecutable } from './executable.js';
+import { findClaudeExecutable, withoutHostSession } from '../claude-env.js';
 import type { FastBackend, FastWorker, Turn, TurnHandlers, WorkerFailure } from './worker.js';
 
 /*
@@ -23,34 +21,8 @@ const INTERRUPT_GRACE_MS = 2000;
 const KILL_GRACE_MS = 1500;
 const STDERR_TAIL_CHARS = 4096;
 
-/*
- * A Claude Code session that started the daemon (or Shelly inside it)
- * exports these; a claude spawned with them acts as part of that session.
- * The list follows T3 Code's (MIT). Auth settings such as
- * CLAUDE_CODE_OAUTH_TOKEN or CLAUDE_CODE_USE_BEDROCK are the user's and stay.
- */
-const HOST_SESSION_VARIABLES = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_SESSION_ID',
-  'CLAUDE_CODE_HOST_SESSION_ID',
-  'CLAUDE_CODE_CHILD_SESSION',
-  'CLAUDE_CODE_CHILD_NOTES_DIR',
-  'CLAUDE_CODE_SESSION_ATTENDED',
-  'CLAUDE_CODE_MESSAGING_SOCKET',
-  'CLAUDE_CODE_MESSAGING_TOKEN',
-  'CLAUDE_CODE_EXECPATH',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_CODE_DESKTOP_APP_VERSION',
-  'CLAUDE_EFFORT',
-  'CLAUDE_PID',
-  'CLAUDE_AGENT_SDK_VERSION',
-  // Commands an Electron host runs inherit this and would start as plain Node.
-  'ELECTRON_RUN_AS_NODE',
-];
-
 export const claudeEnvironment = (base: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
-  const env: NodeJS.ProcessEnv = { ...base };
-  for (const name of HOST_SESSION_VARIABLES) delete env[name];
+  const env: NodeJS.ProcessEnv = withoutHostSession(base);
   // A pool of background workers should never race to update the user's CLI.
   env.DISABLE_AUTOUPDATER = '1';
   return env;
@@ -71,15 +43,6 @@ export const claudeArgs = (model: string, systemPrompt: string): string[] => [
   '--disable-slash-commands',
   '--system-prompt', systemPrompt,
 ];
-
-/**
- * The claude executable to run: `explicit` when it is a path, else the
- * first match on PATH, else the installer's usual places. Null when none.
- */
-export const findClaudeExecutable = (explicit: string | null, env: NodeJS.ProcessEnv): string | null => {
-  const home = env.HOME || homedir();
-  return findExecutable('claude', explicit, env, [join(home, '.local', 'bin', 'claude'), join(home, '.claude', 'local', 'claude')]);
-};
 
 export interface ClaudeBackendOptions {
   /** A path or a name to find on PATH; null finds `claude`. */

@@ -2,6 +2,7 @@ import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import type { AgentInfo } from '../../protocol/schema.js';
+import { findClaudeExecutable, withoutHostSession } from '../claude-env.js';
 import type { AgentSettings, ConfigFile } from '../services.js';
 
 /*
@@ -119,40 +120,13 @@ export const bundledClaudeAdapter = (): string | null => {
 
 // ─── Environment hygiene ────────────────────────────────────────────────────
 
-/*
- * A Claude Code session that started the daemon (or the shell it runs in)
- * exports these. A claude started with them acts as part of that session: its
- * session id, messaging socket and token, effort. From T3 Code's ClaudeHome.ts.
- */
-const HOST_SESSION_VARIABLES = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_SESSION_ID',
-  'CLAUDE_CODE_HOST_SESSION_ID',
-  'CLAUDE_CODE_CHILD_SESSION',
-  'CLAUDE_CODE_SESSION_ATTENDED',
-  'CLAUDE_CODE_MESSAGING_SOCKET',
-  'CLAUDE_CODE_MESSAGING_TOKEN',
-  'CLAUDE_CODE_EXECPATH',
-  'CLAUDE_CODE_DESKTOP_APP_VERSION',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_EFFORT',
-  'CLAUDE_PID',
-  'CLAUDE_AGENT_SDK_VERSION',
-  // Electron apps an agent starts would otherwise run as plain Node.
-  'ELECTRON_RUN_AS_NODE',
-];
-
 /** The env an agent process starts with: the daemon's, minus host-session variables, plus the agent's own. */
 export const agentEnvironment = (
   definition: AgentDefinition,
   base: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> => {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) {
-    if (value !== undefined && !HOST_SESSION_VARIABLES.includes(key)) {
-      env[key] = value;
-    }
-  }
+  // CLAUDE_CODE_EXECUTABLE is only ever the one the definition checked (see `claude`).
+  const { CLAUDE_CODE_EXECUTABLE: _inherited, ...env } = withoutHostSession(base);
   return { ...env, ...definition.env };
 };
 
@@ -183,7 +157,9 @@ const claude = (settings: AgentSettings, env: NodeJS.ProcessEnv): AgentDefinitio
   }
   // Run the user's own claude (their version, login and settings) when they have one;
   // the adapter falls back to the claude its SDK bundles.
-  const ownClaude = env.CLAUDE_CODE_EXECUTABLE ?? findExecutable('claude', env);
+  // An inherited CLAUDE_CODE_EXECUTABLE counts only if it names a real executable.
+  const inherited = env.CLAUDE_CODE_EXECUTABLE?.trim();
+  const ownClaude = (inherited ? findClaudeExecutable(inherited, env) : null) ?? findClaudeExecutable(null, env);
   return {
     id: 'claude',
     name,

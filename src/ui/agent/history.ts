@@ -48,7 +48,8 @@ const lastExchange = (events: readonly ThreadEvent[]): Exchange | undefined => {
         if (!exchange || event.kind !== 'text') {
           break;
         }
-        exchange.answer = event.messageId === messageId ? exchange.answer + event.text : event.text;
+        // `replace`: the message's whole text so far, not more of it.
+        exchange.answer = event.messageId === messageId && !event.replace ? exchange.answer + event.text : event.text;
         messageId = event.messageId;
         break;
       case 'tool.updated':

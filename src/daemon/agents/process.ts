@@ -24,6 +24,8 @@ export const SHELLY_CLIENT_INFO = { name: 'shelly', version: '0.1.0' } as const;
 /** Keep this much of the agent's stderr, for logs when it dies. */
 const STDERR_TAIL_CHARS = 8 * 1024;
 const INITIALIZE_TIMEOUT = '60 seconds';
+/** After SIGTERM, how long an agent's process group gets before SIGKILL. */
+export const FORCE_KILL_AFTER = '3 seconds';
 
 /** What a session registers with its process to receive its traffic. */
 export interface SessionSink {
@@ -85,6 +87,9 @@ export const spawnAgentProcess = Effect.fn('AgentProcess.spawn')(function* (
       extendEnv: false,
       // Its own process group, so closing the scope kills the agent and whatever it started.
       detached: true,
+      // claude-agent-acp awaits its own cleanup on SIGTERM; one that hangs gets SIGKILL
+      // (the whole group), so stopping an agent always ends.
+      forceKillAfter: FORCE_KILL_AFTER,
     })).pipe(
       Scope.provide(scope),
       Effect.catch(() => fail(`${definition.name} couldn't be started.`)),

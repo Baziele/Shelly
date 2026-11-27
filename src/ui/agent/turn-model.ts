@@ -172,9 +172,10 @@ export class TurnModel {
     this.committed = Math.max(this.committed, Math.min(end, this.blocks.length));
   }
 
+  /** A chunk adds to its message, unless it is `replace`: the whole text so far (replayed after compaction). */
   private applyChunk(event: ThreadEventOf<'message.chunk'>): void {
     if (event.kind === 'thought') {
-      this.thought = event.messageId === this.thoughtMessageId ? (this.thought ?? '') + event.text : event.text;
+      this.thought = event.messageId === this.thoughtMessageId && !event.replace ? (this.thought ?? '') + event.text : event.text;
       this.thoughtMessageId = event.messageId;
       this.activity = { type: 'thought' };
       return;
@@ -187,12 +188,29 @@ export class TurnModel {
     this.activity = { type: 'text' };
     const last = this.blocks.at(-1);
     if (last?.kind === 'message' && last.messageId === event.messageId && !last.final && this.blocks.length > this.committed) {
-      last.text += event.text;
+      last.text = event.replace ? event.text : last.text + event.text;
       last.version++;
       return;
     }
+    let text = event.text;
+    if (event.replace) {
+      const index = this.blocks.findLastIndex((block) => block.kind === 'message' && block.messageId === event.messageId);
+      const earlier = this.blocks[index];
+      if (earlier?.kind === 'message') {
+        if (index >= this.committed) {
+          earlier.text = event.text;
+          earlier.version++;
+          return;
+        }
+        // Already in scrollback, which never changes: show only what it lacks.
+        text = event.text.startsWith(earlier.text) ? event.text.slice(earlier.text.length) : '';
+        if (text === '') {
+          return;
+        }
+      }
+    }
     this.finalizeMessages();
-    this.blocks.push({ kind: 'message', key: this.key(), messageId: event.messageId, text: event.text, final: false, version: 0 });
+    this.blocks.push({ kind: 'message', key: this.key(), messageId: event.messageId, text, final: false, version: 0 });
   }
 
   private applyTool(tool: ToolCall): void {

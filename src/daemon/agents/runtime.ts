@@ -34,6 +34,7 @@ import {
   sameModes,
   ToolTracker,
 } from './mapping.js';
+import { cancelIdle, type IdleTimer, idleTimer, startIdle, stopFiber } from './idle.js';
 import { type AgentProcess, type SessionSink, shutdownAgentProcess, spawnAgentProcess } from './process.js';
 
 /*
@@ -100,7 +101,7 @@ interface LiveSession {
   turn: Turn | null;
   /** Updates that arrived between turns, shown at the start of the next. */
   held: { title: string | null; mode: boolean };
-  idle: Fiber.Fiber<void> | null;
+  readonly idle: IdleTimer;
   closed: boolean;
 }
 
@@ -118,7 +119,7 @@ interface ThreadSlot {
 interface AgentSlot {
   readonly lock: Semaphore.Semaphore;
   process: AgentProcess | null;
-  idle: Fiber.Fiber<void> | null;
+  readonly idle: IdleTimer;
   /** Sessions being opened on the process; it must not idle out under them. */
   opening: number;
   warming: boolean;
@@ -145,9 +146,6 @@ const processDied = (error: AcpError.AcpError, process: AgentProcess): boolean =
 
 const supported = (capability: unknown): boolean => capability !== undefined && capability !== null;
 
-const stopFiber = (fiber: Fiber.Fiber<void> | null): Effect.Effect<void> =>
-  fiber === null ? Effect.void : Fiber.interrupt(fiber);
-
 const CANCELLED: Acp.RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
 
 // ─── The service ────────────────────────────────────────────────────────────
@@ -158,7 +156,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   const scope = yield* Scope.Scope;
   // Agent processes live in their own scope, closed first on shutdown, so their
   // exits then read as deliberate rather than as crashes.
-  const processScope = yield* Scope.make();
+  const processScope = yield* Scope.make('parallel');
   let shuttingDown = false;
   const env = options.env ?? process.env;
 
@@ -195,7 +193,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   const agentSlot = (agentId: string): AgentSlot => {
     let slot = agentSlots.get(agentId);
     if (!slot) {
-      slot = { lock: Semaphore.makeUnsafe(1), process: null, idle: null, opening: 0, warming: false };
+      slot = { lock: Semaphore.makeUnsafe(1), process: null, idle: idleTimer(), opening: 0, warming: false };
       agentSlots.set(agentId, slot);
     }
     return slot;
@@ -221,24 +219,21 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   // ─── Processes ────────────────────────────────────────────────────────────
 
   const scheduleProcessIdle = (slot: AgentSlot, agentProcess: AgentProcess): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      yield* stopFiber(slot.idle);
-      slot.idle = yield* Effect.sleep(agentProcess.definition.processIdleMs).pipe(
-        Effect.andThen(slot.lock.withPermit(Effect.suspend(() => {
-          if (slot.process !== agentProcess || agentProcess.sessions.size > 0 || slot.opening > 0) {
-            return Effect.void;
-          }
-          slot.process = null;
-          slot.idle = null;
-          stopping.add(agentProcess);
-          return Effect.logDebug('agent process idle, stopping').pipe(
-            Effect.annotateLogs({ agentId: agentProcess.definition.id }),
-            Effect.andThen(shutdownAgentProcess(agentProcess)),
-          );
-        }))),
-        Effect.forkIn(scope),
-      );
-    });
+    startIdle(slot.idle, scope, agentProcess.definition.processIdleMs, (current, claim) =>
+      slot.lock.withPermit(Effect.suspend(() => {
+        if (!current() || slot.process !== agentProcess || agentProcess.sessions.size > 0 || slot.opening > 0) {
+          return Effect.void;
+        }
+        claim();
+        slot.process = null;
+        stopping.add(agentProcess);
+        // Outside the lock: a new process may start while this one takes its time to die.
+        return Effect.logDebug('agent process idle, stopping').pipe(
+          Effect.annotateLogs({ agentId: agentProcess.definition.id }),
+          Effect.andThen(shutdownAgentProcess(agentProcess).pipe(Effect.forkIn(scope))),
+          Effect.asVoid,
+        );
+      })));
 
   const onTerminated = (agentProcess: AgentProcess, error: AcpError.AcpError): Effect.Effect<void> =>
     Effect.suspend(() => {
@@ -247,10 +242,13 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       }
       const agentId = agentProcess.definition.id;
       const slot = agentSlots.get(agentId);
-      const idle = slot?.process === agentProcess ? slot.idle : null;
+      // Clear its idle timer now: by the time the cleanup below runs, the slot may hold a new process.
+      let idleFiber: Fiber.Fiber<void> | null = null;
       if (slot?.process === agentProcess) {
+        idleFiber = slot.idle.fiber;
+        slot.idle.fiber = null;
+        slot.idle.token = null;
         slot.process = null;
-        slot.idle = null;
       }
       // Its sessions are lost; the next session() for their threads respawns and resumes.
       const lost: LiveSession[] = [];
@@ -274,8 +272,8 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
         yield* Effect.logDebug('agent stderr tail').pipe(
           Effect.annotateLogs({ agentId, stderrTail: agentProcess.stderrTail() }),
         );
-        yield* stopFiber(idle);
-        yield* Effect.forEach(lost, (live) => stopFiber(live.idle), { discard: true });
+        yield* stopFiber(idleFiber);
+        yield* Effect.forEach(lost, (live) => cancelIdle(live.idle), { discard: true });
         // Let running turns see their prompt fail and end, then release what is left.
         yield* Effect.forEach(lost, (live) => live.turn ? Deferred.await(live.turn.done) : Effect.void, { discard: true })
           .pipe(Effect.timeoutOption('2 seconds'));
@@ -290,8 +288,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
     const slot = agentSlot(definition.id);
     return yield* slot.lock.withPermit(Effect.gen(function* () {
       if (slot.process?.isAlive()) {
-        yield* stopFiber(slot.idle);
-        slot.idle = null;
+        yield* cancelIdle(slot.idle);
         return slot.process;
       }
       const started = yield* spawnAgentProcess(definition, processScope, { onTerminated, onSpawn: options.onSpawn }).pipe(
@@ -401,25 +398,19 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   });
 
   const scheduleSessionIdle = (live: LiveSession): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      yield* stopFiber(live.idle);
-      if (live.closed) {
-        return;
-      }
-      live.idle = yield* Effect.sleep(live.definition.sessionIdleMs).pipe(
-        Effect.andThen(live.slot.lock.withPermit(Effect.suspend(() => {
-          if (live.closed || live.turn) {
+    live.closed
+      ? cancelIdle(live.idle)
+      : startIdle(live.idle, scope, live.definition.sessionIdleMs, (current, claim) =>
+        live.slot.lock.withPermit(Effect.suspend(() => {
+          if (!current() || live.closed || live.turn) {
             return Effect.void;
           }
-          live.idle = null;
+          claim();
           return Effect.logDebug('session idle, closing').pipe(
             Effect.annotateLogs({ agentId: live.definition.id, threadId: live.slot.threadId }),
             Effect.andThen(closeLive(live)),
           );
-        }))),
-        Effect.forkIn(scope),
-      );
-    });
+        })));
 
   const endFor = (live: LiveSession, turn: Turn, exit: Exit.Exit<Acp.PromptResponse, AcpError.AcpError>) => {
     const name = live.definition.name;
@@ -586,8 +577,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
         return;
       }
       live.closed = true;
-      const idle = live.idle;
-      live.idle = null;
+      yield* cancelIdle(live.idle);
       if (live.slot.live === live) {
         live.slot.live = null;
       }
@@ -606,8 +596,6 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       if (slot?.process === live.process && live.process.sessions.size === 0 && slot.opening === 0) {
         yield* scheduleProcessIdle(slot, live.process);
       }
-      // Last: when this runs on the idle fiber itself, interrupting it ends the fiber.
-      yield* stopFiber(idle);
     });
 
   /** Moves a live session to new directories. Claude Code replaces it in place; others reopen it. */
@@ -647,8 +635,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       && current.cwd === request.cwd
       && (request.nativeSessionId === null || request.nativeSessionId === current.nativeSessionId)
     ) {
-      yield* stopFiber(current.idle);
-      current.idle = null;
+      yield* cancelIdle(current.idle);
       const moved = current.turn !== null || sameDirectories(current.additionalDirectories, request.additionalDirectories)
         || (yield* redirect(current, request));
       if (moved) {
@@ -676,7 +663,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
     }).pipe(Effect.ensuring(Effect.suspend(() => {
       processSlot.opening--;
       const idleProcess = processSlot.process;
-      return idleProcess && idleProcess.sessions.size === 0 && processSlot.opening === 0 && processSlot.idle === null
+      return idleProcess && idleProcess.sessions.size === 0 && processSlot.opening === 0 && processSlot.idle.token === null
         ? scheduleProcessIdle(processSlot, idleProcess)
         : Effect.void;
     })));
@@ -693,16 +680,14 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       modes: modes.state,
       turn: null,
       held: { title: null, mode: false },
-      idle: null,
+      idle: idleTimer(),
       closed: false,
     };
     if (!agentProcess.isAlive()) {
       return yield* new AgentFailed({ agentId: definition.id, reason: `${definition.name} stopped unexpectedly.` });
     }
     agentProcess.sessions.set(live.nativeSessionId, sinkFor(live));
-    const processSlotIdle = processSlot.idle;
-    processSlot.idle = null;
-    yield* stopFiber(processSlotIdle);
+    yield* cancelIdle(processSlot.idle);
     slot.live = live;
     slot.nativeSessionId = live.nativeSessionId;
     slot.modes = live.modes;
@@ -734,8 +719,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       if (live.turn) {
         return endNow('The agent is still working on the last request.');
       }
-      yield* stopFiber(live.idle);
-      live.idle = null;
+      yield* cancelIdle(live.idle);
 
       const turn: Turn = {
         queue: yield* Queue.unbounded<AgentUpdate, Cause.Done>(),
@@ -839,10 +823,11 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   }) {
     if (request.session !== null) {
       const slot = threadSlot(request.session.threadId);
-      const live = slot.live;
-      if (slot.warming || (live && !live.closed && live.process.isAlive())) {
+      if (slot.warming) {
         return;
       }
+      // Also for a live session: reusing it restarts its idle timer, so a prewarm just
+      // before it would have closed keeps it open for the prompt that follows.
       slot.warming = true;
       yield* slot.lock.withPermit(acquireLocked(slot, request.session)).pipe(
         Effect.tapError((error) => Effect.logDebug('prewarm failed').pipe(Effect.annotateLogs({ reason: error.reason }))),
@@ -855,7 +840,16 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       return;
     }
     const slot = agentSlot(request.agentId);
-    if (slot.warming || slot.process?.isAlive()) {
+    if (slot.warming) {
+      return;
+    }
+    const running = slot.process;
+    if (running?.isAlive()) {
+      // Restart the idle countdown of a process with no sessions, so it doesn't exit under the user.
+      yield* slot.lock.withPermit(Effect.suspend(() =>
+        slot.process === running && running.sessions.size === 0 && slot.opening === 0
+          ? scheduleProcessIdle(slot, running)
+          : Effect.void)).pipe(Effect.forkIn(scope));
       return;
     }
     slot.warming = true;

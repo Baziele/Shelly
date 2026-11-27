@@ -510,3 +510,189 @@ describe('ThreadService while a turn is starting', () => {
       }), { fake });
   });
 });
+
+/** What a client shows for one message: chunks append, unless one says it is the whole text so far. */
+const showMessage = (seen: string, events: readonly ThreadEvent[]): string =>
+  events.reduce((text, event) => (event.type !== 'message.chunk' ? text : event.replace ? event.text : text + event.text), seen);
+
+describe('ThreadService under races and shutdown', () => {
+  it('ends every stuck turn at once when the daemon stops, not one after another', async () => {
+    const fake = new FakeAgents({ ignoresCancel: () => true });
+    let stoppingAt = 0;
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        for (let index = 0; index < 3; index++) {
+          const thread = yield* createAttached(threads);
+          yield* threads.prompt(promptInput(thread.id, 'stuck')).pipe(Stream.take(1), Stream.runDrain);
+        }
+        yield* eventually(() => fake.turns.length === 3);
+        stoppingAt = Date.now();
+      }), { fake });
+    const took = Date.now() - stoppingAt;
+    assert.equal(fake.cancels, 3);
+    // Each stuck cancel is given 2 s: one after another would take 6 s.
+    assert.ok(took < 4000, `stopping took ${took}ms`);
+  });
+
+  it('marks a compacted message as the whole text, so a watcher resuming inside it does not repeat it', async () => {
+    const fake = new FakeAgents();
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const collecting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'greet'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.turns.length === 1);
+        fake.lastTurn!.push(
+          { type: 'chunk', kind: 'text', text: 'Hel' },
+          { type: 'chunk', kind: 'text', text: 'lo' },
+          { type: 'end', stopReason: 'end_turn', error: null },
+        );
+        const live = Array.from(yield* Fiber.join(collecting));
+        const first = live.find((event) => event.type === 'message.chunk')!;
+        // A client saw "Hel", lost the connection, and catches up after the turn was compacted.
+        const seen = showMessage('', [first]);
+        const caughtUp = Array.from(yield* Stream.runCollect(threads.watch(thread.id, first.seq)));
+        assert.deepEqual(shape(caughtUp), ['chunk:text:Hello', 'ended:end_turn']);
+        assert.equal(showMessage(seen, caughtUp), 'Hello');
+        // Live chunks are increments.
+        assert.ok(live.every((event) => event.type !== 'message.chunk' || event.replace === undefined));
+      }), { fake });
+  });
+
+  it('starts a new message after a mode change, so compaction keeps them apart', async () => {
+    const fake = new FakeAgents();
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const collecting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'plan it'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.turns.length === 1);
+        fake.lastTurn!.push({ type: 'chunk', kind: 'text', text: 'before' });
+        yield* Effect.sleep('20 millis');
+        yield* threads.setMode(thread.id, CLIENT, 'plan');
+        fake.lastTurn!.push({ type: 'chunk', kind: 'text', text: 'after' }, { type: 'end', stopReason: 'end_turn', error: null });
+        const live = Array.from(yield* Fiber.join(collecting));
+        const ids = live.flatMap((event) => (event.type === 'message.chunk' ? [event.messageId] : []));
+        assert.notEqual(ids[0], ids[1]);
+        const { history } = yield* threads.attach({ threadId: thread.id, clientId: CLIENT, force: false, historyTurns: 1 });
+        assert.deepEqual(shape(history), ['turn.started', 'mode.changed', 'chunk:text:before', 'mode.changed', 'chunk:text:after', 'ended:end_turn']);
+      }), { fake });
+  });
+
+  it('fails setMode with ThreadNotFound when the thread is deleted while the agent starts, and releases the session', async () => {
+    const home = newHome();
+    const fake = new FakeAgents();
+    let threadId = '';
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        threadId = thread.id;
+        const open = gateSessions(fake);
+        const setting = yield* threads.setMode(thread.id, CLIENT, 'plan').pipe(Effect.flip, Effect.forkChild);
+        yield* eventually(() => fake.sessionRequests.length === 1);
+        yield* threads.remove(thread.id, CLIENT);
+        open();
+        const failure = yield* Fiber.join(setting);
+        assert.equal(failure._tag, 'ThreadNotFound');
+        assert.deepEqual(fake.modes, [], 'the agent was not switched');
+        assert.equal(fake.released.filter((id) => id === thread.id).length, 2, 'the new session is released too');
+      }), { fake, home });
+    assert.equal(storedEventCount(home, threadId), 0);
+  });
+
+  it('releases a session prewarmed for a thread deleted meanwhile', async () => {
+    const fake = new FakeAgents();
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const open = gateSessions(fake);
+        yield* threads.prewarm({ threadId: thread.id });
+        yield* Effect.sleep('20 millis');
+        yield* threads.remove(thread.id, CLIENT);
+        assert.equal(fake.released.filter((id) => id === thread.id).length, 1);
+        open();
+        yield* eventually(() => fake.released.filter((id) => id === thread.id).length === 2);
+        assert.deepEqual(yield* threads.list(), []);
+      }), { fake });
+  });
+
+  it('keeps nothing in memory for a prompt to a thread that does not exist', async () => {
+    const looked: string[] = [];
+    const wrapStore: StoreWrapper = (store) => ({
+      ...store,
+      lastSeq: (threadId) => Effect.sync(() => looked.push(threadId)).pipe(Effect.andThen(store.lastSeq(threadId))),
+    });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const failure = yield* threads.prompt(promptInput('nope', 'hi')).pipe(Stream.runDrain, Effect.flip);
+        assert.equal(failure._tag, 'ThreadNotFound');
+        assert.deepEqual(looked, [], 'no live state was set up for it');
+      }), { wrapStore });
+  });
+
+  it('gives up waiting on an agent that ignores cancel, and frees the thread', async () => {
+    const fake = new FakeAgents({ ignoresCancel: () => true });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        yield* threads.prompt(promptInput(thread.id, 'stuck')).pipe(Stream.take(1), Stream.runDrain);
+        yield* eventually(() => fake.turns.length === 1);
+        const startedAt = Date.now();
+        const exit = yield* threads.cancel(thread.id, CLIENT).pipe(Effect.timeout('5 seconds'), Effect.exit);
+        assert.equal(exit._tag, 'Success', 'cancel returns');
+        assert.ok(Date.now() - startedAt < 4000);
+        // The thread's lock is free again.
+        yield* threads.rename(thread.id, CLIENT, 'Still here').pipe(Effect.timeout('1 second'));
+      }), { fake });
+  });
+
+  it('publishes events in seq order while several fibers emit at once', async () => {
+    const fake = new FakeAgents();
+    // A slow disk on every other event: an emitter that stored first may publish last.
+    const wrapStore: StoreWrapper = (store) => ({
+      ...store,
+      appendEvents: (threadId, events) =>
+        store.appendEvents(threadId, events).pipe(Effect.andThen(Effect.sleep((events[0]?.seq ?? 0) % 2 === 1 ? '6 millis' : '0 millis'))),
+    });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const collecting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'busy'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.turns.length === 1);
+        const modes = yield* Effect.forEach(
+          Array.from({ length: 10 }, (_, index) => (index % 2 === 0 ? 'plan' : 'default')),
+          (mode) => threads.setMode(thread.id, CLIENT, mode).pipe(Effect.andThen(Effect.sleep('2 millis'))),
+          { discard: true },
+        ).pipe(Effect.forkChild);
+        for (let index = 0; index < 10; index++) {
+          fake.lastTurn!.push({ type: 'chunk', kind: index % 2 === 0 ? 'text' : 'thought', text: `${index}` });
+        }
+        yield* Fiber.join(modes);
+        fake.lastTurn!.push({ type: 'end', stopReason: 'end_turn', error: null });
+        const seqs = Array.from(yield* Fiber.join(collecting)).map((event) => event.seq);
+        assert.ok(seqs.length > 20);
+        assert.deepEqual(seqs, seqs.toSorted((a, b) => a - b));
+      }), { fake, wrapStore });
+  });
+});
+
+describe('ThreadService prewarm', () => {
+  it('warms a home thread\'s session with the shell\'s current directory, as the prompt will ask for it', async () => {
+    const fake = new FakeAgents({ script: () => [{ type: 'end', stopReason: 'end_turn', error: null }] });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'first')));
+        // The user cd'ed since: the client passes the new directory.
+        yield* threads.prewarm({ threadId: thread.id, cwd: '/work/other' });
+        yield* eventually(() => fake.prewarmSessions.length === 1);
+        const next = { ...promptInput(thread.id, 'second'), context: { ...CONTEXT, cwd: '/work/other' } };
+        yield* Stream.runDrain(threads.prompt(next));
+        assert.deepEqual(fake.prewarmSessions[0], fake.sessionRequests.at(-1), 'the prompt asks for the session that was warmed');
+        assert.deepEqual(fake.prewarmSessions[0]?.additionalDirectories, ['/work/other']);
+
+        // Without one, the last prompt's directory.
+        yield* threads.prewarm({ threadId: thread.id });
+        yield* eventually(() => fake.prewarmSessions.length === 2);
+        assert.deepEqual(fake.prewarmSessions[1]?.additionalDirectories, ['/work/other']);
+      }), { fake });
+  });
+});

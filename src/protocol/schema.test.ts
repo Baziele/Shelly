@@ -11,6 +11,7 @@ const roundTrip = <S extends Schema.Codec<unknown, unknown>>(schema: S, value: S
 const EVENTS: ThreadEventType[] = [
   { seq: 1, type: 'turn.started', turnId: 't1', text: 'why did the build fail', at: 1 },
   { seq: 2, type: 'message.chunk', turnId: 't1', messageId: 'm1', kind: 'thought', text: 'Looking' },
+  { seq: 2, type: 'message.chunk', turnId: 't1', messageId: 'm1', kind: 'thought', text: 'Looking around', replace: true },
   {
     seq: 3,
     type: 'tool.updated',
@@ -48,6 +49,11 @@ describe('protocol schemas', () => {
     for (const event of EVENTS) {
       assert.deepEqual(roundTrip(ThreadEvent, event), event, event.type);
     }
+  });
+
+  it('reads a chunk without `replace` (an older daemon) as one that adds to the message', () => {
+    const decoded = Schema.decodeUnknownSync(ThreadEvent)({ seq: 2, type: 'message.chunk', turnId: 't1', messageId: 'm1', kind: 'text', text: 'Hi' });
+    assert.equal(decoded.type === 'message.chunk' ? decoded.replace : null, undefined);
   });
 
   it('rejects an event of an unknown type', () => {

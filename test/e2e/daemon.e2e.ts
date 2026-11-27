@@ -297,6 +297,56 @@ describe('daemon lifecycle', () => {
     });
   }
 
+  it('starts a new daemon for a client that arrives while the old one is still stopping', async () => {
+    const home = newHome();
+    const paths = shellyPaths({ SHELLY_HOME: home });
+    const old = runDaemonProcess(home);
+    await waitFor(() => probeSocket(paths.socket), 'the daemon to listen');
+    const driver = newClient(home, { autoStart: false });
+    await connect(driver);
+    const thread = await driver.createThread({ location: 'home', cwd: '/work' });
+    await driver.attachThread(thread.id);
+    const seen: ThreadEvent[] = [];
+    const running = (async () => {
+      for await (const event of driver.prompt(thread.id, 'wait, and ignore cancel', CONTEXT)) {
+        seen.push(event);
+      }
+    })().catch(() => {});
+    await waitFor(() => seen.some((event) => event.type === 'message.chunk'), 'the turn to start');
+
+    // The old daemon closes its socket at once, then gives the stuck turn
+    // 2 s while it still holds the lock.
+    assert.equal(await driver.shutdown(false), true);
+    await waitFor(async () => !(await probeSocket(paths.socket)), 'the old daemon to close its socket');
+    assert.equal(old.child.exitCode, null, 'the old daemon is still stopping');
+
+    const client = newClient(home);
+    const hello = await connect(client);
+    assert.notEqual(hello.pid, old.child.pid);
+    assert.equal(await old.exited, 0);
+    assert.equal((await client.listThreads())[0]?.id, thread.id);
+    await running;
+  });
+
+  for (const mechanism of ['flock', 'file'] as const) {
+    it(`starts when the lock names a live process that is not a daemon, a reused pid (${mechanism})`, async () => {
+      const home = newHome();
+      const paths = shellyPaths({ SHELLY_HOME: home });
+      mkdirSync(paths.runDir, { recursive: true, mode: 0o700 });
+      // An old lock from a daemon that used the file-based lock, its pid now someone else's.
+      const stranger = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      try {
+        writeFileSync(paths.lock, JSON.stringify({ pid: stranger.pid, startedAt: Date.now() - 60_000, mechanism: 'file' }));
+        const daemon = runDaemonProcess(home, mechanism === 'file' ? { SHELLY_DAEMON_LOCK: 'file' } : {});
+        await waitFor(() => probeSocket(paths.socket), 'the daemon to listen');
+        assert.equal(daemon.child.exitCode, null);
+        assert.equal(JSON.parse(readFileSync(paths.lock, 'utf8')).pid, daemon.child.pid);
+      } finally {
+        stranger.kill('SIGKILL');
+      }
+    });
+  }
+
   it('takes over a stale lock and a stale socket', async () => {
     const home = newHome();
     const paths = shellyPaths({ SHELLY_HOME: home });
@@ -372,6 +422,89 @@ describe('daemon lifecycle', () => {
     const second = await connect(client);
     assert.notEqual(second.pid, first.pid);
     daemonPids.add(second.pid);
+  });
+});
+
+describe('daemon upgrades', () => {
+  it('replaces an idle daemon older than the client, without failing the request', async () => {
+    const home = newHome();
+    const old = await connect(newClient(home));
+    const thread = await newClient(home).createThread({ location: 'home', cwd: '/work' });
+
+    const upgraded = newClient(home, { version: '99.0.0' });
+    // The first call after the upgrade works, on a new daemon.
+    assert.deepEqual((await upgraded.listThreads()).map((summary) => summary.id), [thread.id]);
+    const hello = await connect(upgraded);
+    assert.notEqual(hello.pid, old.pid);
+    await waitFor(() => !isProcessAlive(old.pid), 'the old daemon to exit');
+  });
+
+  it('keeps using an older daemon that is running a turn', async () => {
+    const home = newHome();
+    const driver = newClient(home);
+    const old = await connect(driver);
+    const thread = await driver.createThread({ location: 'home', cwd: '/work' });
+    await driver.attachThread(thread.id);
+    for await (const event of driver.prompt(thread.id, 'wait for me', CONTEXT)) {
+      if (event.type === 'message.chunk') {
+        break;
+      }
+    }
+    const upgraded = newClient(home, { version: '99.0.0' });
+    assert.equal((await upgraded.listThreads()).length, 1);
+    assert.equal((await connect(upgraded)).pid, old.pid);
+    assert.equal((await upgraded.status()).runningTurns, 1, 'the turn carries on');
+  });
+
+  it('keeps an older daemon while another terminal has a fast request in flight', async () => {
+    const home = newHome();
+    const other = newClient(home);
+    const old = await connect(other);
+    const request = other.fastRequest({
+      sessionKey: 's1',
+      input: { instruction: 'slow one', buffer: '', cwd: '/', environment: CONTEXT.environment, recentCommands: [] },
+    })[Symbol.asyncIterator]();
+    assert.equal((await request.next()).value?.type, 'delta', 'the request is in flight');
+
+    const upgraded = newClient(home, { version: '99.0.0' });
+    assert.equal((await upgraded.listThreads()).length, 0);
+    assert.equal((await connect(upgraded)).pid, old.pid, 'the old daemon was kept');
+    assert.ok(isProcessAlive(old.pid));
+    await request.return?.();
+
+    // Once the request is over the daemon is idle, and the next client that connects replaces it.
+    const later = newClient(home, { version: '99.0.0' });
+    await waitFor(async () => {
+      const hello = await later.connect();
+      daemonPids.add(hello.pid);
+      if (hello.pid === old.pid) {
+        await later.close();
+        return false;
+      }
+      return true;
+    }, 'the idle daemon to be replaced', 5000);
+  });
+
+  it('replaces an older daemon another terminal is merely connected to, and that terminal carries on', async () => {
+    const home = newHome();
+    const other = newClient(home);
+    const old = await connect(other);
+    const thread = await other.createThread({ location: 'home', cwd: '/work' });
+    const upgraded = newClient(home, { version: '99.0.0' });
+    const fresh = await connect(upgraded);
+    assert.notEqual(fresh.pid, old.pid);
+    // The other terminal's next call reconnects, to the new daemon.
+    await waitFor(() => !isProcessAlive(old.pid), 'the old daemon to exit');
+    assert.deepEqual((await other.listThreads()).map((summary) => summary.id), [thread.id]);
+    assert.equal((await other.status()).pid, fresh.pid);
+  });
+
+  it('never replaces a daemon newer than the client', async () => {
+    const home = newHome();
+    const current = await connect(newClient(home));
+    const older = newClient(home, { version: '0.0.1' });
+    assert.equal((await connect(older)).pid, current.pid);
+    assert.ok(isProcessAlive(current.pid));
   });
 });
 

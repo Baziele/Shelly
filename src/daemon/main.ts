@@ -5,12 +5,11 @@ import * as Effect from 'effect/Effect';
 import * as Exit from 'effect/Exit';
 import * as Layer from 'effect/Layer';
 import { shellyPaths } from '../protocol/paths.js';
-import { probeSocket } from '../protocol/probe.js';
 import * as AgentDirectory from './AgentDirectory.js';
 import * as DaemonLog from './DaemonLog.js';
 import * as DaemonPaths from './DaemonPaths.js';
 import * as Lifecycle from './Lifecycle.js';
-import { acquireDaemonLock, type DaemonLockResult, loadFlock } from './lock.js';
+import { type DaemonLockResult, takeDaemonLock } from './lock.js';
 import * as Placeholders from './placeholders.js';
 import * as DaemonServer from './server.js';
 import type { AgentRuntime, FastService } from './services.js';
@@ -27,8 +26,6 @@ import * as ThreadService from './ThreadService.js';
  */
 
 export const DEFAULT_IDLE_MS = 10 * 60 * 1000;
-/** A live pid holding the lock this long with nothing on the socket is not a daemon (its pid was reused). */
-const LOCK_GRACE_MS = 10_000;
 
 /** macOS allows 104 bytes for a unix socket path, including the terminator. */
 const MAX_SOCKET_PATH_BYTES = 103;
@@ -70,9 +67,8 @@ const say = (text: string): void => {
 };
 
 /**
- * Take the single-instance lock. With flock there is nothing more to it.
- * The file-based fallback also treats a live holder as stale when nothing
- * answers on the socket long after it started (its pid was reused).
+ * Take the single-instance lock, waiting out a daemon that is stopping
+ * (see takeDaemonLock).
  */
 const takeLock = async (lockPath: string, socketPath: string, env: NodeJS.ProcessEnv): Promise<DaemonLockResult> => {
   // Test hooks: force the fallback, and start several daemons' attempts at the same instant.
@@ -81,16 +77,7 @@ const takeLock = async (lockPath: string, socketPath: string, env: NodeJS.Proces
   if (startAt > Date.now()) {
     await new Promise((resolve) => setTimeout(resolve, startAt - Date.now()));
   }
-  const first = await acquireDaemonLock(lockPath, { mechanism });
-  const usesFlock = mechanism !== 'file' && (await loadFlock()) !== undefined;
-  if (first.acquired || usesFlock || first.holder === undefined) {
-    return first;
-  }
-  const answers = await probeSocket(socketPath);
-  return acquireDaemonLock(lockPath, {
-    mechanism,
-    isStale: (holder) => !answers && Date.now() - holder.startedAt > LOCK_GRACE_MS,
-  });
+  return takeDaemonLock(lockPath, socketPath, { mechanism });
 };
 
 /** Runs the daemon to completion; resolves with the process exit code. */

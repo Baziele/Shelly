@@ -47,7 +47,7 @@ export class ThreadStore extends Context.Service<
     readonly eventsAfter: (threadId: string, afterSeq: number) => Effect.Effect<readonly ThreadEvent[]>;
     /** The events of the last `turns` turns, and anything between them. */
     readonly history: (threadId: string, turns: number) => Effect.Effect<readonly ThreadEvent[]>;
-    /** Merge each message's chunks into one event, once the turn has ended. */
+    /** Merge each message's chunks into one event (marked `replace`), once the turn has ended. */
     readonly compactTurn: (threadId: string, turnId: string) => Effect.Effect<void>;
     /**
      * After a restart: end every turn the last daemon lost as `interrupted`
@@ -220,10 +220,11 @@ export const make = (db: DatabaseSync): ThreadStore['Service'] => {
     const flush = (): void => {
       if (run.length > 1) {
         // The merged event keeps the last chunk's seq, so seqs stay increasing
-        // and a watcher resuming inside the message gets all of it.
+        // and a watcher resuming inside the message gets all of it; `replace`
+        // tells that watcher to drop the part it already has.
         const last = run.at(-1)!;
         const text = run.map(({ event }) => event.text).join('');
-        statements.updatePayload.run(JSON.stringify({ ...last.event, text }), threadId, last.seq);
+        statements.updatePayload.run(JSON.stringify({ ...last.event, text, replace: true }), threadId, last.seq);
         for (const { seq } of run.slice(0, -1)) {
           statements.deleteEvent.run(threadId, seq);
         }

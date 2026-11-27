@@ -30,6 +30,18 @@ export const layer = DaemonRpcs.toLayer(
     const bind = (options: { readonly client: { readonly id: number } }, clientId: string) =>
       lifecycle.bindClient(options.client.id, clientId);
 
+    // Prompt, watch and fast streams open right now, from any client. A
+    // daemon asked to stop only if idle stays up while any is open, or
+    // replacing it would cut another terminal's stream.
+    let openStreams = 0;
+    const counted = <A, E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> =>
+      Stream.unwrap(Effect.sync(() => {
+        openStreams++;
+        return stream.pipe(Stream.ensuring(Effect.sync(() => {
+          openStreams--;
+        })));
+      }));
+
     return DaemonRpcs.of({
       hello: (payload, options) =>
         payload.protocolVersion === PROTOCOL_VERSION
@@ -47,8 +59,8 @@ export const layer = DaemonRpcs.toLayer(
       'thread.detach': ({ threadId, clientId }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.detach(threadId, clientId))),
       'thread.prompt': (payload, options) =>
-        Stream.unwrap(bind(options, payload.clientId).pipe(Effect.as(threads.prompt(payload)))),
-      'thread.watch': ({ threadId, afterSeq }) => threads.watch(threadId, afterSeq),
+        counted(Stream.unwrap(bind(options, payload.clientId).pipe(Effect.as(threads.prompt(payload))))),
+      'thread.watch': ({ threadId, afterSeq }) => counted(threads.watch(threadId, afterSeq)),
       'thread.cancel': ({ threadId, clientId }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.cancel(threadId, clientId))),
       'thread.respond': (payload, options) => bind(options, payload.clientId).pipe(Effect.andThen(threads.respond(payload))),
@@ -58,7 +70,7 @@ export const layer = DaemonRpcs.toLayer(
         bind(options, clientId).pipe(Effect.andThen(threads.rename(threadId, clientId, title))),
       'thread.delete': ({ threadId, clientId }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.remove(threadId, clientId))),
-      'thread.prewarm': ({ threadId, agentId }) => threads.prewarm({ threadId, agentId }),
+      'thread.prewarm': ({ threadId, agentId, cwd }) => threads.prewarm({ threadId, agentId, cwd }),
 
       'fast.prewarm': ({ agentId }) =>
         directory.resolve(agentId).pipe(
@@ -68,7 +80,7 @@ export const layer = DaemonRpcs.toLayer(
           Effect.asVoid,
         ),
       'fast.request': ({ agentId, sessionKey, input }) =>
-        Stream.unwrap(directory.resolve(agentId).pipe(Effect.map((agentId) => fast.request({ agentId, sessionKey, input })))),
+        counted(Stream.unwrap(directory.resolve(agentId).pipe(Effect.map((agentId) => fast.request({ agentId, sessionKey, input }))))),
       'fast.end': ({ sessionKey }) => fast.end(sessionKey),
 
       'daemon.status': () =>
@@ -82,7 +94,8 @@ export const layer = DaemonRpcs.toLayer(
         ),
       'daemon.shutdown': ({ ifIdle }) =>
         Effect.gen(function* () {
-          if (ifIdle && (yield* threads.runningTurns) > 0) {
+          // Idle: no running turn, and no prompt, watch or fast request in flight from any client.
+          if (ifIdle && ((yield* threads.runningTurns) > 0 || openStreams > 0)) {
             return false;
           }
           yield* lifecycle.requestShutdown('asked by a client').pipe(Effect.delay(SHUTDOWN_DELAY), Effect.forkIn(scope));
