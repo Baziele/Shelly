@@ -38,6 +38,13 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # A fresh install can leave node-pty's spawn helper without its
+      # executable bit. Shelly restores it itself before spawning a shell,
+      # but the tests also spawn ptys of their own.
+      - name: Make node-pty's spawn helper executable
+        if: runner.os != 'Windows'
+        run: find node_modules/.pnpm -path '*node-pty*' -name spawn-helper -exec chmod +x {} +
+
       # pnpm 11 refuses to run scripts here because devEngines does not pin
       # its exact version; node --run runs the same scripts with
       # node_modules/.bin on PATH.
