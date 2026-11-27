@@ -80,6 +80,8 @@ interface UnseenTurn {
 type Outcome = 'ended' | 'lost';
 
 const TITLE_IN_HINT = 32;
+/** How stale the agent list may get before opening :: refreshes it (in the background). */
+const AGENTS_REFRESH_MS = 30_000;
 const LIST_LIMIT = 50;
 /** Exchanges of history fetched on a switch: the last, and the running one if there is one. */
 const SWITCH_HISTORY_TURNS = 2;
@@ -96,6 +98,7 @@ export class AgentSession {
   /** What the next prompt does about threads: start a new one, and where. */
   private next: { newThread: boolean; here: boolean } = { newThread: false, here: false };
   private agents: readonly AgentInfo[] = [];
+  private agentsAt = 0;
   /** The daemon (by pid) this terminal attached the current thread on; a new daemon needs it attached again. */
   private attachedOn: number | undefined;
   /** Per thread, the newest command it has heard about from this terminal. */
@@ -126,7 +129,14 @@ export class AgentSession {
     void link.get().then(
       async (client) => {
         if (this.agents.length === 0) {
-          this.agents = await client.listAgents();
+          await this.refreshAgents(client);
+        } else if (Date.now() - this.agentsAt > AGENTS_REFRESH_MS) {
+          // In the background: an agent installed or signed in since shows up without /agent.
+          void this.refreshAgents(client).then(() => {
+            if (generation === this.inputGeneration && this.host.overlay.mode === 'agent') {
+              this.host.overlay.setHint(this.hint(), this.canWatch());
+            }
+          }, () => undefined);
         }
         const thread = this.next.newThread ? undefined : this.thread;
         // With the shell's directory, so the session is ready for where the prompt comes from (no resume after a `cd`).
@@ -249,7 +259,7 @@ export class AgentSession {
     try {
       client = await this.host.link.get();
       if (this.agents.length === 0) {
-        this.agents = await client.listAgents();
+        await this.refreshAgents(client);
       }
       const thread = await this.ensureThread(client);
       view.setAgentName(thread.agentId);
@@ -849,6 +859,7 @@ export class AgentSession {
     }
     const { client, agents } = loaded;
     this.agents = agents;
+    this.agentsAt = Date.now();
     const overlay = this.host.overlay;
     overlay.openPicker({
       items: agentPickerItems(agents),
@@ -883,7 +894,7 @@ export class AgentSession {
     const loaded = await this.busy(async () => {
       const client = await this.host.link.get();
       if (this.agents.length === 0) {
-        this.agents = await client.listAgents();
+        await this.refreshAgents(client);
       }
       // Modes belong to a thread's session; with none yet, this starts the thread the next message goes to.
       const thread = await this.ensureThread(client);
@@ -1014,10 +1025,15 @@ export class AgentSession {
     }
   }
 
+  private async refreshAgents(client: DaemonClient): Promise<void> {
+    this.agents = await client.listAgents();
+    this.agentsAt = Date.now();
+  }
+
   /** Once connected: learn the agents now, so the first prompt's view names the right one. */
   async connected(client: DaemonClient): Promise<void> {
     if (this.agents.length === 0) {
-      this.agents = await client.listAgents();
+      await this.refreshAgents(client);
     }
   }
 
