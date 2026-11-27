@@ -156,6 +156,10 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   const config = yield* ShellyConfig;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const scope = yield* Scope.Scope;
+  // Agent processes live in their own scope, closed first on shutdown, so their
+  // exits then read as deliberate rather than as crashes.
+  const processScope = yield* Scope.make();
+  let shuttingDown = false;
   const env = options.env ?? process.env;
 
   const agentSlots = new Map<string, AgentSlot>();
@@ -238,7 +242,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
 
   const onTerminated = (agentProcess: AgentProcess, error: AcpError.AcpError): Effect.Effect<void> =>
     Effect.suspend(() => {
-      if (stopping.has(agentProcess)) {
+      if (shuttingDown || stopping.has(agentProcess)) {
         return Effect.void;
       }
       const agentId = agentProcess.definition.id;
@@ -290,7 +294,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
         slot.idle = null;
         return slot.process;
       }
-      const started = yield* spawnAgentProcess(definition, scope, { onTerminated, onSpawn: options.onSpawn }).pipe(
+      const started = yield* spawnAgentProcess(definition, processScope, { onTerminated, onSpawn: options.onSpawn }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
       slot.process = started;
@@ -375,7 +379,8 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
     onPermission: (request) =>
       Effect.suspend(() => {
         const turn = live.turn && !live.turn.ended ? live.turn : null;
-        if (!turn) {
+        // No turn to ask in, or the user already stopped it.
+        if (!turn || turn.cancelRequested) {
           return Effect.succeed(CANCELLED);
         }
         const requestId = `permission-${++permissionCounter}`;
@@ -633,6 +638,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   /** The thread's live session, reused or (re)opened. Runs under the thread's lock. */
   const acquireLocked = Effect.fn('AgentRuntime.acquire')(function* (slot: ThreadSlot, request: AgentSessionRequest) {
     yield* Effect.annotateCurrentSpan({ agentId: request.agentId, threadId: request.threadId });
+    const previous = slot.request;
     slot.request = request;
     const definition = yield* resolveAgent(request.agentId);
     const current = slot.live;
@@ -662,7 +668,9 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
       const agentProcess = yield* ensureProcess(definition);
       const opened = yield* openSession(agentProcess, definition, {
         ...request,
-        nativeSessionId: request.nativeSessionId ?? (current?.cwd === request.cwd ? current.nativeSessionId : null),
+        // A thread whose session was lost or released keeps its conversation.
+        nativeSessionId: request.nativeSessionId
+          ?? (previous?.agentId === request.agentId && previous.cwd === request.cwd ? slot.nativeSessionId : null),
       });
       return { agentProcess, opened };
     }).pipe(Effect.ensuring(Effect.suspend(() => {
@@ -885,6 +893,11 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
 
   const processCount = Effect.sync(() =>
     [...agentSlots.values()].filter((slot) => slot.process?.isAlive()).length);
+
+  yield* Scope.addFinalizer(scope, Effect.suspend(() => {
+    shuttingDown = true;
+    return Scope.close(processScope, Exit.void);
+  }));
 
   return AgentRuntime.of({ agents, session, prewarm, release, processCount });
 });
