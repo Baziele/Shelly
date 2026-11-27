@@ -11,28 +11,36 @@ export interface FastReply {
 
 const FENCE = /```[^\n`]*\n([\s\S]*?)\n?```/;
 
-const unwrapCommand = (raw: string): string => {
-  let text = raw;
-  const fenced = FENCE.exec(text);
-  if (fenced) text = fenced[1]!.trim();
-  else if (/^`[^`]+`$/.test(text)) text = text.slice(1, -1).trim();
+const isComment = (line: string): boolean => line.trimStart().startsWith('#');
 
-  // A prompt sign copied from a transcript: `$ ls`, on every line of a multi-line command.
-  const lines = text.split('\n');
-  if (lines.some((line) => line.startsWith('$ ')) && lines.every((line) => line.startsWith('$ ') || line.trim() === '')) {
-    text = lines.map((line) => line.slice(2)).join('\n');
-  }
-  return text.trim();
+/** An answer: every non-empty line is a `# ` comment. */
+const isAnswer = (text: string): boolean => {
+  const lines = text.split('\n').filter((line) => line.trim() !== '');
+  return lines.length > 0 && lines.every(isComment);
 };
 
-export const classifyReply = (raw: string): FastReply => {
-  let text = raw.trim();
-  if (!text.startsWith('#')) text = unwrapCommand(text);
+const unfence = (raw: string): string => {
+  const fenced = FENCE.exec(raw);
+  if (fenced) return fenced[1]!.trim();
+  if (/^`[^`]+`$/.test(raw)) return raw.slice(1, -1).trim();
+  return raw;
+};
 
-  if (text.startsWith('#')) {
-    // Every line of an answer may carry its own `# `, which keeps it paste-safe.
-    const lines = text.split('\n').map((line) => line.replace(/^#+ ?/, '').trimEnd());
-    return { kind: 'answer', text: lines.join('\n').trim() };
+const answerText = (text: string): string =>
+  // Every line of an answer may carry its own `# `, which keeps it paste-safe.
+  text.trim().split('\n').map((line) => line.trim().replace(/^#+ ?/, '').trimEnd()).join('\n').trim();
+
+export const classifyReply = (raw: string): FastReply => {
+  const trimmed = raw.trim();
+  if (isAnswer(trimmed)) return { kind: 'answer', text: answerText(trimmed) };
+  const text = unfence(trimmed);
+  if (isAnswer(text)) return { kind: 'answer', text: answerText(text) };
+
+  // A comment line beside a command (`# free port 3000`) is not part of what runs.
+  let lines = text.split('\n').filter((line) => !isComment(line));
+  // A prompt sign copied from a transcript: `$ ls`, on every line of a multi-line command.
+  if (lines.some((line) => line.startsWith('$ ')) && lines.every((line) => line.startsWith('$ ') || line.trim() === '')) {
+    lines = lines.map((line) => line.slice(2));
   }
-  return { kind: 'command', text };
+  return { kind: 'command', text: lines.join('\n').trim() };
 };
