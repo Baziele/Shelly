@@ -13,7 +13,43 @@ const PREAMBLE =
   'Below is their terminal session: the environment, the shell\'s current directory, ' +
   'and the commands run since you last heard from them, with exit codes and the end of each output.';
 
-export const formatPromptForAgent = (context: PromptContext, userText: string): string => {
+/**
+ * Anything that could read as the block's own tag, opening or closing, in
+ * any case and spacing (`</shelly_context>`, `< / SHELLY_CONTEXT >`,
+ * `</shelly-context>`). Command output is arbitrary text: a file that
+ * contains the closing tag, or a heredoc with it at column 0, would end the
+ * block early and make what follows read as the user's own request.
+ */
+const TAG_LIKE = /<(?=[\s/]*shelly[\W_]*context)/giu;
+
+/** Defuse the block's tag in text from the session, keeping it readable. */
+export const neutraliseContextTags = (text: string): string => text.replace(TAG_LIKE, '&lt;');
+
+/** The context with its text defused; everything else, including fields added later, is kept as it is. */
+export const neutraliseContext = (context: PromptContext): PromptContext => {
+  const clean = (text: string | null): string | null => (text === null ? null : neutraliseContextTags(text));
+  return {
+    ...context,
+    cwd: neutraliseContextTags(context.cwd),
+    environment: {
+      ...context.environment,
+      os: neutraliseContextTags(context.environment.os),
+      shell: neutraliseContextTags(context.environment.shell),
+      shellVersion: clean(context.environment.shellVersion),
+      terminal: clean(context.environment.terminal),
+    },
+    commands: context.commands.map((command) => ({
+      ...command,
+      command: neutraliseContextTags(command.command),
+      cwd: clean(command.cwd),
+      output: neutraliseContextTags(command.output),
+    })),
+  };
+};
+
+export const formatPromptForAgent = (rawContext: PromptContext, userText: string): string => {
+  // Everything inside the block comes from the session; none of it may close the block.
+  const context = neutraliseContext(rawContext);
   const lines = [
     '<shelly_context>',
     PREAMBLE,

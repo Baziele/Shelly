@@ -11,6 +11,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
+import { probeSocketState, type SocketState } from '../protocol/probe.js';
 
 /*
  * The single-instance lock, `run/daemon.lock`.
@@ -118,7 +119,7 @@ export const loadFlock = (): Promise<Flock | undefined> =>
     }
   })());
 
-const acquireFlock = (path: string, flock: Flock, holder: LockHolder): DaemonLockResult => {
+const acquireFlock = (path: string, flock: Flock, holder: LockHolder, isStale: (holder: LockHolder) => boolean): DaemonLockResult => {
   const fd = openSync(path, constants.O_RDWR | constants.O_CREAT, 0o600);
   const errno = flock.tryLock(fd);
   if (errno !== 0) {
@@ -128,9 +129,10 @@ const acquireFlock = (path: string, flock: Flock, holder: LockHolder): DaemonLoc
     }
     return { acquired: false, holder: readLock(path) };
   }
-  // A daemon using the file-based lock (no node:ffi) does not flock: respect it.
+  // A daemon using the file-based lock (no node:ffi) does not flock: respect
+  // it, unless its pid now belongs to something else (`isStale`).
   const previous = readLock(path);
-  if (previous?.mechanism === 'file' && previous.pid !== holder.pid && isProcessAlive(previous.pid)) {
+  if (previous?.mechanism === 'file' && previous.pid !== holder.pid && isProcessAlive(previous.pid) && !isStale(previous)) {
     closeSync(fd);
     return { acquired: false, holder: previous };
   }
@@ -312,7 +314,7 @@ export const acquireDaemonLock = async (
   const holder: LockHolder = { pid: options.pid ?? process.pid, startedAt: options.now ?? Date.now() };
   const flock = options.mechanism === 'file' ? undefined : await loadFlock();
   if (flock) {
-    return acquireFlock(path, flock, holder);
+    return acquireFlock(path, flock, holder, options.isStale ?? (() => false));
   }
   if (options.mechanism === 'flock') {
     throw new Error('flock is not available: run Node with --experimental-ffi.');
@@ -321,4 +323,84 @@ export const acquireDaemonLock = async (
   return result.acquired
     ? { acquired: true, lock: { mechanism: 'file', release: () => releaseLock(path) } }
     : { acquired: false, holder: result.holder };
+};
+
+// ─── Taking the lock at startup ─────────────────────────────────────────────
+
+/** A live holder younger than this may still be starting, whatever its socket says. */
+export const LOCK_GRACE_MS = 10_000;
+/**
+ * How long a daemon keeps trying for a lock whose holder serves nothing (it
+ * is stopping, or starting). It must cover a stopping daemon: up to 2 s for
+ * stuck turns (all at once), then its agents and store, well under 6 s. And
+ * it must end clearly before the client that started this daemon gives up
+ * (DEFAULT_START_TIMEOUT_MS in client/daemon-spawn.ts, 10 s), leaving this
+ * daemon about 4 s to start serving once it has the lock. Shortening this
+ * wait, rather than lengthening the client's, keeps a daemon that truly
+ * cannot start from making the user wait longer for the error.
+ */
+export const LOCK_WAIT_MS = 6_000;
+/**
+ * A holder whose socket has refused connections this long, without a break,
+ * is not a daemon any more: its pid was reused. Longer than a daemon takes
+ * to stop once it has closed its socket, and shorter than LOCK_WAIT_MS, or
+ * no takeover would ever happen.
+ */
+export const LOCK_ABANDONED_AFTER_MS = 5_000;
+const LOCK_RETRY_MS = 50;
+
+export interface TakeDaemonLockOptions extends Omit<AcquireOptions, 'isStale'> {
+  readonly mechanism?: LockMechanism | 'auto' | undefined;
+  readonly waitMs?: number | undefined;
+  readonly abandonedAfterMs?: number | undefined;
+  readonly graceMs?: number | undefined;
+  readonly retryMs?: number | undefined;
+  /** For tests: what the socket says. */
+  readonly probe?: ((socketPath: string) => Promise<SocketState>) | undefined;
+}
+
+/**
+ * Take the daemon lock for a daemon about to serve `socketPath`.
+ *
+ * A lock that is held while nothing answers on the socket usually belongs
+ * to a daemon that is stopping: it closes its socket first and lets go of
+ * the lock only once its turns, agents and store are closed. A client that
+ * arrives in between starts a new daemon, which must wait for the lock
+ * rather than exit, or the client is left with no daemon. So this keeps
+ * trying until the lock is free, a daemon answers on the socket (then it
+ * gives up: that daemon serves), or `waitMs` passes.
+ *
+ * A live holder counts as stale (its pid was reused) only when it started
+ * long ago and its socket has flatly refused connections for
+ * `abandonedAfterMs`: a socket that is merely slow to answer may belong to
+ * a busy daemon, which is never taken over.
+ */
+export const takeDaemonLock = async (
+  lockPath: string,
+  socketPath: string,
+  {
+    waitMs = LOCK_WAIT_MS,
+    abandonedAfterMs = LOCK_ABANDONED_AFTER_MS,
+    graceMs = LOCK_GRACE_MS,
+    retryMs = LOCK_RETRY_MS,
+    probe = (path) => probeSocketState(path),
+    ...options
+  }: TakeDaemonLockOptions = {},
+): Promise<DaemonLockResult> => {
+  const deadline = Date.now() + waitMs;
+  let refusedSince: number | undefined;
+  const isStale = (holder: LockHolder): boolean =>
+    Date.now() - holder.startedAt > graceMs && refusedSince !== undefined && Date.now() - refusedSince >= abandonedAfterMs;
+  for (;;) {
+    const result = await acquireDaemonLock(lockPath, { ...options, isStale });
+    if (result.acquired) {
+      return result;
+    }
+    const state = await probe(socketPath);
+    if (state === 'answers' || Date.now() >= deadline) {
+      return result;
+    }
+    refusedSince = state === 'refused' ? (refusedSince ?? Date.now()) : undefined;
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
+  }
 };

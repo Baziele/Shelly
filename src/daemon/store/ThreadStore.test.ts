@@ -92,6 +92,12 @@ describe('ThreadStore', () => {
       [8, 'message.chunk', 'Done.'],
       [9, 'turn.ended', null],
     ]);
+    // A merged chunk is the whole message: a client that saw part of it replaces that part.
+    assert.deepEqual(compacted.flatMap((event) => (event.type === 'message.chunk' ? [[event.seq, event.replace]] : [])), [
+      [3, true],
+      [6, true],
+      [8, undefined],
+    ]);
     assert.equal(run(store.lastSeq('th1')), 9);
   });
 
@@ -121,7 +127,7 @@ describe('ThreadStore', () => {
     assert.equal(run(store.getThread('th1'))?.status, 'idle');
     assert.deepEqual(run(store.eventsAfter('th1', 3)), [
       { seq: 4, type: 'turn.started', turnId: 't2', text: 'q', at: 1000 },
-      { seq: 6, type: 'message.chunk', turnId: 't2', messageId: 'm', kind: 'text', text: 'part two' },
+      { seq: 6, type: 'message.chunk', turnId: 't2', messageId: 'm', kind: 'text', text: 'part two', replace: true },
       { seq: 7, type: 'permission.requested', turnId: 't2', requestId: 'r1', toolCallId: null, title: 'Run it?', options: [] },
       { seq: 8, type: 'permission.resolved', turnId: 't2', requestId: 'r1', optionId: null },
       { seq: 9, type: 'turn.ended', turnId: 't2', stopReason: 'interrupted', error: null, durationMs: 3000 },

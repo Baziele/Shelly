@@ -27,7 +27,16 @@ export class DaemonStartFailed extends Error {
   }
 }
 
-const DEFAULT_START_TIMEOUT_MS = 3000;
+/**
+ * Long enough for a daemon that is stopping to let go of its lock (it may
+ * give stuck turns 2 s to end) and for the new one to start: longer than
+ * the new daemon's own wait for the lock (LOCK_WAIT_MS in daemon/lock.ts,
+ * 6 s) plus its startup. A daemon that fails to start exits, which ends the
+ * wait early.
+ */
+const DEFAULT_START_TIMEOUT_MS = 10_000;
+/** After the spawned daemon exited: how long another daemon (the one it deferred to) gets to answer. */
+const AFTER_EXIT_GRACE_MS = 500;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -84,7 +93,10 @@ export const daemonExecArgv = (execArgv: readonly string[], cwd = process.cwd())
 };
 
 /** Start a daemon in the background, detached from this process, its output going to the log. */
-export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefined => {
+export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefined => startDaemonProcess(options).pid;
+
+/** As spawnDaemon; `exited` resolves if the daemon exits while this process runs. */
+const startDaemonProcess = (options: DaemonStartOptions): { readonly pid: number | undefined; readonly exited: Promise<void> } => {
   const env = options.env ?? process.env;
   const paths = shellyPaths(env);
   const entry = options.entry ?? process.argv[1];
@@ -102,17 +114,23 @@ export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefine
       stdio: ['ignore', log, log],
       env,
     });
-    child.on('error', () => {});
+    const exited = new Promise<void>((resolve) => {
+      child.once('exit', () => resolve());
+      child.once('error', () => resolve());
+    });
     child.unref();
-    return child.pid;
+    return { pid: child.pid, exited };
   } finally {
     closeSync(log);
   }
 };
 
-/** Wait for something to answer on the socket, backing off; false after `timeoutMs`. */
-export const waitForSocket = async (socket: string, timeoutMs: number): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
+/** Wait for something to answer on the socket, backing off; false after `timeoutMs`, or soon after `giveUp` resolves. */
+export const waitForSocket = async (socket: string, timeoutMs: number, giveUp?: Promise<void>): Promise<boolean> => {
+  let deadline = Date.now() + timeoutMs;
+  void giveUp?.then(() => {
+    deadline = Math.min(deadline, Date.now() + AFTER_EXIT_GRACE_MS);
+  });
   let delay = 5;
   while (Date.now() < deadline) {
     if (await probeSocket(socket, Math.max(50, Math.min(500, deadline - Date.now())))) {
@@ -153,8 +171,8 @@ export const ensureDaemonStarted = (options: DaemonStartOptions = {}): Promise<v
     if (await probeSocket(paths.socket)) {
       return;
     }
-    spawnDaemon(options);
-    if (!(await waitForSocket(paths.socket, options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS))) {
+    const daemon = startDaemonProcess(options);
+    if (!(await waitForSocket(paths.socket, options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS, daemon.exited))) {
       throw new DaemonStartFailed(paths.daemonLog);
     }
   })().finally(() => starting.delete(paths.socket));
