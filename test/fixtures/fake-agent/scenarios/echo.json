@@ -1,0 +1,7 @@
+{
+  "name": "echo",
+  "rules": [
+    { "match": "--json", "script": [{ "type": "echo", "format": "json" }] }
+  ],
+  "defaultScript": [{ "type": "echo" }]
+}
