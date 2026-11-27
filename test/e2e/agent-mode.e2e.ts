@@ -170,6 +170,10 @@ for (const shell of E2E_SHELLS) {
       assert.ok(!all.some((line) => line.includes('more lines above')), 'no clipping note left behind');
       assertClean(all);
       promptRightAfter(await driver.lines(), /✓ /);
+
+      // A turn that ends with nothing said says so, rather than a bare ✓.
+      const lines = await ask(driver, 'say nothing', '✓');
+      assert.ok(lines.some((line) => line.includes('fake ended the turn without a reply')), lines.join('\n'));
     });
 
     it('reflows when the terminal is resized mid-turn', async () => {

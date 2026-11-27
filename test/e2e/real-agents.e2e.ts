@@ -50,7 +50,12 @@ describe('Shelly with the real agents', { skip: !enabled && 'set SHELLY_REAL_AGE
       rows: 30,
       home: homedir(),
       cwd: temp('shelly-work-'),
-      env: { ZDOTDIR: zdotdir, PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      // The agents find their logins with these (Claude Code's is in the keychain, under the user).
+      env: {
+        ZDOTDIR: zdotdir,
+        PATH: process.env.PATH ?? '/usr/bin:/bin',
+        ...Object.fromEntries(['USER', 'LOGNAME', 'TMPDIR'].flatMap((name) => (process.env[name] ? [[name, process.env[name]!]] : []))),
+      },
       config: {
         defaultAgent: 'claude',
         agents: { claude: { model: 'haiku' }, opencode: { model: 'opencode-go/hy4-flash-free' } },

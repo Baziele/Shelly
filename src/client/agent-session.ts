@@ -48,6 +48,8 @@ interface Tracker {
   startSeq: number | undefined;
   lastSeq: number;
   status: 'running' | 'waiting' | 'ended';
+  /** The agent said or did something in this turn (text, a tool call, a plan). */
+  answered: boolean;
 }
 
 /** A turn this terminal started or is following, for as long as it runs. */
@@ -64,6 +66,7 @@ const newTracker = (text: string, lastSeq: number): Tracker => ({
   startSeq: undefined,
   lastSeq,
   status: 'running',
+  answered: false,
 });
 
 /** A finished turn the user sent to the background and has not seen the end of. */
@@ -340,6 +343,15 @@ export class AgentSession {
           onStarted?.();
         }
         if (live.view === view && this.shows(event, live.threadId)) {
+          if (event.type === 'turn.ended' && event.stopReason === 'end_turn' && !tracker.answered) {
+            // A bare "✓ 0s" would look like success; an agent that cannot work (not signed in, say) can end this way.
+            view.apply(synthetic({
+              type: 'notice',
+              turnId: event.turnId,
+              level: 'warning',
+              text: `${live.agentId} ended the turn without a reply. If it keeps happening, check that ${live.agentId} works on its own.`,
+            }));
+          }
           view.apply(event);
         }
         if (event.type === 'turn.ended' && event.turnId === tracker.turnId) {
@@ -377,7 +389,13 @@ export class AgentSession {
           tracker.text = event.text;
         }
         return;
+      case 'message.chunk':
+      case 'tool.updated':
+      case 'plan.updated':
+        tracker.answered = true;
+        return;
       case 'permission.requested':
+        tracker.answered = true;
         tracker.status = 'waiting';
         if (tracker === live) {
           this.noticeIfHidden(live, `${live.agentId} is waiting for you · type :: and press enter to answer`);

@@ -30,6 +30,8 @@ export default defineScenario({
     { match: 'permission', script: permission },
     { match: 'long', script: [{ type: 'message', text: `Here it is:\n\n${longLines}\n\nThat was all of it.`, charsPerTick: 400, tickMs: 20 }] },
     { match: 'slow', script: slowWork },
+    // Ends the turn having said nothing, as an agent that cannot work may.
+    { match: 'say nothing', script: [{ type: 'end', stopReason: 'end_turn' }] },
     {
       match: 'name yourself',
       script: [
