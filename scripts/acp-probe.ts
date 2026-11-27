@@ -273,9 +273,14 @@ class Probe {
         const entry = {
           child: proc,
           output: "",
-          exit: new Promise<{ exitCode: number | null; signal: string | null }>((res) =>
-            proc.on("exit", (exitCode, signal) => res({ exitCode, signal })),
-          ),
+          exit: new Promise<{ exitCode: number | null; signal: string | null }>((res) => {
+            proc.on("exit", (exitCode, signal) => res({ exitCode, signal }));
+            // A command that cannot start (ENOENT, say) emits "error" and never "exit".
+            proc.on("error", (error) => {
+              entry.output += `${error.message}\n`;
+              res({ exitCode: 127, signal: null });
+            });
+          }),
         };
         proc.stdout?.on("data", (d: Buffer) => (entry.output += d.toString()));
         proc.stderr?.on("data", (d: Buffer) => (entry.output += d.toString()));
