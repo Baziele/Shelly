@@ -356,50 +356,60 @@ const make = Effect.gen(function* () {
       return yield* new TurnInProgress({ threadId });
     }
     thread.starting = true;
-    const session = yield* runtime.session(sessionRequest(row, context.cwd)).pipe(
-      Effect.onExit((exit) => Effect.sync(() => {
-        if (!Exit.isSuccess(exit)) {
-          thread.starting = false;
-        }
-      })),
-    );
-    const now = Date.now();
-    const turn: Turn = {
-      turnId: randomUUID(),
-      startedAt: now,
-      session,
-      pending: new Set(),
-      message: null,
-      ended: false,
-      fiber: null,
-    };
-    thread.turn = turn;
-    thread.starting = false;
+    // Only waiting for the session may be interrupted (the client went away):
+    // once it is ready, the turn is set up and forked as one step, so a
+    // thread is never left marked busy with no turn running.
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const session = yield* restore(runtime.session(sessionRequest(row, context.cwd)));
+        const now = Date.now();
+        const turn: Turn = {
+          turnId: randomUUID(),
+          startedAt: now,
+          session,
+          pending: new Set(),
+          message: null,
+          ended: false,
+          fiber: null,
+        };
+        thread.turn = turn;
+        thread.starting = false;
 
-    yield* store.updateThread(threadId, {
-      status: 'running',
-      nativeSessionId: session.nativeSessionId,
-      lastShellCwd: context.cwd,
-      turnCount: row.turnCount + 1,
-      updatedAt: now,
-      // A generated title can replace this one later (see titles.ts).
-      ...(row.title === '' ? { title: initialTitle(text) } : {}),
-    });
-    yield* emit(threadId, thread, { type: 'turn.started', turnId: turn.turnId, text, at: now });
-    if (session.startedFresh && row.nativeSessionId !== null) {
-      yield* emit(threadId, thread, {
-        type: 'notice',
-        turnId: turn.turnId,
-        level: 'warning',
-        text: 'The agent could not resume the earlier conversation, so this message starts a new one.',
-      });
-    }
-    if (session.modes) {
-      yield* emitMode(threadId, thread, session.modes);
-    }
-    yield* Effect.logInfo(`turn started thread=${threadId} turn=${turn.turnId}`);
-    turn.fiber = yield* runTurn(threadId, thread, turn, formatPromptForAgent(context, text)).pipe(Effect.forkIn(scope));
-    return turn.turnId;
+        yield* store.updateThread(threadId, {
+          status: 'running',
+          nativeSessionId: session.nativeSessionId,
+          lastShellCwd: context.cwd,
+          turnCount: row.turnCount + 1,
+          updatedAt: now,
+          // A generated title can replace this one later (see titles.ts).
+          ...(row.title === '' ? { title: initialTitle(text) } : {}),
+        });
+        yield* emit(threadId, thread, { type: 'turn.started', turnId: turn.turnId, text, at: now });
+        if (session.startedFresh && row.nativeSessionId !== null) {
+          yield* emit(threadId, thread, {
+            type: 'notice',
+            turnId: turn.turnId,
+            level: 'warning',
+            text: 'The agent could not resume the earlier conversation, so this message starts a new one.',
+          });
+        }
+        if (session.modes) {
+          yield* emitMode(threadId, thread, session.modes);
+        }
+        yield* Effect.logInfo(`turn started thread=${threadId} turn=${turn.turnId}`);
+        turn.fiber = yield* runTurn(threadId, thread, turn, formatPromptForAgent(context, text)).pipe(Effect.forkIn(scope));
+        return turn.turnId;
+      }).pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            thread.starting = false;
+            if (!Exit.isSuccess(exit) && thread.turn && !thread.turn.fiber) {
+              thread.turn = null;
+            }
+          })
+        ),
+      )
+    );
   });
 
   // ─── Operations ───────────────────────────────────────────────────────────
