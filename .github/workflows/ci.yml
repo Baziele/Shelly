@@ -53,11 +53,14 @@ jobs:
       - run: node --run test
 
       # zsh's system config runs compinit, which stops to ask about
-      # "insecure directories" when completion dirs are group-writable; the
-      # tests would sit at that prompt. Show what this runner has.
-      - name: Check zsh's completion directories
+      # "insecure directories" when a completion dir is group-writable, as
+      # /usr/share/zsh/vendor-completions is on this runner. Every zsh test
+      # would sit at that question, so make them safe the way compaudit asks.
+      - name: Secure zsh's completion directories
         if: runner.os == 'Linux'
-        run: zsh -fc 'autoload -U compaudit; compaudit' || true
+        run: |
+          zsh -fc 'autoload -U compaudit; compaudit' | tail -n +2 | xargs -r sudo chmod g-w,o-w
+          zsh -fc 'autoload -U compaudit; compaudit' && echo "No insecure directories left."
 
       - name: End-to-end tests
         timeout-minutes: 10

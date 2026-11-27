@@ -76,7 +76,7 @@ for (const shell of shells) {
       );
       const context = screen.slice(screen.indexOf('$ :: /context'));
 
-      assert.ok(context.some((row) => row.startsWith(`Shell: `)), 'environment is described');
+      assert.ok(context.some((row) => row.startsWith(`Shell: `)), `environment is described; screen:\n${screen.join('\n')}`);
       assert.ok(context.some((row) => row.startsWith('Working directory: ')), 'working directory is reported');
       const after = (line: string, offset: number): string | undefined => context[context.indexOf(line) + offset];
       assert.match(after('$ echo one', 1) ?? '', /^ {2}\[exit 0 · \d+(?:ms|\.\ds) · \//);
