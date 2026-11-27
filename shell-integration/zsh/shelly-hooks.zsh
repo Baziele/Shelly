@@ -10,10 +10,11 @@ __shelly_emit() {
 }
 
 # Percent-encode what cannot travel inside an OSC sequence, and keep long
-# command lines (a pasted script, say) to a sensible size.
+# command lines (a pasted script, say) to a sensible size: $2 characters,
+# 8192 by default.
 __shelly_encode() {
   'builtin' 'emulate' -L zsh
-  local text=${1[1,8192]}
+  local text=${1[1,${2:-8192}]}
   text=${text//'%'/%25}
   text=${text//$'\n'/%0A}
   text=${text//$'\r'/%0D}
@@ -39,14 +40,115 @@ __shelly_precmd() {
   return $code
 }
 
+# The input line. Shelly reads and sets it by sending keys no terminal sends
+# (F12 and F11 with every modifier held; see src/shell/line-editor.ts).
+
+__shelly_remove() {
+  'builtin' 'emulate' -L zsh
+  'builtin' 'zf_rm' -f -- $1 2>/dev/null || 'command' 'rm' -f -- $1
+}
+
+# Report the line and the cursor (in characters), then clear the line so
+# Shelly can draw there. A line too long to report is left as it is. The
+# answer names the request Shelly left in the line file (`capture <n>`);
+# none there means Shelly has given up on it.
+__shelly_line_capture() {
+  'builtin' 'emulate' -L zsh
+  local file=$__shelly_line_file request=''
+  if [[ -n $file && -f $file && ! -L $file ]]; then
+    IFS= 'builtin' 'read' -r request < $file
+    if [[ $request == 'capture '<-> ]]; then
+      request=${request#capture }
+      __shelly_remove $file
+    else
+      # Not a capture request: leave it for the key it belongs to.
+      request=''
+    fi
+  fi
+  __shelly_encode "$BUFFER" ${#BUFFER}
+  if (( ${#__shelly_encoded} > 60000 )); then
+    __shelly_emit "line;$request;;-1"
+    return 0
+  fi
+  local cursor=$CURSOR
+  BUFFER=''
+  # Redraw before reporting, so the cleared line is on screen by the time
+  # Shelly hears about it.
+  'builtin' 'zle' -R
+  __shelly_emit "line;$request;$__shelly_encoded;$cursor"
+}
+
+# Replace the line with the file Shelly wrote: `set <request> <cursor>` (the
+# cursor in characters) on the first line, the text after it. The file is
+# removed once read.
+__shelly_line_set() {
+  'builtin' 'emulate' -L zsh
+  local file=$__shelly_line_file header='' request='' cursor='' text=''
+  [[ -n $file && -f $file && ! -L $file ]] || return 0
+  {
+    IFS= 'builtin' 'read' -r header
+    # Up to a NUL, which never comes: everything else, newlines included.
+    IFS= 'builtin' 'read' -r -d '' text
+  } < $file
+  # A capture request belongs to the other key.
+  [[ $header == 'set '<->' '<-> ]] || return 0
+  request=${${header#set }%% *}
+  cursor=${header##* }
+  __shelly_remove $file
+  BUFFER=$text
+  if (( cursor < ${#BUFFER} )); then
+    CURSOR=$cursor
+  else
+    CURSOR=${#BUFFER}
+  fi
+  __shelly_emit "line-set;$request"
+}
+
+# Show the file's one-line notice (`notice <request>`, then the text) below
+# the line, which stays as it is. The file is removed once read.
+__shelly_line_notice() {
+  'builtin' 'emulate' -L zsh
+  local file=$__shelly_line_file header='' request='' text=''
+  [[ -n $file && -f $file && ! -L $file ]] || return 0
+  {
+    IFS= 'builtin' 'read' -r header
+    IFS= 'builtin' 'read' -r text
+  } < $file
+  # Any other request belongs to another key.
+  [[ $header == 'notice '<-> ]] || return 0
+  request=${header#notice }
+  __shelly_remove $file
+  'builtin' 'zle' -M -- "$text"
+  __shelly_emit "line-set;$request"
+}
+
+# Bound in every keymap a user might be in, then announced to Shelly.
+__shelly_bind_line_keys() {
+  'builtin' 'emulate' -L zsh
+  [[ -o zle ]] || return 0
+  'builtin' 'zmodload' -F zsh/files b:zf_rm 2>/dev/null
+  'builtin' 'zle' -N __shelly_line_capture || return 0
+  'builtin' 'zle' -N __shelly_line_set || return 0
+  'builtin' 'zle' -N __shelly_line_notice || return 0
+  local keymap
+  for keymap in main emacs viins vicmd; do
+    'builtin' 'bindkey' -M $keymap '^[[24;16~' __shelly_line_capture 2>/dev/null || return 0
+    'builtin' 'bindkey' -M $keymap '^[[23;16~' __shelly_line_set 2>/dev/null || return 0
+    'builtin' 'bindkey' -M $keymap '^[[19;16~' __shelly_line_notice 2>/dev/null || return 0
+  done
+  __shelly_emit 'line-editor;capture,set,notice'
+}
+
 # Runs once, at the first prompt, after every startup file: put Shelly's
-# precmd first (so $? is still the command's status) and its preexec last.
+# precmd first (so $? is still the command's status) and its preexec last,
+# and bind its keys over whatever keymaps the startup files chose.
 __shelly_install() {
   'builtin' 'emulate' -L zsh
   (( ${+functions[__shelly_install]} )) || return 0
   precmd_functions=(__shelly_precmd ${precmd_functions:#(__shelly_install|__shelly_precmd)})
   preexec_functions=(${preexec_functions:#__shelly_preexec} __shelly_preexec)
   'builtin' 'unfunction' __shelly_install
+  __shelly_bind_line_keys
   __shelly_precmd
 }
 

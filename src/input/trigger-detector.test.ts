@@ -82,6 +82,14 @@ describe('TriggerDetector', () => {
     assert.equal(triggered(detector().push('\u001b[200~::x\u001b[201~')), undefined);
   });
 
+  it('does not fire on a line that was put back until a fresh line starts', () => {
+    const subject = detector();
+    subject.markLineUnknown();
+    assert.equal(forwarded(subject.push('::')), '::');
+    subject.push('\r');
+    assert.ok(triggered(subject.push('::')));
+  });
+
   it('defers to isEnabled, e.g. when vim owns the terminal', () => {
     assert.equal(forwarded(detector(() => false).push('::')), '::');
   });

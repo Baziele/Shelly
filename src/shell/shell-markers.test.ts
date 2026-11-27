@@ -31,6 +31,31 @@ describe('ShellMarkerParser', () => {
     ]);
   });
 
+  it('reads the input line, whose buffer may hold semicolons, and the request it answers', () => {
+    const parser = new ShellMarkerParser(NONCE);
+    assert.deepEqual(events(parser.push(
+      marker('line;7;a; b;100%25 ü%0A;3') + marker('line;;;0') + marker('line;2;;-1') + marker('line;x;y;') + marker('line;'),
+    )), [
+      { type: 'line', request: 7, line: { buffer: 'a; b;100% ü\n', cursor: 3 } },
+      { type: 'line', request: undefined, line: { buffer: '', cursor: 0 } },
+      { type: 'line', request: 2, line: undefined },
+      { type: 'line', request: undefined, line: undefined },
+      { type: 'line', request: undefined, line: undefined },
+    ]);
+    assert.deepEqual(events(parser.push(marker('line-set;4') + marker('line-set;'))), [
+      { type: 'line-set', request: 4 },
+      { type: 'line-set', request: undefined },
+    ]);
+  });
+
+  it('reads what the hooks can do with the line', () => {
+    const parser = new ShellMarkerParser(NONCE);
+    assert.deepEqual(events(parser.push(marker('line-editor;capture,set') + marker('line-editor;'))), [
+      { type: 'line-editor', features: ['capture', 'set'] },
+      { type: 'line-editor', features: [] },
+    ]);
+  });
+
   it('decodes percent-encoded payloads', () => {
     const parser = new ShellMarkerParser(NONCE);
     assert.deepEqual(events(parser.push(marker('exec;echo 100%25;%0Anext ünï'))), [

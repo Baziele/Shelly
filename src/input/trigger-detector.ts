@@ -157,6 +157,11 @@ export class TriggerDetector {
     this.typedLength = 0;
   }
 
+  /** Tell the detector the shell's input line holds text it did not see typed, e.g. a line Shelly put back. */
+  markLineUnknown(): void {
+    this.lineUnknown = true;
+  }
+
   private get isLineEmpty(): boolean {
     return !this.lineUnknown && this.typedLength === 0;
   }
