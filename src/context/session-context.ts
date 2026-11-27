@@ -1,5 +1,6 @@
 import type { CommandLog, CommandRecord } from './command-log.js';
 import type { EnvironmentInfo } from './environment.js';
+import { formatCommandLines, formatEnvironmentLines } from './format-context.js';
 
 /*
  * What Shelly tells an agent about the session. Two shapes:
@@ -102,34 +103,11 @@ export const buildAgentContext = async (
 
 /** Plain-text rendering of an ask context, for a model prompt or for showing the user. */
 export const formatAskContext = (context: AskContext): string => {
-  const { environment } = context;
-  const lines = [
-    `OS: ${environment.os}`,
-    `Shell: ${environment.shellVersion ?? environment.shell}`,
-    ...(environment.terminal ? [`Terminal: ${environment.terminal}`] : []),
-    ...(context.cwd ? [`Working directory: ${context.cwd}`] : []),
-    '',
-  ];
-
+  const lines = [...formatEnvironmentLines(context.environment, context.cwd), ''];
   if (context.commands.length === 0) {
     lines.push('No commands run yet.');
   }
-
-  for (const command of context.commands) {
-    const status = command.exitCode === undefined ? 'exit status unknown' : `exit ${command.exitCode}`;
-    lines.push(`$ ${command.command}`);
-    lines.push(`  [${[status, formatDuration(command.durationMs), command.cwd].filter(Boolean).join(' · ')}]`);
-    if (command.omittedLines > 0) {
-      lines.push(`  [… ${command.omittedLines} earlier lines omitted]`);
-    }
-    if (command.output) {
-      lines.push(...command.output.split('\n').map((line) => `  ${line}`));
-    } else if (command.usedFullScreen) {
-      lines.push('  [full-screen program; its screen is not recorded]');
-    }
-    lines.push('');
-  }
-
+  lines.push(...formatCommandLines(context.commands));
   return lines.join('\n').trimEnd();
 };
 
@@ -171,4 +149,3 @@ const tailLines = (text: string, maxChars: number): { text: string; omittedLines
   return { text: kept.join('\n'), omittedLines: lines.length - kept.length };
 };
 
-const formatDuration = (ms: number): string => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
