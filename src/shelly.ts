@@ -33,8 +33,11 @@ export interface ShellyOptions {
  * - shell:   straight to the shell, watching for a trigger.
  * - opening: a trigger fired and Shelly is getting ready to draw; input is queued.
  * - overlay: to Shelly's input line.
+ * - responding: Shelly is writing a response below the prompt; input is
+ *   queued (and shell output held) until it is done and the shell has its
+ *   line back.
  */
-type Mode = 'shell' | 'opening' | 'overlay';
+type Mode = 'shell' | 'opening' | 'overlay' | 'responding';
 
 /**
  * A transparent proxy between the terminal and the user's shell. Until a
@@ -134,6 +137,7 @@ export class Shelly {
         this.routeToShell(this.detector.push(data));
         break;
       case 'opening':
+      case 'responding':
         this.queuedInput += data;
         break;
       case 'overlay':
@@ -223,13 +227,25 @@ export class Shelly {
 
   private handleSubmit(text: string): void {
     this.overlay?.close();
-    this.returnToShell();
-    this.host.write(`\u001b[1;35m${this.activeTrigger}\u001b[0m ${text}\r\n`);
-    void this.respond(text).then((response) => {
-      this.host.write(`\u001b[90m${toTerminalText(response)}\u001b[0m`);
-      // Have the shell draw a fresh prompt below the response.
-      this.shell.write('\r');
-    });
+    this.mode = 'responding';
+    this.host.write(`\u001b[1;35m${this.activeTrigger}\u001b[0m ${toTerminalText(text)}\r\n`);
+    void this.respond(text)
+      .catch((error: unknown) => `Shelly could not answer: ${error instanceof Error ? error.message : String(error)}`)
+      .then((response) => {
+        if (this.disposed) {
+          return;
+        }
+        this.host.write(`\u001b[90m${toTerminalText(response)}\u001b[0m`);
+        // Have the shell draw a fresh prompt below the response, then pass on
+        // anything typed in the meantime.
+        this.shell.write('\r');
+        const typed = this.queuedInput;
+        this.queuedInput = '';
+        this.returnToShell();
+        if (typed) {
+          this.handleInput(typed);
+        }
+      });
   }
 
   /** Agent integration is not built yet; /context shows what it would be told. */
@@ -284,7 +300,7 @@ export class Shelly {
   }
 }
 
-/** Text for the terminal: line breaks as CRLF, and no stray control characters. */
+/** Text for the terminal: line breaks as CRLF, and no stray control characters (C0, DEL, C1). */
 const toTerminalText = (text: string): string => text
-  .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+  .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
   .replace(/\n/g, '\r\n');
