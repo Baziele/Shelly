@@ -38,7 +38,7 @@
  * prompts to a small model.
  */
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -206,6 +206,10 @@ class Probe {
     try {
       real = realpathSync(target);
     } catch {
+      // A dangling symlink would let a write land wherever it points.
+      if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        throw RequestError.invalidParams({ path }, "a symlink that points nowhere");
+      }
       // A file about to be written: check its directory instead.
       try {
         real = join(realpathSync(dirname(target)), target.slice(dirname(target).length + 1));
@@ -906,7 +910,8 @@ async function main(): Promise<void> {
   } finally {
     await p.shutdown().catch(() => {});
   }
-  if (scenarioName !== "latency" && scenarioName !== "rss") {
+  // A failed run keeps the checked-in fixture; its recording is not one.
+  if (!failed && scenarioName !== "latency" && scenarioName !== "rss") {
     const suffix = [lean ? "lean" : "", caps !== "fs" ? `caps-${caps}` : ""].filter(Boolean).join("-");
     writeFixture(p, suffix ? `${scenarioName}-${suffix}` : scenarioName);
   }
