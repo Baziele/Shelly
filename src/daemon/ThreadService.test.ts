@@ -516,6 +516,24 @@ const showMessage = (seen: string, events: readonly ThreadEvent[]): string =>
   events.reduce((text, event) => (event.type !== 'message.chunk' ? text : event.replace ? event.text : text + event.text), seen);
 
 describe('ThreadService under races and shutdown', () => {
+  it('ends every stuck turn at once when the daemon stops, not one after another', async () => {
+    const fake = new FakeAgents({ ignoresCancel: () => true });
+    let stoppingAt = 0;
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        for (let index = 0; index < 3; index++) {
+          const thread = yield* createAttached(threads);
+          yield* threads.prompt(promptInput(thread.id, 'stuck')).pipe(Stream.take(1), Stream.runDrain);
+        }
+        yield* eventually(() => fake.turns.length === 3);
+        stoppingAt = Date.now();
+      }), { fake });
+    const took = Date.now() - stoppingAt;
+    assert.equal(fake.cancels, 3);
+    // Each stuck cancel is given 2 s: one after another would take 6 s.
+    assert.ok(took < 4000, `stopping took ${took}ms`);
+  });
+
   it('marks a compacted message as the whole text, so a watcher resuming inside it does not repeat it', async () => {
     const fake = new FakeAgents();
     await withThreads((threads) =>

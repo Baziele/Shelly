@@ -39,12 +39,15 @@ export class FakeAgents {
   sessionError: AgentUnavailable | undefined;
   /** When set, `session` waits for it before answering (a cold agent starting). */
   sessionGate: Promise<void> | undefined;
+  /** When it returns true for a turn's prompt, `cancel` never returns and the turn never ends (a stuck agent). */
+  ignoresCancel: ((prompt: string) => boolean) | undefined;
   private nativeCounter = 0;
   private waiters: ((turn: FakeTurn) => void)[] = [];
   private current: Queue.Queue<AgentUpdate> | undefined;
 
-  constructor(options: { script?: (prompt: string) => readonly AgentUpdate[] } = {}) {
+  constructor(options: { script?: (prompt: string) => readonly AgentUpdate[]; ignoresCancel?: (prompt: string) => boolean } = {}) {
     this.script = options.script;
+    this.ignoresCancel = options.ignoresCancel;
   }
 
   /** The next turn the agent receives (or the latest, if it already arrived and nobody took it). */
@@ -78,6 +81,7 @@ export class FakeAgents {
           return Effect.fail(this.sessionError);
         }
         const nativeSessionId = request.nativeSessionId ?? `native-${++this.nativeCounter}`;
+        let lastPrompt = '';
         return Effect.succeed({
           nativeSessionId,
           startedFresh: request.nativeSessionId === null,
@@ -85,15 +89,20 @@ export class FakeAgents {
           prompt: (text: string) =>
             Stream.unwrap(
               Queue.unbounded<AgentUpdate>().pipe(Effect.map((queue) => {
+                lastPrompt = text;
                 this.startTurn(text, request, queue);
                 return Stream.fromQueue(queue).pipe(Stream.takeUntil((update) => update.type === 'end'));
               })),
             ),
-          cancel: Effect.sync(() => {
+          cancel: Effect.suspend(() => {
             this.cancels++;
+            if (this.ignoresCancel?.(lastPrompt)) {
+              return Effect.never;
+            }
             if (this.current) {
               Queue.offerUnsafe(this.current, { type: 'end', stopReason: 'cancelled', error: null });
             }
+            return Effect.void;
           }),
           respond: (requestId: string, optionId: string | null) =>
             requestId.startsWith('unknown')

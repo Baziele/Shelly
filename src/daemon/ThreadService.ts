@@ -6,6 +6,7 @@ import * as Fiber from 'effect/Fiber';
 import * as Layer from 'effect/Layer';
 import * as Semaphore from 'effect/Semaphore';
 import * as PubSub from 'effect/PubSub';
+import * as Scope from 'effect/Scope';
 import * as Stream from 'effect/Stream';
 import {
   AgentFailed,
@@ -129,6 +130,10 @@ const make = Effect.gen(function* () {
   // Turns and background work live as long as the service; closing it
   // interrupts them, which ends running turns as `interrupted`.
   const scope = yield* Effect.scope;
+  // Turns get a child scope that ends them all at once: each may wait up to
+  // CANCEL_ON_SHUTDOWN_TIMEOUT for its agent, and the daemon holds its lock
+  // until they are done.
+  const turnScope = yield* Scope.fork(scope, 'parallel');
 
   const reconciled = yield* store.reconcile(Date.now());
   if (reconciled.length > 0) {
@@ -443,7 +448,7 @@ const make = Effect.gen(function* () {
         yield* emitMode(threadId, thread, session.modes);
       }
       yield* Effect.logInfo(`turn started thread=${threadId} turn=${turn.turnId}`);
-      turn.fiber = yield* runTurn(threadId, thread, turn, formatPromptForAgent(context, text)).pipe(Effect.forkIn(scope));
+      turn.fiber = yield* runTurn(threadId, thread, turn, formatPromptForAgent(context, text)).pipe(Effect.forkIn(turnScope));
       return turn.turnId;
     }).pipe(Effect.onError(() => abandonTurn(threadId, thread, turn, announced)));
   });
