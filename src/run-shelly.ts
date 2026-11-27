@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node --experimental-ffi --no-warnings
+/* The interactive `shelly`: the user's shell in a pty, with Shelly around it. Loaded by index.ts. */
 import { defaultShell } from './shell/shell-session.js';
 import { Shelly } from './shelly.js';
 import { HostTerminal } from './terminal/host-terminal.js';
