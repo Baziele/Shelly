@@ -1,7 +1,7 @@
 import { ansi } from '../terminal/ansi.js';
 import type { CursorPosition } from '../terminal/cursor-report.js';
 import { encodeRow, type PaintSpan } from './inline-painter.js';
-import type { ColorDepth } from './sgr.js';
+import { isBlankStyle, type ColorDepth } from './sgr.js';
 
 export type PaintRow = ReadonlyArray<PaintSpan>;
 
@@ -25,11 +25,16 @@ export interface LiveRegionOptions {
  *
  * The live region always starts at column 1 of the anchor row, and owns every
  * row from there to the bottom of the screen. Between updates the (hidden)
- * cursor is parked on the anchor, so that after a resize the terminal's
- * cursor report says where the live region now starts.
+ * cursor is parked in the first column of the last live row: nothing is
+ * below it to reflow, and column 1 stays on that row's first line whether
+ * or not the terminal rewraps it. After a resize, the terminal's cursor
+ * report, less the height the live rows above it reflowed to, says where the
+ * live region now starts.
  */
 export class LiveRegion {
   private anchorRow = 1;
+  /** Cells of text on each live row above the last one, for working out where they went after a reflow. */
+  private widthsAbovePark: number[] = [];
   private painted: string[] = [];
   private started = false;
   private readonly marginRows: number;
@@ -118,20 +123,26 @@ export class LiveRegion {
     }
     this.painted = encoded;
 
-    output += ansi.cursorTo(this.anchorRow, 1) + ansi.endSynchronizedUpdate;
+    const last = Math.max(0, shown.length - 1);
+    this.widthsAbovePark = shown.slice(0, last).map(textWidth);
+    output += ansi.cursorTo(this.anchorRow + last, 1) + ansi.endSynchronizedUpdate;
     this.screen.write(output);
   }
 
   /**
    * Re-anchor after a resize. `cursor` is where the terminal now reports the
-   * cursor, which was parked on the live region's first row. The old live
+   * cursor, which was parked on the live region's last row. The old live
    * rows are erased; the caller repaints at the new width with `update`.
    */
   relayout(cursor: CursorPosition): void {
     if (!this.started) {
       return;
     }
-    this.anchorRow = Math.min(Math.max(1, cursor.row), this.screen.size.rows);
+    const { cols, rows } = this.screen.size;
+    // Each live row above the parked one now takes as many rows as its text needs at the new width.
+    const above = this.widthsAbovePark.reduce((sum, width) => sum + Math.max(1, Math.ceil(width / cols)), 0);
+    this.anchorRow = Math.min(Math.max(1, cursor.row - above), rows);
+    this.widthsAbovePark = [];
     this.painted = [];
     this.screen.write(ansi.cursorTo(this.anchorRow, 1) + ansi.resetStyle + ansi.eraseDown);
   }
@@ -149,3 +160,17 @@ export class LiveRegion {
     );
   }
 }
+
+/** Cells a row's text takes, trailing blanks left out: what a terminal rewraps. */
+const textWidth = (row: PaintRow): number => {
+  let width = 0;
+  let textEnd = 0;
+  for (const span of row) {
+    const trimmed = span.text.replace(/ +$/, '');
+    if (trimmed.length > 0 || !isBlankStyle(span.style)) {
+      textEnd = width + (trimmed.length > 0 && isBlankStyle(span.style) ? span.width - (span.text.length - trimmed.length) : span.width);
+    }
+    width += span.width;
+  }
+  return textEnd;
+};

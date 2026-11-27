@@ -44,3 +44,41 @@ export const parseKeys = (data: string): Key[] => (data.match(KEY_PATTERN) ?? []
   }
   return { name: 'char', char: sequence };
 });
+
+const PASTE_START = '\u001b[200~';
+const PASTE_END = '\u001b[201~';
+
+/**
+ * Removes bracketed pastes (everything between ESC[200~ and ESC[201~) from
+ * raw input, following a paste across reads. Pasted text is never a key.
+ */
+export class PasteFilter {
+  private inPaste = false;
+
+  filter(data: string): { readonly text: string; readonly pasted: boolean } {
+    let text = '';
+    let pasted = this.inPaste;
+    let rest = data;
+    while (rest) {
+      if (this.inPaste) {
+        const end = rest.indexOf(PASTE_END);
+        if (end < 0) {
+          return { text, pasted: true };
+        }
+        this.inPaste = false;
+        rest = rest.slice(end + PASTE_END.length);
+        continue;
+      }
+      const start = rest.indexOf(PASTE_START);
+      if (start < 0) {
+        text += rest;
+        break;
+      }
+      text += rest.slice(0, start);
+      this.inPaste = true;
+      pasted = true;
+      rest = rest.slice(start + PASTE_START.length);
+    }
+    return { text, pasted };
+  }
+}
