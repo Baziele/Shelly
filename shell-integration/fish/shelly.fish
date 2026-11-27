@@ -30,45 +30,64 @@ if test -n "$__shelly_nonce"
     # sends (F12 and F11 with every modifier held; see src/shell/line-editor.ts).
 
     # Report the line and the cursor (in characters), then clear the line so
-    # Shelly can draw there. A line too long to report is left as it is.
+    # Shelly can draw there. A line too long to report is left as it is. The
+    # answer names the request Shelly left in the line file (`capture <n>`);
+    # none there means Shelly has given up on it.
     function __shelly_line_capture
+        set -l request ''
+        set -l file $__shelly_line_file
+        if test -n "$file" -a -f "$file" -a ! -L "$file"
+            set -l header
+            read header < $file
+            # Anything else is not a capture request: leave it for its own key.
+            if string match -qr -- '^capture [0-9]+$' "$header"
+                set request (string replace -- 'capture ' '' "$header")
+                command rm -f -- $file
+            end
+        end
         # `commandline` prints the line and a newline; the newline is dropped
         # again once encoded.
         set -l line (commandline | string collect -N)
         set -l encoded (string escape --style=url -- "$line")
         set encoded (string replace -r -- '%0A$' '' "$encoded")
         if test (string length -- "$encoded") -gt 60000
-            __shelly_emit 'line;;-1'
+            __shelly_emit "line;$request;;-1"
             return
         end
         set -l cursor (commandline -C)
         commandline -r ''
         commandline -f repaint
-        __shelly_emit "line;$encoded;$cursor"
+        __shelly_emit "line;$request;$encoded;$cursor"
     end
 
-    # Replace the line with the file Shelly wrote: the cursor (in characters)
-    # on the first line, the text after it. The file is removed once read.
+    # Replace the line with the file Shelly wrote: `set <request> <cursor>`
+    # (the cursor in characters) on the first line, the text after it. The
+    # file is removed once read.
     function __shelly_line_set
         set -l file $__shelly_line_file
         test -n "$file" -a -f "$file" -a ! -L "$file"; or return
-        set -l cursor
+        set -l header
         set -l text
         begin
-            read cursor
+            read header
             # Up to a NUL, which never comes: everything else, newlines included.
             read -z text
         end < $file
+        # A capture request belongs to the other key.
+        string match -qr -- '^set [0-9]+ [0-9]+$' "$header"; or return
+        set -l fields (string split -- ' ' "$header")
+        set -l request $fields[2]
+        set -l cursor $fields[3]
         command rm -f -- $file
         set -l length (string length -- "$text")
         commandline -r -- "$text"
-        if string match -qr -- '^[0-9]+$' "$cursor"; and test "$cursor" -lt $length
+        if test "$cursor" -lt $length
             commandline -C $cursor
         else
             commandline -C $length
         end
         commandline -f repaint
-        __shelly_emit 'line-set;'
+        __shelly_emit "line-set;$request"
     end
 
     # In every mode: default (emacs-like) and vi's insert and visual modes.

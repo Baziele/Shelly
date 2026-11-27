@@ -43,13 +43,31 @@ __shelly_precmd() {
 # The input line. Shelly reads and sets it by sending keys no terminal sends
 # (F12 and F11 with every modifier held; see src/shell/line-editor.ts).
 
+__shelly_remove() {
+  'builtin' 'emulate' -L zsh
+  'builtin' 'zf_rm' -f -- $1 2>/dev/null || 'command' 'rm' -f -- $1
+}
+
 # Report the line and the cursor (in characters), then clear the line so
-# Shelly can draw there. A line too long to report is left as it is.
+# Shelly can draw there. A line too long to report is left as it is. The
+# answer names the request Shelly left in the line file (`capture <n>`);
+# none there means Shelly has given up on it.
 __shelly_line_capture() {
   'builtin' 'emulate' -L zsh
+  local file=$__shelly_line_file request=''
+  if [[ -n $file && -f $file && ! -L $file ]]; then
+    IFS= 'builtin' 'read' -r request < $file
+    if [[ $request == 'capture '<-> ]]; then
+      request=${request#capture }
+      __shelly_remove $file
+    else
+      # Not a capture request: leave it for the key it belongs to.
+      request=''
+    fi
+  fi
   __shelly_encode "$BUFFER" ${#BUFFER}
   if (( ${#__shelly_encoded} > 60000 )); then
-    __shelly_emit 'line;;-1'
+    __shelly_emit "line;$request;;-1"
     return 0
   fi
   local cursor=$CURSOR
@@ -57,28 +75,33 @@ __shelly_line_capture() {
   # Redraw before reporting, so the cleared line is on screen by the time
   # Shelly hears about it.
   'builtin' 'zle' -R
-  __shelly_emit "line;$__shelly_encoded;$cursor"
+  __shelly_emit "line;$request;$__shelly_encoded;$cursor"
 }
 
-# Replace the line with the file Shelly wrote: the cursor (in characters) on
-# the first line, the text after it. The file is removed once read.
+# Replace the line with the file Shelly wrote: `set <request> <cursor>` (the
+# cursor in characters) on the first line, the text after it. The file is
+# removed once read.
 __shelly_line_set() {
   'builtin' 'emulate' -L zsh
-  local file=$__shelly_line_file cursor='' text=''
+  local file=$__shelly_line_file header='' request='' cursor='' text=''
   [[ -n $file && -f $file && ! -L $file ]] || return 0
   {
-    IFS= 'builtin' 'read' -r cursor
+    IFS= 'builtin' 'read' -r header
     # Up to a NUL, which never comes: everything else, newlines included.
     IFS= 'builtin' 'read' -r -d '' text
   } < $file
-  'builtin' 'zf_rm' -f -- $file 2>/dev/null || 'command' 'rm' -f -- $file
+  # A capture request belongs to the other key.
+  [[ $header == 'set '<->' '<-> ]] || return 0
+  request=${${header#set }%% *}
+  cursor=${header##* }
+  __shelly_remove $file
   BUFFER=$text
-  if [[ $cursor == <-> ]] && (( cursor < ${#BUFFER} )); then
+  if (( cursor < ${#BUFFER} )); then
     CURSOR=$cursor
   else
     CURSOR=${#BUFFER}
   fi
-  __shelly_emit 'line-set;'
+  __shelly_emit "line-set;$request"
 }
 
 # Bound in every keymap a user might be in, then announced to Shelly.

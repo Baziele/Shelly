@@ -10,10 +10,14 @@
  *   line-editor;<features>  what the hooks can do with the input line, as a
  *                   comma-separated list: capture, set (read and replace it),
  *                   clear, redraw (bash 3.2, which can do neither)
- *   line;<buffer>;<cursor>  the input line and its cursor (in characters),
- *                   which the shell has just cleared; a cursor of -1 means
- *                   the line could not be reported and was left alone
- *   line-set;       the shell has replaced its input line
+ *   line;<request>;<buffer>;<cursor>  the input line and its cursor (in
+ *                   characters), which the shell has just cleared; a cursor
+ *                   of -1 means the line could not be reported and was left
+ *                   alone
+ *   line-set;<request>  the shell has replaced its input line
+ *
+ * <request> is the number Shelly gave the request in the line file, or empty
+ * when the shell found none there (Shelly had given up on it).
  *
  * The line markers answer keys Shelly sends; see line-editor.ts.
  *
@@ -31,9 +35,12 @@ export type ShellEvent =
   | { readonly type: 'done'; readonly exitCode: number | undefined }
   | { readonly type: 'cwd'; readonly path: string }
   | { readonly type: 'line-editor'; readonly features: readonly string[] }
-  /** `line` is absent when the shell could not report it (it was too long, say). */
-  | { readonly type: 'line'; readonly line: ShellInputLine | undefined }
-  | { readonly type: 'line-set' };
+  /**
+   * `request` names the request this answers, if the shell found one; `line`
+   * is absent when the shell could not report it (it was too long, say).
+   */
+  | { readonly type: 'line'; readonly request: number | undefined; readonly line: ShellInputLine | undefined }
+  | { readonly type: 'line-set'; readonly request: number | undefined };
 
 /** The shell's input line as the hooks report it. */
 export interface ShellInputLine {
@@ -163,7 +170,10 @@ export class ShellMarkerParser {
 
     const raw = rest.join(';');
     if (kind === 'line') {
-      return { type: 'line', line: parseLine(raw) };
+      const split = raw.indexOf(';');
+      return split === -1
+        ? { type: 'line', request: undefined, line: undefined }
+        : { type: 'line', request: parseRequest(raw.slice(0, split)), line: parseLine(raw.slice(split + 1)) };
     }
     const payload = decodePayload(raw);
     switch (kind) {
@@ -178,13 +188,15 @@ export class ShellMarkerParser {
       case 'line-editor':
         return { type: 'line-editor', features: payload.split(',').filter(Boolean) };
       case 'line-set':
-        return { type: 'line-set' };
+        return { type: 'line-set', request: parseRequest(payload) };
       default:
         // From a newer hook script; nothing to do with it.
         return 'ignored';
     }
   }
 }
+
+const parseRequest = (text: string): number | undefined => (/^\d+$/.test(text) ? Number(text) : undefined);
 
 /** `<buffer>;<cursor>`: the buffer may hold `;` itself, the cursor never does. */
 const parseLine = (raw: string): ShellInputLine | undefined => {

@@ -166,13 +166,30 @@ if [[ -n "$__shelly_nonce" ]]; then
       __shelly_length=${#1}
     }
 
+    # Digits only, and at least one.
+    __shelly_is_number() {
+      [[ -n "$1" && "$1" != *[!0-9]* ]]
+    }
+
     # Report the line and the cursor (in characters), then clear the line so
-    # Shelly can draw there. A line too long to report is left as it is.
+    # Shelly can draw there. A line too long to report is left as it is. The
+    # answer names the request Shelly left in the line file (`capture <n>`);
+    # none there means Shelly has given up on it.
     __shelly_line_capture() {
-      local line=$READLINE_LINE point=$READLINE_POINT
+      local line=$READLINE_LINE point=$READLINE_POINT file=${__shelly_line_file-} request=''
+      if [[ -n "$file" && -f "$file" && ! -L "$file" ]]; then
+        IFS= builtin read -r request < "$file" || builtin true
+        if [[ "$request" == 'capture '* ]] && __shelly_is_number "${request#capture }"; then
+          request=${request#capture }
+          command rm -f -- "$file"
+        else
+          # Not a capture request: leave it for the key it belongs to.
+          request=''
+        fi
+      fi
       __shelly_encode "$line" "${#line}"
       if (( ${#__shelly_encoded} > 60000 )); then
-        __shelly_emit 'line;;-1'
+        __shelly_emit "line;$request;;-1"
         return 0
       fi
       if [[ "$__shelly_point_in_bytes" == 1 ]]; then
@@ -181,22 +198,28 @@ if [[ -n "$__shelly_nonce" ]]; then
       fi
       READLINE_LINE=''
       READLINE_POINT=0
-      __shelly_emit "line;$__shelly_encoded;$point"
+      __shelly_emit "line;$request;$__shelly_encoded;$point"
     }
 
-    # Replace the line with the file Shelly wrote: the cursor (in
-    # characters) on the first line, the text after it. The file is removed
-    # once read.
+    # Replace the line with the file Shelly wrote: `set <request> <cursor>`
+    # (the cursor in characters) on the first line, the text after it. The
+    # file is removed once read.
     __shelly_line_set() {
-      local file=${__shelly_line_file-} cursor='' text=''
+      local file=${__shelly_line_file-} header='' request='' cursor='' text=''
       [[ -n "$file" && -f "$file" && ! -L "$file" ]] || return 0
       {
-        IFS= builtin read -r cursor || builtin true
+        IFS= builtin read -r header || builtin true
         # Up to a NUL, which never comes: everything else, newlines included.
         IFS= builtin read -r -d '' text || builtin true
       } < "$file"
+      # A capture request belongs to the other key.
+      [[ "$header" == 'set '* ]] || return 0
+      header=${header#set }
+      request=${header%% *}
+      cursor=${header#* }
+      __shelly_is_number "$request" && __shelly_is_number "$cursor" || return 0
       command rm -f -- "$file"
-      if [[ -z "$cursor" || "$cursor" == *[!0-9]* ]] || (( cursor > ${#text} )); then
+      if (( cursor > ${#text} )); then
         cursor=${#text}
       fi
       if [[ "$__shelly_point_in_bytes" == 1 ]]; then
@@ -205,7 +228,7 @@ if [[ -n "$__shelly_nonce" ]]; then
       fi
       READLINE_LINE=$text
       READLINE_POINT=$cursor
-      __shelly_emit 'line-set;'
+      __shelly_emit "line-set;$request"
     }
 
     __shelly_line_features='capture,set'

@@ -31,16 +31,20 @@ describe('ShellMarkerParser', () => {
     ]);
   });
 
-  it('reads the input line, whose buffer may hold semicolons', () => {
+  it('reads the input line, whose buffer may hold semicolons, and the request it answers', () => {
     const parser = new ShellMarkerParser(NONCE);
     assert.deepEqual(events(parser.push(
-      marker('line;a; b;100%25 ü%0A;3') + marker('line;;0') + marker('line;;-1') + marker('line;x;') + marker('line-set;'),
+      marker('line;7;a; b;100%25 ü%0A;3') + marker('line;;;0') + marker('line;2;;-1') + marker('line;x;y;') + marker('line;'),
     )), [
-      { type: 'line', line: { buffer: 'a; b;100% ü\n', cursor: 3 } },
-      { type: 'line', line: { buffer: '', cursor: 0 } },
-      { type: 'line', line: undefined },
-      { type: 'line', line: undefined },
-      { type: 'line-set' },
+      { type: 'line', request: 7, line: { buffer: 'a; b;100% ü\n', cursor: 3 } },
+      { type: 'line', request: undefined, line: { buffer: '', cursor: 0 } },
+      { type: 'line', request: 2, line: undefined },
+      { type: 'line', request: undefined, line: undefined },
+      { type: 'line', request: undefined, line: undefined },
+    ]);
+    assert.deepEqual(events(parser.push(marker('line-set;4') + marker('line-set;'))), [
+      { type: 'line-set', request: 4 },
+      { type: 'line-set', request: undefined },
     ]);
   });
 

@@ -5,6 +5,12 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { LINE_KEYS, LineEditor } from './line-editor.js';
 
+/** The request number Shelly left in the line file, as the hooks read it. */
+const requestIn = (file: string | undefined): number | undefined => {
+  const match = file && existsSync(file) ? /^(?:capture|set) (\d+)/.exec(readFileSync(file, 'utf8')) : undefined;
+  return match ? Number(match[1]) : undefined;
+};
+
 describe('LineEditor', () => {
   let runtimeDir: string;
   let editor: LineEditor | undefined;
@@ -47,8 +53,10 @@ describe('LineEditor', () => {
     const subject = create(['capture', 'set']);
     shell = (data) => {
       assert.equal(data, LINE_KEYS.capture);
+      const request = requestIn(subject.lineFile);
+      assert.ok(request !== undefined, 'the request is in the line file');
       // "a😀b|c": the shell counts the cursor in characters.
-      queueMicrotask(() => subject.handleEvent({ type: 'line', line: { buffer: 'a😀bc', cursor: 3 } }));
+      queueMicrotask(() => subject.handleEvent({ type: 'line', request, line: { buffer: 'a😀bc', cursor: 3 } }));
     };
     assert.deepEqual(await subject.capture(), { buffer: 'a😀bc', cursor: 4 });
   });
@@ -56,7 +64,7 @@ describe('LineEditor', () => {
   it('waits for the redraw that follows the answer', async () => {
     const subject = create(['capture']);
     shell = () => queueMicrotask(() => {
-      subject.handleEvent({ type: 'line', line: { buffer: 'ls', cursor: 2 } });
+      subject.handleEvent({ type: 'line', request: 1, line: { buffer: 'ls', cursor: 2 } });
       setTimeout(() => subject.observeOutput('\r$ \u001b[K'), 0);
     });
     let settled = false;
@@ -70,10 +78,11 @@ describe('LineEditor', () => {
     const subject = create(['capture', 'set'], { timeoutMs: 10 });
     assert.equal(await subject.capture(), undefined);
     written = [];
-    subject.handleEvent({ type: 'line', line: { buffer: 'late', cursor: 4 } });
+    // The shell read the request just before Shelly gave up on it.
+    subject.handleEvent({ type: 'line', request: 1, line: { buffer: 'late', cursor: 4 } });
     assert.deepEqual(written, [LINE_KEYS.set]);
-    assert.equal(readFileSync(subject.lineFile ?? '', 'utf8'), '4\nlate');
-    subject.handleEvent({ type: 'line-set' });
+    assert.equal(readFileSync(subject.lineFile ?? '', 'utf8'), 'set 2 4\nlate');
+    subject.handleEvent({ type: 'line-set', request: 2 });
   });
 
   it('does nothing away from the prompt', async () => {
@@ -92,13 +101,16 @@ describe('LineEditor', () => {
     shell = (data) => {
       assert.equal(data, LINE_KEYS.set);
       seen.push({ content: readFileSync(file, 'utf8'), mode: statSync(file).mode & 0o777 });
-      queueMicrotask(() => subject.handleEvent({ type: 'line-set' }));
+      const request = requestIn(file);
+      // An acknowledgement of some other request changes nothing.
+      queueMicrotask(() => subject.handleEvent({ type: 'line-set', request: 99 }));
+      setTimeout(() => subject.handleEvent({ type: 'line-set', request }), 5);
     };
     await subject.replace("echo '$HOME' \"!!\"\n\tdone 😀");
     await subject.restore({ buffer: 'a😀bc', cursor: 3 });
     assert.deepEqual(seen, [
-      { content: "25\necho '$HOME' \"!!\"\n\tdone 😀", mode: 0o600 },
-      { content: '2\na😀bc', mode: 0o600 },
+      { content: "set 1 25\necho '$HOME' \"!!\"\n\tdone 😀", mode: 0o600 },
+      { content: 'set 2 2\na😀bc', mode: 0o600 },
     ]);
     assert.ok(!existsSync(file));
   });
@@ -111,9 +123,12 @@ describe('LineEditor', () => {
 
   it('sends keys for one operation at a time, the first straight away', async () => {
     const subject = create(['capture', 'set']);
-    shell = (data) => queueMicrotask(() => subject.handleEvent(
-      data === LINE_KEYS.capture ? { type: 'line', line: { buffer: 'x', cursor: 1 } } : { type: 'line-set' },
-    ));
+    shell = (data) => {
+      const request = requestIn(subject.lineFile);
+      queueMicrotask(() => subject.handleEvent(
+        data === LINE_KEYS.capture ? { type: 'line', request, line: { buffer: 'x', cursor: 1 } } : { type: 'line-set', request },
+      ));
+    };
     const first = subject.replace('one');
     assert.deepEqual(written, [LINE_KEYS.set], 'written before replace() returns');
     const second = subject.capture();
@@ -157,6 +172,48 @@ describe('LineEditor', () => {
     subject.filterInput('ls\r');
     assert.equal(subject.isAtPrompt, false);
     assert.equal(subject.filterInput(LINE_KEYS.capture), LINE_KEYS.capture, 'a running program gets every key');
+  });
+
+  it('matches each answer to its request, and puts back only one that came too late', async () => {
+    const subject = create(['capture', 'set'], { timeoutMs: 20 });
+    const file = subject.lineFile ?? '';
+    const requests: (number | undefined)[] = [];
+    const lines: string[] = [];
+    shell = (data) => {
+      const content = existsSync(file) ? readFileSync(file, 'utf8') : '';
+      if (data === LINE_KEYS.capture) {
+        requests.push(/^capture (\d+)\n$/.test(content) ? Number(content.slice(8, -1)) : undefined);
+      } else if (data === LINE_KEYS.set) {
+        lines.push(content);
+        const request = Number(/^set (\d+) /.exec(content)?.[1]);
+        queueMicrotask(() => subject.handleEvent({ type: 'line-set', request }));
+      }
+    };
+
+    assert.equal(await subject.capture(), undefined, 'the first capture times out');
+    assert.ok(!existsSync(file), 'its request is withdrawn');
+    const second = subject.capture();
+    // The shell gets to the first key only now; its request is gone, so the answer names none.
+    subject.handleEvent({ type: 'line', request: undefined, line: { buffer: 'old', cursor: 3 } });
+    subject.handleEvent({ type: 'line', request: requests[1], line: { buffer: 'new', cursor: 1 } });
+    assert.deepEqual(await second, { buffer: 'new', cursor: 1 }, 'the second capture gets its own answer');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(requests, [1, 2]);
+    assert.deepEqual(lines, ['set 3 3\nold'], 'the late line is put back');
+
+    // A repeat of an answer already taken is not a line the user lost.
+    subject.handleEvent({ type: 'line', request: requests[1], line: { buffer: 'new', cursor: 1 } });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(lines.length, 1);
+  });
+
+  it('notes Enter right after a paste, and only outside it', () => {
+    const subject = create(['capture', 'set']);
+    subject.filterInput('\u001b[200~echo one\r\n');
+    subject.filterInput('echo two\n\u001b[201~');
+    assert.equal(subject.isAtPrompt, true, 'newlines in a paste split across chunks are text');
+    subject.filterInput('\u001b[200~ls\u001b[201~\r');
+    assert.equal(subject.isAtPrompt, false, 'Enter after the paste starts a command');
   });
 
   it('reports nothing it cannot do', () => {

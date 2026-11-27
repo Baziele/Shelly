@@ -12,10 +12,16 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  * modifier held, which zle, readline and fish 4 can all bind), and the hooks
  * in shell-integration/ bind them to widgets that answer with a marker:
  *
- *   capture  report `line;<buffer>;<cursor>`, then clear the line
- *   set      replace the line with the line file, delete it, report `line-set`
+ *   capture  report `line;<request>;<buffer>;<cursor>`, then clear the line
+ *   set      replace the line with the line file, delete it, report `line-set;<request>`
  *   clear    bash 3.2: clear the line, so Shelly can type a new one
  *   redraw   bash 3.2: redraw the prompt and line where the cursor is
+ *
+ * Each request is numbered in the line file (`capture <n>`, or `set <n>
+ * <cursor>` and the text), and the hooks echo the number back, so an answer
+ * is matched to its request. Shelly withdraws the file of a request it gives
+ * up on, so a late answer names none, and Shelly puts back the line it
+ * reports (the shell has cleared it by then).
  *
  * The line file lives in a directory only the user can open, under a fresh
  * random name for each session, and exists only between Shelly writing it
@@ -74,10 +80,16 @@ const DEFAULT_SETTLE_MS = 30;
 const MAX_SETTLE_MS = 300;
 
 const BRACKETED_PASTE_MODE = /\u001b\[\?2004([hl])/g;
+const PASTE_START = '\u001b[200~';
+const PASTE_END = '\u001b[201~';
 /** C0 and C1 controls and DEL, except tab and line feed. */
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
+/** Requests given up on, remembered so their late answers can be told from repeats. */
+const MAX_ABANDONED = 16;
+
 interface PendingCapture {
+  readonly request: number;
   readonly resolve: (line: ShellInputLine | undefined) => void;
   readonly timer: NodeJS.Timeout;
   /** Set once the shell has answered; resolved when its output goes quiet. */
@@ -86,6 +98,7 @@ interface PendingCapture {
 }
 
 interface PendingSet {
+  readonly request: number;
   readonly resolve: () => void;
   readonly timer: NodeJS.Timeout;
 }
@@ -103,6 +116,10 @@ export class LineEditor {
   private bracketedPaste = false;
   private pendingCapture: PendingCapture | undefined;
   private pendingSet: PendingSet | undefined;
+  private nextRequest = 1;
+  private readonly abandoned = new Set<number>();
+  /** Inside a bracketed paste the user is sending, which may span chunks. */
+  private inPaste = false;
   /** Operations run one at a time; the tail of the queue. */
   private tail: Promise<unknown> = Promise.resolve();
   private inFlight = 0;
@@ -125,7 +142,7 @@ export class LineEditor {
 
   /** The shell can report its line (and clear it). */
   get canCapture(): boolean {
-    return this.features.has('capture');
+    return this.features.has('capture') && this.lineFile !== undefined;
   }
 
   /** The shell's line can be replaced: set exactly, or failing that, cleared and typed. */
@@ -158,10 +175,10 @@ export class LineEditor {
         this.atPrompt = false;
         break;
       case 'line':
-        this.handleLine(event.line);
+        this.handleLine(event.request, event.line);
         break;
       case 'line-set':
-        if (this.pendingSet) {
+        if (this.pendingSet && event.request === this.pendingSet.request) {
           clearTimeout(this.pendingSet.timer);
           this.pendingSet.resolve();
           this.pendingSet = undefined;
@@ -191,15 +208,15 @@ export class LineEditor {
    * and notes Enter, after which the shell may have started a command.
    */
   filterInput(data: string): string {
+    // A pasted newline is text, not Enter.
+    const typed = this.outsidePaste(data);
     if (!this.atPrompt) {
       return data;
     }
-    const filtered = data.includes('\u001b[') ? data.replace(LINE_KEY_PATTERN, '') : data;
-    // A pasted newline is text, not Enter.
-    if (/[\r\n]/.test(filtered) && !filtered.includes('\u001b[200~')) {
+    if (/[\r\n]/.test(typed)) {
       this.atPrompt = false;
     }
-    return filtered;
+    return data.includes('\u001b[') ? data.replace(LINE_KEY_PATTERN, '') : data;
   }
 
   /**
@@ -212,14 +229,21 @@ export class LineEditor {
       if (!this.canCapture || !this.isAtPrompt) {
         return undefined;
       }
+      const file = this.lineFile!;
+      const request = this.nextRequest++;
+      writeRequest(file, `capture ${request}\n`);
       const line = await new Promise<ShellInputLine | undefined>((resolve) => {
         const timer = setTimeout(() => {
           this.pendingCapture = undefined;
+          this.abandon(request);
+          removeFile(file);
           resolve(undefined);
         }, this.timeoutMs);
-        this.pendingCapture = { resolve, timer };
+        this.pendingCapture = { request, resolve, timer };
         this.write(LINE_KEYS.capture);
       });
+      // The hooks remove it once read; this covers a shell that never did.
+      removeFile(file);
       return line && { buffer: line.buffer, cursor: codePointsToIndex(line.buffer, line.cursor) };
     });
   }
@@ -284,19 +308,57 @@ export class LineEditor {
     return result;
   }
 
-  private handleLine(line: ShellInputLine | undefined): void {
+  private handleLine(request: number | undefined, line: ShellInputLine | undefined): void {
     const capture = this.pendingCapture;
-    if (!capture || capture.answer) {
-      // An answer that came after Shelly stopped waiting: the shell has
-      // cleared the line, so put it straight back.
-      if (line && line.buffer && this.canSet) {
-        this.setLine(line.buffer, codePointsToIndex(line.buffer, line.cursor)).catch(() => undefined);
-      }
+    if (capture && !capture.answer && request === capture.request) {
+      clearTimeout(capture.timer);
+      capture.answer = { line, deadline: Date.now() + MAX_SETTLE_MS };
+      this.settle(capture);
       return;
     }
-    clearTimeout(capture.timer);
-    capture.answer = { line, deadline: Date.now() + MAX_SETTLE_MS };
-    this.settle(capture);
+    // An answer to a request Shelly gave up on: no request (its file was
+    // withdrawn first) or one it abandoned. The shell has cleared the line,
+    // so put it straight back. Anything else repeats an answer already taken.
+    const late = request === undefined || this.abandoned.delete(request);
+    if (late && line?.buffer && this.canSet) {
+      this.setLine(line.buffer, codePointsToIndex(line.buffer, line.cursor)).catch(() => undefined);
+    }
+  }
+
+  private abandon(request: number): void {
+    this.abandoned.add(request);
+    if (this.abandoned.size > MAX_ABANDONED) {
+      this.abandoned.delete(this.abandoned.values().next().value!);
+    }
+  }
+
+  /** The parts of the user's input outside bracketed pastes, following pastes across chunks. */
+  private outsidePaste(data: string): string {
+    if (!this.inPaste && !data.includes('\u001b[200~')) {
+      return data;
+    }
+    let outside = '';
+    let index = 0;
+    while (index < data.length) {
+      if (this.inPaste) {
+        const end = data.indexOf(PASTE_END, index);
+        if (end === -1) {
+          break;
+        }
+        this.inPaste = false;
+        index = end + PASTE_END.length;
+      } else {
+        const start = data.indexOf(PASTE_START, index);
+        if (start === -1) {
+          outside += data.slice(index);
+          break;
+        }
+        outside += data.slice(index, start);
+        this.inPaste = true;
+        index = start + PASTE_START.length;
+      }
+    }
+    return outside;
   }
 
   /** The shell redraws its cleared line right after answering; wait for that to reach the screen. */
@@ -330,16 +392,15 @@ export class LineEditor {
   private async setThroughFile(text: string, cursor: number): Promise<void> {
     const file = this.lineFile!;
     const codePoints = Array.from(text.slice(0, Math.max(0, cursor))).length;
-    removeFile(file);
-    // `wx`: never through something already at that path.
-    writeFileSync(file, `${codePoints}\n${text}`, { mode: 0o600, flag: 'wx' });
+    const request = this.nextRequest++;
+    writeRequest(file, `set ${request} ${codePoints}\n${text}`);
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           this.pendingSet = undefined;
           reject(new Error('The shell did not take the new line.'));
         }, this.timeoutMs);
-        this.pendingSet = { resolve, timer };
+        this.pendingSet = { request, resolve, timer };
         this.write(LINE_KEYS.set);
       });
     } finally {
@@ -375,6 +436,12 @@ const codePointsToIndex = (text: string, count: number): number => {
     seen++;
   }
   return index;
+};
+
+/** A fresh file only the user can read; `wx` never writes through something already at that path. */
+const writeRequest = (file: string, content: string): void => {
+  removeFile(file);
+  writeFileSync(file, content, { mode: 0o600, flag: 'wx' });
 };
 
 const removeFile = (file: string): void => {
