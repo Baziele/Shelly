@@ -3,15 +3,66 @@ import { afterEach, describe, it } from 'node:test';
 import { EmulatedTerminal } from '../../../test/support/emulated-terminal.js';
 import { useModernWidths } from '../../../test/tools/unicode.js';
 import type { ThreadEvent } from '../../protocol/schema.js';
-import { AgentView, type AgentAction } from './agent-view.js';
-import { formatTool } from './format.js';
+import { AgentView, type AgentAction, type ViewTimers } from './agent-view.js';
+import { diffOf } from './diff.js';
 import { renderHistory } from './history.js';
 
 /*
- * Regressions from an adversarial review of the inline UI: input that must
- * not answer prompts, resizes, CPU after big output, teardown, and turns
- * that end without turn.ended.
+ * Regressions from reviews of the inline UI: input that must not answer
+ * prompts, resizes (missed ones included), cost after big output, teardown,
+ * and turns that end without turn.ended.
+ *
+ * Nothing here depends on wall-clock speed: the view gets a fake clock and
+ * fake timers, and assertions count things rather than time them. Timing
+ * checks live in scripts/ui-perf-check.ts.
  */
+
+/** Fake timers the test fires by hand, and a clock it moves by hand. */
+class FakeTimers implements ViewTimers {
+  now = 1_000_000;
+  private next = 1;
+  readonly pending = new Map<number, { callback: () => void; at: number; every?: number }>();
+
+  setTimeout(callback: () => void, ms: number): unknown {
+    const id = this.next++;
+    this.pending.set(id, { callback, at: this.now + ms });
+    return id;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.pending.delete(handle as number);
+  }
+
+  setInterval(callback: () => void, ms: number): unknown {
+    const id = this.next++;
+    this.pending.set(id, { callback, at: this.now + ms, every: ms });
+    return id;
+  }
+
+  clearInterval(handle: unknown): void {
+    this.pending.delete(handle as number);
+  }
+
+  /** Move the clock on, firing every timer that falls due, in order. */
+  advance(ms: number): void {
+    const end = this.now + ms;
+    for (;;) {
+      const due = [...this.pending.entries()].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) {
+        break;
+      }
+      const [id, timer] = due;
+      this.now = timer.at;
+      if (timer.every) {
+        timer.at += timer.every;
+      } else {
+        this.pending.delete(id);
+      }
+      timer.callback();
+    }
+    this.now = end;
+  }
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 let seq = 0;
@@ -23,6 +74,7 @@ const permission = event({
     { optionId: 'no', name: 'Reject', kind: 'reject_once' },
   ],
 });
+const paragraphs = Array.from({ length: 3 }, (_, index) => `Paragraph ${index + 1} explains a part of the change in a sentence long enough to wrap.`).join('\n\n');
 
 let view: AgentView | undefined;
 afterEach(() => {
@@ -30,51 +82,78 @@ afterEach(() => {
   view = undefined;
 });
 
-const setup = async (cols: number, rows: number) => {
-  const term = new EmulatedTerminal(cols, rows);
+interface SetupOptions {
+  readonly reflow?: boolean;
+  /** Replace the terminal's cursor query, e.g. with one that fails. */
+  readonly query?: () => Promise<{ row: number; col: number }>;
+}
+
+const setup = async (cols: number, rows: number, options: SetupOptions = {}) => {
+  const term = new EmulatedTerminal(cols, rows, { reflow: options.reflow ?? true });
   useModernWidths(term.terminal);
   term.write('~/acme $ :: question\r\n');
-  view = new AgentView(term, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev' });
+  const timers = new FakeTimers();
+  const host = options.query
+    ? { get size() { return term.size; }, write: term.write, queryCursorPosition: options.query }
+    : term;
+  view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
   const actions: AgentAction[] = [];
   view.onAction((action) => actions.push(action));
   view.start(await term.cursor());
-  view.apply(event({ type: 'turn.started', text: 'q', at: Date.now() }));
-  return { term, view, actions };
+  view.apply(event({ type: 'turn.started', text: 'q', at: timers.now }));
+  return { term, view, actions, timers };
 };
 
+/** Poll until the frames in flight have been drawn (no timing assumption: it waits as long as it takes). */
 const waitForScreen = async (term: EmulatedTerminal, predicate: (lines: string[]) => boolean): Promise<void> => {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 500; attempt++) {
     if (predicate(await term.screen())) {
       return;
     }
-    await sleep(20);
+    await sleep(10);
   }
   throw new Error(`timed out; screen:\n${(await term.screen()).join('\n')}`);
 };
 
-/** A prompt that has been on screen long enough to take keys. */
+const settle = async (term: EmulatedTerminal): Promise<void> => {
+  let last = -1;
+  for (let attempt = 0; attempt < 500 && term.output().length !== last; attempt++) {
+    last = term.output().length;
+    await sleep(30);
+  }
+};
+
+/** A prompt on screen whose arming delay has passed on the fake clock. */
 const armedPrompt = async () => {
   const context = await setup(80, 24);
   context.view.apply(permission);
   await waitForScreen(context.term, (lines) => lines.some((line) => line.includes('wants to')));
-  await sleep(350);
+  context.timers.now += 400;
   return context;
 };
 
 describe('a permission prompt takes only deliberate keys', () => {
-  it('ignores a bracketed paste, even one split across reads, that contains y', async () => {
+  it('hands a bracketed paste back, even one split across reads, and never answers from it', async () => {
     const { view, actions } = await armedPrompt();
-    assert.equal(view.handleInput('\u001b[200~hey, why is this slow?\u001b[201~'), true);
-    view.handleInput('\u001b[200~yes y');
-    view.handleInput('\r y\u001b[201~');
+    assert.equal(view.handleInput('\u001b[200~hey, why is this slow?\u001b[201~'), false, 'the paste is handed back for the shell');
+    assert.equal(view.handleInput('\u001b[200~yes y'), false);
+    assert.equal(view.handleInput('\r y\u001b[201~'), false);
     assert.deepEqual(actions, []);
-    view.handleInput('y');
+    assert.equal(view.handleInput('y'), true);
     assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId: 'once' }], 'a typed y still answers');
   });
 
-  it('ignores typed-ahead text arriving as one burst', async () => {
+  it('gives up on a paste whose end marker never comes', async () => {
+    const { view, actions, timers } = await armedPrompt();
+    view.handleInput('\u001b[200~pasted text, end marker lost');
+    timers.now += 600;
+    view.handleInput('y');
+    assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId: 'once' }]);
+  });
+
+  it('hands typed-ahead text arriving as one burst back, unanswered', async () => {
     const { view, actions } = await armedPrompt();
-    assert.equal(view.handleInput('git status\r'), true);
+    assert.equal(view.handleInput('git status\r'), false);
     assert.deepEqual(actions, []);
   });
 
@@ -87,82 +166,166 @@ describe('a permission prompt takes only deliberate keys', () => {
   });
 
   it('waits for the rest of an escape sequence split across reads', async () => {
-    const { view, actions } = await armedPrompt();
+    const { view, actions, timers } = await armedPrompt();
     view.handleInput('\u001b');
     view.handleInput('[C');
-    await sleep(60);
+    timers.advance(100);
     assert.deepEqual(actions, [], 'the split arrow key was taken for Esc');
     view.handleInput('\r');
     assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId: 'no' }]);
   });
-});
 
-describe('a resize mid-stream', () => {
-  const paragraphs = Array.from({ length: 3 }, (_, index) => `Paragraph ${index + 1} explains a part of the change in a sentence long enough to wrap.`).join('\n\n');
+  it('takes a lone Esc as Esc once the wait is over', async () => {
+    const { view, actions, timers } = await armedPrompt();
+    view.handleInput('\u001b');
+    timers.advance(100);
+    assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId: 'no' }]);
+  });
 
-  for (const settleMs of [60, 200]) {
-    it(`keeps committed text whole when relayout comes ${settleMs} ms after the resize`, async () => {
-      const { term, view } = await setup(90, 16);
-      view.apply(event({ type: 'tool.updated', tool: { id: 'a', title: 'pnpm test', kind: 'execute', status: 'completed', locations: [], content: [] } }));
-      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: paragraphs }));
-      view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-      await sleep(200);
-      // xterm.js parses writes asynchronously; a real terminal has drawn everything before the user drags it.
-      await term.flush();
-      term.resize(50, 16);
-      const writtenAtResize = term.output().length;
-      await sleep(settleMs);
-      assert.equal(term.output().length, writtenAtResize, 'painted before relayout, at the old width');
-      await view.relayout();
-      await sleep(150);
-      view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'completed', locations: [], content: [] } }));
-      view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 3000 }));
-      await view.finish();
-      const lines = await term.logicalLines();
-      for (const n of [1, 2, 3]) {
-        assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost or doubled:\n${lines.join('\n')}`);
-      }
-      assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
-      assert.ok(!lines.some((line) => /esc background|Running/.test(line)), `live rows stranded:\n${lines.join('\n')}`);
-      assert.ok(!lines.some((line, index) => line === '' && lines[index + 1] === ''), `a doubled blank row:\n${lines.join('\n')}`);
+  for (const [label, read] of [['alone', '\u0003'], ['amid other keys', 'ab\u0003c'], ['inside a paste', '\u001b[200~x\u0003y\u001b[201~']] as const) {
+    it(`always stops on Ctrl-C ${label}, prompt open or not`, async () => {
+      const { view, actions } = await armedPrompt();
+      assert.equal(view.handleInput(read), true);
+      assert.deepEqual(actions, [{ type: 'cancel' }]);
     });
   }
 
-  it('keeps the live region in place through a narrowing and then a widening resize', async () => {
-    const { term, view } = await setup(90, 16);
+  it('stops on Ctrl-C even while an unterminated paste is open', async () => {
+    const { view, actions } = await armedPrompt();
+    view.handleInput('\u001b[200~still pasting');
+    view.handleInput('\u0003');
+    assert.deepEqual(actions, [{ type: 'cancel' }]);
+  });
+});
+
+describe('a resize mid-stream', () => {
+  const streamWithLiveTool = async (term: EmulatedTerminal, view: AgentView) => {
+    view.apply(event({ type: 'tool.updated', tool: { id: 'a', title: 'pnpm test', kind: 'execute', status: 'completed', locations: [], content: [] } }));
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: paragraphs }));
     view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-    await sleep(200);
-    for (const cols of [50, 120, 40]) {
-      await term.flush();
-      term.resize(cols, 16);
-      await view.relayout();
-      await sleep(150);
-    }
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 10')));
+    await settle(term);
+  };
+
+  const endTurn = async (view: AgentView) => {
     view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'completed', locations: [], content: [] } }));
     view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 3000 }));
     await view.finish();
-    const lines = await term.logicalLines();
-    assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
-    assert.ok(!lines.some((line) => /esc|Running/.test(line)), lines.join('\n'));
+  };
+
+  const assertWhole = (lines: string[]): void => {
     for (const n of [1, 2, 3]) {
-      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, lines.join('\n'));
+      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost or doubled:\n${lines.join('\n')}`);
     }
+    assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
+    assert.ok(!lines.some((line) => /esc background|Running/.test(line)), `live rows stranded:\n${lines.join('\n')}`);
+    assert.ok(!lines.some((line, index) => line === '' && lines[index + 1] === ''), `a doubled blank row:\n${lines.join('\n')}`);
+  };
+
+  it('paints nothing between the resize and relayout(), then keeps committed text whole', async () => {
+    const { term, view } = await setup(90, 16);
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    const writtenAtResize = term.output().length;
+    // An update arrives before relayout: it must wait for it.
+    view.apply(event({ type: 'message.chunk', messageId: 'm2', kind: 'text', text: 'More.' }));
+    await sleep(100);
+    assert.equal(term.output().length, writtenAtResize, 'painted at the old anchor after a resize');
+    await view.relayout();
+    await endTurn(view);
+    assertWhole(await term.logicalLines());
+  });
+
+  it('relays out by itself once a resize nobody passed on has settled', async () => {
+    const { term, view, timers } = await setup(90, 16);
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    timers.advance(80);
+    await sleep(20);
+    timers.advance(200);
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 10') && line.length <= 50));
+    await endTurn(view);
+    assertWhole(await term.logicalLines());
+  });
+
+  it('commits the final output when finish() comes after a resize nobody relaid out for', async () => {
+    const { term, view } = await setup(90, 16);
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    await endTurn(view);
+    const lines = await term.logicalLines();
+    assertWhole(lines);
+    assert.match(lines.at(-1)!, /^✓ /);
+  });
+
+  it('keeps the live region in place through a narrowing and then a widening resize', async () => {
+    const { term, view } = await setup(90, 16);
+    await streamWithLiveTool(term, view);
+    for (const cols of [50, 120, 40]) {
+      term.resize(cols, 16);
+      await view.relayout();
+      await settle(term);
+    }
+    await endTurn(view);
+    assertWhole(await term.logicalLines());
   });
 
   it('leaves no extra blank row when only the status line is live', async () => {
     const { term, view } = await setup(90, 16);
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: paragraphs }));
     view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'completed', locations: [], content: [] } }));
-    await sleep(200);
-    await term.flush();
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('esc background')));
+    await settle(term);
     term.resize(50, 16);
     await view.relayout();
-    await sleep(150);
     view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 3000 }));
     await view.finish();
     const lines = await term.logicalLines();
     assert.ok(!lines.some((line, index) => line === '' && lines[index + 1] === ''), `a doubled blank row:\n${lines.join('\n')}`);
+  });
+
+  it('never paints over committed text when the cursor query fails', async () => {
+    const { term, view } = await setup(90, 16, { query: () => Promise.reject(new Error('no answer')) });
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    await view.relayout();
+    await endTurn(view);
+    const lines = await term.logicalLines();
+    for (const n of [1, 2, 3]) {
+      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost:\n${lines.join('\n')}`);
+    }
+    assert.ok(lines.includes('● $ pnpm test'), lines.join('\n'));
+  });
+
+  it('keeps committed text whole in a terminal that does not reflow', async () => {
+    const { term, view } = await setup(90, 16, { reflow: false });
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    await view.relayout();
+    await endTurn(view);
+    // Rows are cut at the new width rather than rewrapped; each paragraph's start is still there once.
+    const lines = await term.allLines();
+    for (const n of [1, 2, 3]) {
+      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost:\n${lines.join('\n')}`);
+    }
+    assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
+    assert.ok(!lines.some((line) => /esc background|Running/.test(line)), lines.join('\n'));
+  });
+
+  it('re-anchors correctly around wide characters that wrap', async () => {
+    const { term, view } = await setup(90, 16);
+    const wide = `${'漢字'.repeat(20)}末`;
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `${wide}\n\nstill streaming ${'漢'.repeat(30)}` }));
+    view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 10')));
+    await settle(term);
+    term.resize(47, 16);
+    await view.relayout();
+    await endTurn(view);
+    const lines = await term.logicalLines();
+    assert.equal(lines.filter((line) => line.startsWith('漢字漢字')).length, 1, lines.join('\n'));
+    assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
+    assert.ok(!lines.some((line) => /esc background|Running/.test(line)), lines.join('\n'));
   });
 });
 
@@ -171,70 +334,42 @@ describe('cost after big output', { timeout: 60_000 }, () => {
     const { term, view } = await setup(100, 30);
     const code = Array.from({ length: 5000 }, (_, index) => `const value${index} = compute(${index});`).join('\n');
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `\`\`\`ts\n${code}` }));
-    await sleep(300);
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('value4999')));
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: '\n```\n\nDone.' }));
     view.apply(event({ type: 'tool.updated', tool: { id: 't', title: 'sleep 60', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
     await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 60')));
-    await sleep(300);
-    assert.ok((view as unknown as { bufferRows: number }).bufferRows <= 60, 'the buffer stayed 5,000 rows tall');
-    const before = process.cpuUsage();
-    await sleep(1000);
-    const used = process.cpuUsage(before);
-    const share = (used.user + used.system) / 1000 / 1000;
-    assert.ok(share < 0.3, `the idle spinner costs ${(share * 100).toFixed(0)}% of a core`);
-  });
-
-  it('counts OpenTUI drawing in the frame cost', async () => {
-    const { view } = await setup(100, 30);
-    const code = Array.from({ length: 3000 }, (_, index) => `line ${index}`).join('\n');
-    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `\`\`\`\n${code}` }));
-    await sleep(400);
-    const statsBefore = view.renderStats;
-    const cpuBefore = process.cpuUsage();
-    await sleep(1000);
-    const cpu = process.cpuUsage(cpuBefore);
-    const statsAfter = view.renderStats;
-    const frames = statsAfter.frames - statsBefore.frames;
-    const reportedMs = statsAfter.averageFrameMs * statsAfter.frames - statsBefore.averageFrameMs * statsBefore.frames;
-    const cpuMs = (cpu.user + cpu.system) / 1000;
-    assert.ok(frames > 0);
-    // Nearly all the work here is OpenTUI drawing the open block; the stats must not leave it out.
-    assert.ok(reportedMs >= cpuMs * 0.3, `stats report ${reportedMs.toFixed(0)} ms for ${frames} frames that took ${cpuMs.toFixed(0)} ms of CPU`);
+    await settle(term);
+    assert.ok((view as unknown as { bufferRows: number }).bufferRows <= 60, 'the buffer stayed 5,000 rows tall: every frame redraws it all');
   });
 
   it('redraws a waiting prompt about once a second, not every spinner frame', async () => {
-    const { view } = await armedPrompt();
+    const { term, view, timers } = await armedPrompt();
+    await settle(term);
     const before = view.renderStats.frames;
-    await sleep(1100);
-    const frames = view.renderStats.frames - before;
-    assert.ok(frames <= 3, `${frames} frames in a second of waiting`);
-  });
-
-  it('formats a running edit with a big diff cheaply on every spinner frame', () => {
-    const before = Array.from({ length: 1400 }, (_, index) => `line ${index}`).join('\n');
-    const after = Array.from({ length: 1400 }, (_, index) => `line ${index} changed`).join('\n');
-    const tool = { id: 'x', title: 'Edit a.ts', kind: 'edit', status: 'in_progress', locations: [], content: [{ type: 'diff', path: '/a.ts', oldText: before, newText: after, truncated: false }] } as never;
-    const context = { cwd: '/', home: '/h', width: 100, agentName: 'claude', spinner: '⠋' };
-    for (let frame = 0; frame < 3; frame++) {
-      const started = performance.now();
-      formatTool(tool, context);
-      const elapsed = performance.now() - started;
-      assert.ok(elapsed < 16, `frame ${frame}: ${elapsed.toFixed(0)} ms`);
+    // A second of spinner ticks, each given time to draw if it asks to.
+    for (let tick = 0; tick < 12; tick++) {
+      timers.advance(80);
+      await sleep(15);
     }
+    await settle(term);
+    const frames = view.renderStats.frames - before;
+    assert.ok(frames <= 2, `${frames} frames for a second of waiting`);
   });
 
-  it('lays out only the start of a very long answer for history', async () => {
-    const answer = Array.from({ length: 20_000 }, (_, index) => `Line ${index} of a very long answer.`).join('\n\n');
-    const events = [
+  it('works out a running edit\'s diff once, not on every spinner frame', () => {
+    const content = { type: 'diff' as const, path: '/a.ts', oldText: 'a\nb\n', newText: 'a\nc\n', truncated: false };
+    assert.equal(diffOf(content), diffOf(content));
+  });
+
+  it('counts the rest of a long answer in history without showing it', async () => {
+    const answer = Array.from({ length: 2000 }, (_, index) => `Line ${index} of a long answer.`).join('\n\n');
+    const text = await renderHistory([
       event({ type: 'turn.started', text: 'q', at: 0 }),
       event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: answer }),
       event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1 }),
-    ];
-    const started = performance.now();
-    const text = await renderHistory(events, { agentName: 'claude', title: 't', updatedAt: 0, cwd: '/', home: '/h', width: 100, colorDepth: 'ansi256' });
-    const elapsed = performance.now() - started;
-    assert.ok(elapsed < 500, `${elapsed.toFixed(0)} ms`);
-    assert.match(text, /… \(\d{4,} more lines\)/);
+    ], { agentName: 'claude', title: 't', updatedAt: 0, cwd: '/', home: '/h', width: 100, colorDepth: 'ansi256' });
+    const more = /… \((\d+) more lines\)/.exec(text);
+    assert.ok(more && Number(more[1]) > 1900, String(more?.[0]));
   });
 });
 
@@ -250,11 +385,22 @@ describe('teardown and early finish', () => {
     assert.ok(!(await term.screen()).some((line) => line.includes('esc background')), 'status line left on screen');
   });
 
+  it('destroy() after a resize nobody relaid out for still clears the live rows', async () => {
+    const { term, view } = await setup(90, 16);
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'streaming' }));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('esc background')));
+    await settle(term);
+    term.resize(60, 16);
+    view.destroy();
+    assert.ok(!cursorHidden(term.output()), 'cursor left hidden');
+    assert.ok(!(await term.screen()).some((line) => line.includes('esc')), (await term.screen()).join('\n'));
+  });
+
   it('finish() before turn.ended keeps what was shown, running tools as stopped', async () => {
     const { term, view } = await setup(80, 20);
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'First paragraph, complete.\n\nSecond paragraph, still stream' }));
     view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'make', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-    await sleep(200);
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('make')));
     await view.finish();
     const lines = await term.allLines();
     assert.ok(lines.includes('First paragraph, complete.'), lines.join('\n'));
@@ -270,7 +416,6 @@ describe('narrow terminals', () => {
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `Here:\n\n\`\`\`ts\n${code}` }));
     await waitForScreen(term, (lines) => lines.some((line) => line.includes('⋮')));
     const note = (await term.screen()).find((line) => line.includes('⋮'))!;
-    // Fitted with an ellipsis, not cut off mid-word by the terminal's edge.
     assert.ok(note.length <= 40 && note.endsWith('…'), JSON.stringify(note));
   });
 });

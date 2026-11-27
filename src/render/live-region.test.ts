@@ -1,18 +1,24 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import xterm from '@xterm/headless';
-import { LiveRegion, type PaintRow } from './live-region.js';
+import { LiveRegion, rowsNeeded, type PaintRow } from './live-region.js';
+import { displayWidth } from './text-width.js';
 import { DEFAULT_COLOR } from './sgr.js';
+import { useModernWidths } from '../../test/tools/unicode.js';
 
-const row = (text: string): PaintRow => [{ text, width: text.length, style: { fg: DEFAULT_COLOR, bg: DEFAULT_COLOR, attributes: 0 } }];
+const row = (text: string): PaintRow => [{ text, width: displayWidth(text), style: { fg: DEFAULT_COLOR, bg: DEFAULT_COLOR, attributes: 0 } }];
 const rows = (...texts: string[]): PaintRow[] => texts.map(row);
 
 /** An emulated terminal: everything written lands in xterm.js, scrollback included. */
 const emulate = (cols: number, height: number) => {
   const terminal = new xterm.Terminal({ cols, rows: height, allowProposedApi: true, scrollback: 1000 });
+  // Wide characters as modern terminals (and Shelly) measure them.
+  useModernWidths(terminal);
   let written = '';
   const screen = {
-    size: { cols, rows: height },
+    get size() {
+      return { cols: terminal.cols, rows: terminal.rows };
+    },
     write: (data: string) => {
       written += data;
       terminal.write(data);
@@ -33,7 +39,7 @@ const emulate = (cols: number, height: number) => {
     await flush();
     return { row: terminal.buffer.active.cursorY + 1, col: terminal.buffer.active.cursorX + 1 };
   };
-  return { terminal, screen, lines, visible, cursor, written: () => written, reset: () => { written = ''; } };
+  return { terminal, screen, flush, lines, visible, cursor, written: () => written, reset: () => { written = ''; } };
 };
 
 describe('LiveRegion', () => {
@@ -140,5 +146,47 @@ describe('LiveRegion', () => {
     region.start({ row: 1, col: 1 });
     region.update(rows('0123456789'), rows('abcdefghij'));
     assert.deepEqual((await term.visible()).slice(0, 3), ['0123456789', 'abcdefghij', '']);
+  });
+
+  it('re-anchors from the parked last row, counting wide characters by cell', async () => {
+    const term = emulate(50, 12);
+    term.screen.write('above\r\n');
+    const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 2, col: 1 });
+    // 44 cells of wide text. At 15 columns only 7 fit on a row (the 8th would straddle the edge),
+    // so it takes 4 rows, not the 3 that 44 / 15 suggests.
+    region.update(rows('kept'), [row('漢'.repeat(22)), row('status')]);
+    await term.flush();
+    term.terminal.resize(15, 12);
+    region.relayout(await term.cursor());
+    region.update([], rows('relaid'));
+    const visible = await term.visible();
+    assert.deepEqual(visible.slice(0, 3), ['above', 'kept', 'relaid'], visible.join('\n'));
+  });
+
+  it('restarts at the parked row, never above it, when there is no cursor report', async () => {
+    const term = emulate(40, 10);
+    const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 1, col: 1 });
+    region.update(rows('committed'), rows('live 1', 'live 2', 'status'));
+    region.relayout(undefined);
+    region.update([], rows('after'));
+    const visible = await term.visible();
+    // Committed text is untouched; the live region restarts on the row the cursor was parked on (the 4th).
+    assert.equal(visible[0], 'committed');
+    assert.equal(visible.indexOf('after'), 3, visible.join('\n'));
+  });
+});
+
+describe('rowsNeeded', () => {
+  it('counts the rows a terminal wraps text into, by cell', () => {
+    assert.equal(rowsNeeded('', 10), 1);
+    assert.equal(rowsNeeded('abcdefghij', 10), 1);
+    assert.equal(rowsNeeded('abcdefghijk', 10), 2);
+    // Five wide characters fit in 10 cells; at 9 the fifth moves whole to the next row.
+    assert.equal(rowsNeeded('漢字漢字漢', 10), 1);
+    assert.equal(rowsNeeded('漢字漢字漢', 9), 2);
+    assert.equal(rowsNeeded('a漢字漢字', 9), 1);
+    assert.equal(rowsNeeded('e\u0301'.repeat(10), 10), 1);
   });
 });
