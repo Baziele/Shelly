@@ -1,22 +1,19 @@
 import assert from 'node:assert/strict';
-import { setTimeout as sleep } from 'node:timers/promises';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import xterm from '@xterm/headless';
-import * as pty from 'node-pty';
-import { saveScreenshot } from '../support/screenshot.js';
+import { ScenarioDriver } from '../tools/scenario.js';
+import { writeScreenshot } from '../tools/screen.js';
 
 const DEMO = fileURLToPath(new URL('../../scripts/ui-demo.ts', import.meta.url));
 const TSX = import.meta.resolve('tsx');
-/** Set to a directory to keep a PNG of every run, for looking at by eye. */
+/** Set to a directory to keep a screenshot of every run, for looking at by eye. */
 const SCREENSHOTS = process.env.SHELLY_SCREENSHOTS;
 
 interface DemoRun {
-  readonly terminal: xterm.Terminal;
   /** Every row, scrollback included, trailing spaces and empty rows at the end trimmed. */
   readonly lines: string[];
-  readonly screen: string[];
-  readonly cursor: { row: number; col: number };
   readonly raw: string;
 }
 
@@ -26,62 +23,39 @@ interface DemoOptions {
   readonly speed?: number;
   readonly env?: Record<string, string>;
   /** Called while the demo runs, e.g. to resize the terminal. */
-  readonly during?: (control: { resize(cols: number, rows: number): void; screen(): Promise<string[]> }) => Promise<void>;
+  readonly during?: (driver: ScenarioDriver) => Promise<void>;
 }
 
 /** Run the UI demo for one sequence in a pseudo-terminal attached to xterm.js, until it exits. */
 const runDemo = async (name: string, { cols = 100, rows = 30, speed = 3, env = {}, during }: DemoOptions = {}): Promise<DemoRun> => {
-  const terminal = new xterm.Terminal({ cols, rows, allowProposedApi: true, scrollback: 5000 });
-  const child = pty.spawn(process.execPath, ['--experimental-ffi', '--no-warnings', '--import', TSX, DEMO, name, '--speed', String(speed)], {
-    name: 'xterm-256color',
+  const driver = await ScenarioDriver.start({
+    command: [process.execPath, '--experimental-ffi', '--no-warnings', '--import', TSX, DEMO, name, '--speed', String(speed)],
+    cwd: process.cwd(),
     cols,
     rows,
-    cwd: process.cwd(),
-    env: {
-      PATH: process.env.PATH ?? '/usr/bin:/bin',
-      HOME: process.env.HOME ?? '/tmp',
-      TERM: 'xterm-256color',
-      LANG: 'en_US.UTF-8',
-      SHELLY_DEMO_LINGER_MS: '0',
-      ...env,
-    },
+    env: { SHELLY_DEMO_LINGER_MS: '0', ...env },
+    waitForPrompt: false,
   });
-  let raw = '';
-  child.onData((data) => {
-    raw += data;
-    terminal.write(data);
-  });
-  terminal.onData((reply) => child.write(reply));
-  const exited = new Promise<number>((resolve) => child.onExit(({ exitCode }) => resolve(exitCode)));
-  const flush = (): Promise<void> => new Promise((resolve) => terminal.write('', resolve));
-  const screen = async (): Promise<string[]> => {
-    await flush();
-    const buffer = terminal.buffer.active;
-    return Array.from({ length: terminal.rows }, (_, row) => buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '');
-  };
-
-  await during?.({
-    resize: (newCols, newRows) => {
-      terminal.resize(newCols, newRows);
-      child.resize(newCols, newRows);
-    },
-    screen,
-  });
-  const code = await Promise.race([exited, sleep(30_000).then(() => -1)]);
-  if (code === -1) {
-    child.kill();
-    throw new Error(`demo ${name} did not finish. Screen:\n${(await screen()).join('\n')}`);
+  try {
+    await during?.(driver);
+    try {
+      await driver.waitForExit({ timeoutMs: 30_000 });
+    } catch {
+      throw new Error(`demo ${name} did not finish. Screen:\n${await driver.screen()}`);
+    }
+    const lines = await driver.lines({ scrollback: true });
+    while (lines.length > 0 && lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+    if (SCREENSHOTS) {
+      mkdirSync(SCREENSHOTS, { recursive: true });
+      const size = `${driver.terminal.cols}x${driver.terminal.rows}`;
+      await writeScreenshot(driver.terminal, join(SCREENSHOTS, `e2e-${name}-${size}${env.NO_COLOR ? '-nocolor' : ''}`), { scrollback: true });
+    }
+    return { lines, raw: driver.raw() };
+  } finally {
+    await driver.close();
   }
-  await flush();
-  const buffer = terminal.buffer.active;
-  const lines = Array.from({ length: buffer.length }, (_, row) => buffer.getLine(row)?.translateToString(true) ?? '');
-  while (lines.length > 0 && lines[lines.length - 1] === '') {
-    lines.pop();
-  }
-  if (SCREENSHOTS) {
-    saveScreenshot(terminal, `${SCREENSHOTS}/e2e-${name}-${terminal.cols}x${terminal.rows}${env.NO_COLOR ? '-nocolor' : ''}.png`, { region: 'all', title: `${name} ${terminal.cols}x${terminal.rows}` });
-  }
-  return { terminal, lines, screen: await screen(), cursor: { row: buffer.cursorY + 1, col: buffer.cursorX + 1 }, raw };
 };
 
 /** The demo's closing note, which the shell prompt would replace. */
@@ -123,11 +97,9 @@ describe('UI demo in a real terminal', { timeout: 120_000 }, () => {
       cols: 100,
       rows: 30,
       speed: 3,
-      during: async ({ resize, screen }) => {
-        for (let attempt = 0; attempt < 100 && !(await screen()).some((line) => line.startsWith('3. Timeouts')); attempt++) {
-          await sleep(50);
-        }
-        resize(140, 30);
+      during: async (driver) => {
+        await driver.waitForText(/^3\. Timeouts/m, { timeoutMs: 15_000 });
+        await driver.resize(140, 30);
       },
     });
     assertClean(run);
