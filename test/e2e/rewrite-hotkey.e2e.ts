@@ -26,6 +26,18 @@ const STARTUP_FILES: Record<string, Record<string, string>> = {
   },
 };
 
+/**
+ * Ctrl+T runs a widget that keeps the shell busy for longer than Shelly
+ * waits for a capture, without starting a program (which would own the
+ * terminal, so Shelly would leave Ctrl+] alone).
+ */
+const SLOW_KEY: Record<string, string> = {
+  zsh: 'slow() { zmodload zsh/zselect; zselect -t 150; }\nzle -N slow\nbindkey "^T" slow\n',
+  bash: 'slow() { local end=$(( ${EPOCHREALTIME/./} + 1500000 )); while (( ${EPOCHREALTIME/./} < end )); do :; done; }\nbind -x \'"\\C-t": slow\'\n',
+};
+
+const NOTICE = "Shelly couldn't read the line you were typing";
+
 const shells = ['/bin/zsh', '/bin/bash', ...(process.env.SHELLY_E2E_SHELLS?.split(':').filter(Boolean) ?? [])]
   .filter((shell) => existsSync(shell) && basename(shell) in STARTUP_FILES);
 
@@ -44,12 +56,13 @@ for (const shell of shells) {
     /** Shelly's TMPDIR, where the line file's directory goes. */
     let temp: string | undefined;
 
-    const start = async (): Promise<ShellyHarness> => {
+    /** `extra` is appended to the shell's startup file. */
+    const start = async (extra = ''): Promise<ShellyHarness> => {
       home = mkdtempSync(join(tmpdir(), 'shelly-rewrite-'));
       temp = mkdtempSync(join(tmpdir(), 'shelly-rewrite-tmp-'));
       for (const [file, content] of Object.entries(STARTUP_FILES[kind] ?? {})) {
         mkdirSync(dirname(join(home, file)), { recursive: true });
-        writeFileSync(join(home, file), content);
+        writeFileSync(join(home, file), content + extra);
       }
       shelly = await startShelly({ cols: 100, rows: 20, shell, home, env: { TMPDIR: temp } });
       // fish asks the terminal a few things before it reads keys.
@@ -70,6 +83,38 @@ for (const shell of shells) {
     });
 
     if (canCapture) {
+      it('keeps a line the shell is too busy to hand over, and says so', { skip: !(kind in SLOW_KEY) && 'no in-shell way to stay busy' }, async () => {
+        const session = await start(SLOW_KEY[kind]);
+        await session.type('echo half');
+        await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the typed line');
+        await session.type(`\u0014${HOTKEY}`);
+        const screen = await session.waitFor(
+          (rows) => rows.some((row) => row.includes(NOTICE)) && promptRow(rows) === '$ echo half',
+          'the notice, and the line back once the shell caught up',
+        );
+        assert.ok(!screen.some((row) => row.startsWith('$ __')), 'the input did not open');
+        await session.type('\r');
+        await session.waitFor((rows) => rows.includes('half'), 'the command to run');
+      });
+
+      if (kind === 'zsh') {
+        it('leaves a line too long to hand over where it is, and says so', async () => {
+          // On the line at the first prompt; over the hooks' limit once encoded.
+          const session = await start(`print -z "true $(printf '%%%.0s' {1..20001})"\n`);
+          await session.waitFor((rows) => rows.some((row) => row.includes('%%%%%%%%')), 'the long line');
+          await session.type(HOTKEY);
+          // zsh shows it below the line, which then scrolls it off a screen this small.
+          for (let attempt = 0; attempt < 50 && !session.raw().includes(NOTICE); attempt++) {
+            await sleep(100);
+          }
+          assert.ok(session.raw().includes(NOTICE), 'the notice');
+          assert.ok(!session.raw().includes('Ask Shelly anything'), 'the input did not open');
+          await session.type('\r');
+          await session.type('fc -ln -1 | cut -c1-12\r');
+          await session.waitFor((rows) => rows.includes('true %%%%%%%'), 'the long line to have run as it was');
+        });
+      }
+
       it('takes the half-typed line into the input, and puts it back on Escape', async () => {
         const session = await start();
         await session.type(`echo half${LEFT}${LEFT}`);

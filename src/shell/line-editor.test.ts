@@ -7,7 +7,7 @@ import { LINE_KEYS, LineEditor } from './line-editor.js';
 
 /** The request number Shelly left in the line file, as the hooks read it. */
 const requestIn = (file: string | undefined): number | undefined => {
-  const match = file && existsSync(file) ? /^(?:capture|set) (\d+)/.exec(readFileSync(file, 'utf8')) : undefined;
+  const match = file && existsSync(file) ? /^(?:capture|set|notice) (\d+)/.exec(readFileSync(file, 'utf8')) : undefined;
   return match ? Number(match[1]) : undefined;
 };
 
@@ -85,6 +85,44 @@ describe('LineEditor', () => {
     subject.handleEvent({ type: 'line-set', request: 2 });
   });
 
+  it('tells a line too long to report from no answer at all', async () => {
+    const subject = create(['capture', 'set'], { timeoutMs: 20 });
+    shell = () => {
+      const request = requestIn(subject.lineFile);
+      queueMicrotask(() => subject.handleEvent({ type: 'line', request, line: undefined }));
+    };
+    assert.deepEqual(await subject.tryCapture(), { status: 'failed', reason: 'too-long' });
+    assert.equal(await subject.capture(), undefined);
+    written = [];
+    shell = () => undefined;
+    assert.deepEqual(await subject.tryCapture(), { status: 'failed', reason: 'no-answer' });
+    assert.deepEqual(written, [LINE_KEYS.capture], 'nothing is put back for a line the shell kept');
+    assert.ok(!existsSync(subject.lineFile ?? ''));
+  });
+
+  it('says when it cannot capture at all', async () => {
+    assert.deepEqual(await create(['clear', 'redraw']).tryCapture(), { status: 'unsupported' });
+    editor?.dispose();
+    const away = create(['capture', 'set']);
+    away.handleEvent({ type: 'exec', command: 'vim' });
+    assert.deepEqual(await away.tryCapture(), { status: 'unsupported' });
+  });
+
+  it('has the shell show a one-line notice, through the line file', async () => {
+    const subject = create(['capture', 'set', 'notice']);
+    const seen: string[] = [];
+    shell = (data) => {
+      assert.equal(data, LINE_KEYS.notice);
+      seen.push(readFileSync(subject.lineFile ?? '', 'utf8'));
+      const request = requestIn(subject.lineFile);
+      queueMicrotask(() => subject.handleEvent({ type: 'line-set', request }));
+    };
+    await subject.notify('could not\nread \u001b[31mit');
+    assert.deepEqual(seen, ['notice 1\ncould not read [31mit']);
+    assert.ok(!existsSync(subject.lineFile ?? ''));
+    await assert.rejects(create(['capture', 'set']).notify('x'), /cannot show a notice/);
+  });
+
   it('does nothing away from the prompt', async () => {
     const subject = create(['capture', 'set']);
     subject.handleEvent({ type: 'exec', command: 'vim' });
@@ -117,7 +155,7 @@ describe('LineEditor', () => {
 
   it('removes the file when the shell does not take it', async () => {
     const subject = create(['set'], { timeoutMs: 10 });
-    await assert.rejects(subject.replace('ls'), /did not take/);
+    await assert.rejects(subject.replace('ls'), /did not answer/);
     assert.ok(!existsSync(subject.lineFile ?? ''));
   });
 

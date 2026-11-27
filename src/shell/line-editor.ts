@@ -14,11 +14,13 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  *
  *   capture  report `line;<request>;<buffer>;<cursor>`, then clear the line
  *   set      replace the line with the line file, delete it, report `line-set;<request>`
+ *   notice   show the line file's one-line notice below the line, delete it,
+ *            report `line-set;<request>`
  *   clear    bash 3.2: clear the line, so Shelly can type a new one
  *   redraw   bash 3.2: redraw the prompt and line where the cursor is
  *
- * Each request is numbered in the line file (`capture <n>`, or `set <n>
- * <cursor>` and the text), and the hooks echo the number back, so an answer
+ * Each request is numbered in the line file (`capture <n>`, `set <n>
+ * <cursor>` and the text, or `notice <n>` and the text), and the hooks echo the number back, so an answer
  * is matched to its request. Shelly withdraws the file of a request it gives
  * up on, so a late answer names none, and Shelly puts back the line it
  * reports (the shell has cleared it by then).
@@ -30,7 +32,7 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  * interpreted by the line editor, let alone run.
  *
  * What each shell gets:
- *   zsh, fish, bash 4+  capture and set
+ *   zsh, fish, bash 4+  capture, set and notice
  *   bash 3.2            no READLINE_LINE, so no capture; replace clears the
  *                       line and types the text: as a bracketed paste when
  *                       the shell has turned that on, otherwise only single
@@ -47,6 +49,8 @@ export const LINE_KEYS = {
   clear: '\u001b[21;16~',
   /** Ctrl+Alt+Shift+Meta+F9. */
   redraw: '\u001b[20;16~',
+  /** Ctrl+Alt+Shift+Meta+F8. */
+  notice: '\u001b[19;16~',
 } as const;
 
 const LINE_KEY_PATTERN = new RegExp(
@@ -60,6 +64,18 @@ export interface CapturedLine {
   /** Where the cursor was, as an index into `buffer` (UTF-16 code units). */
   readonly cursor: number;
 }
+
+/** How a capture went. */
+export type CaptureResult =
+  | { readonly status: 'captured'; readonly line: CapturedLine }
+  /** The shell cannot report its line, or is not at its prompt. The line is untouched. */
+  | { readonly status: 'unsupported' }
+  /**
+   * The shell has the line but could not report it (`too-long`: it is left
+   * as it is), or did not answer in time (`no-answer`: if the shell answers
+   * later, it has cleared the line, and Shelly puts it back then).
+   */
+  | { readonly status: 'failed'; readonly reason: 'too-long' | 'no-answer' };
 
 export interface LineEditorOptions {
   /** Sends keys to the shell, as if typed. */
@@ -90,7 +106,8 @@ const MAX_ABANDONED = 16;
 
 interface PendingCapture {
   readonly request: number;
-  readonly resolve: (line: ShellInputLine | undefined) => void;
+  /** Undefined when the shell did not answer in time. */
+  readonly resolve: (answer: { readonly line: ShellInputLine | undefined } | undefined) => void;
   readonly timer: NodeJS.Timeout;
   /** Set once the shell has answered; resolved when its output goes quiet. */
   answer?: { readonly line: ShellInputLine | undefined; readonly deadline: number };
@@ -143,6 +160,16 @@ export class LineEditor {
   /** The shell can report its line (and clear it). */
   get canCapture(): boolean {
     return this.features.has('capture') && this.lineFile !== undefined;
+  }
+
+  /** A shell that cannot capture can still redraw its line below something Shelly printed. */
+  get canRedraw(): boolean {
+    return this.features.has('redraw');
+  }
+
+  /** The shell can show a notice below its line, leaving the line alone. */
+  get canNotify(): boolean {
+    return this.features.has('notice') && this.lineFile !== undefined;
   }
 
   /** The shell's line can be replaced: set exactly, or failing that, cleared and typed. */
@@ -220,31 +247,58 @@ export class LineEditor {
   }
 
   /**
-   * Take the shell's input line and clear it. Undefined when the shell is
-   * not at its prompt, cannot report its line, or does not answer in time;
-   * the line is then left as it was.
+   * Take the shell's input line and clear it. Undefined when that did not
+   * happen, for whatever reason; see `tryCapture` for which.
    */
-  capture(): Promise<CapturedLine | undefined> {
-    return this.enqueue(async () => {
+  async capture(): Promise<CapturedLine | undefined> {
+    const result = await this.tryCapture();
+    return result.status === 'captured' ? result.line : undefined;
+  }
+
+  /** Take the shell's input line and clear it, saying what happened if not. */
+  tryCapture(options: { readonly timeoutMs?: number } = {}): Promise<CaptureResult> {
+    return this.enqueue(async (): Promise<CaptureResult> => {
       if (!this.canCapture || !this.isAtPrompt) {
-        return undefined;
+        return { status: 'unsupported' };
       }
       const file = this.lineFile!;
       const request = this.nextRequest++;
       writeRequest(file, `capture ${request}\n`);
-      const line = await new Promise<ShellInputLine | undefined>((resolve) => {
+      const answer = await new Promise<{ readonly line: ShellInputLine | undefined } | undefined>((resolve) => {
         const timer = setTimeout(() => {
           this.pendingCapture = undefined;
           this.abandon(request);
           removeFile(file);
           resolve(undefined);
-        }, this.timeoutMs);
+        }, options.timeoutMs ?? this.timeoutMs);
         this.pendingCapture = { request, resolve, timer };
         this.write(LINE_KEYS.capture);
       });
       // The hooks remove it once read; this covers a shell that never did.
       removeFile(file);
-      return line && { buffer: line.buffer, cursor: codePointsToIndex(line.buffer, line.cursor) };
+      if (!answer) {
+        return { status: 'failed', reason: 'no-answer' };
+      }
+      if (!answer.line) {
+        return { status: 'failed', reason: 'too-long' };
+      }
+      const { buffer, cursor } = answer.line;
+      return { status: 'captured', line: { buffer, cursor: codePointsToIndex(buffer, cursor) } };
+    });
+  }
+
+  /**
+   * Have the shell show a one-line notice below its line, which stays as it
+   * is. Rejects if the shell cannot, is not at its prompt, or does not
+   * answer in time.
+   */
+  notify(text: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.canNotify || this.disposed || !this.isAtPrompt) {
+        throw new Error('The shell cannot show a notice now.');
+      }
+      const line = text.replace(/[\r\n\t]+/g, ' ').replace(CONTROL_CHARACTERS, '');
+      await this.sendThroughFile(LINE_KEYS.notice, (request) => `notice ${request}\n${line}`);
     });
   }
 
@@ -281,7 +335,7 @@ export class LineEditor {
     if (this.pendingCapture) {
       clearTimeout(this.pendingCapture.timer);
       clearTimeout(this.pendingCapture.settleTimer);
-      this.pendingCapture.resolve(undefined);
+      this.pendingCapture.resolve(this.pendingCapture.answer);
       this.pendingCapture = undefined;
     }
     if (this.pendingSet) {
@@ -369,7 +423,7 @@ export class LineEditor {
     capture.settleTimer = setTimeout(() => {
       if (this.pendingCapture === capture) {
         this.pendingCapture = undefined;
-        capture.resolve(answer.line);
+        capture.resolve(answer);
       }
     }, delay);
   }
@@ -390,18 +444,23 @@ export class LineEditor {
   }
 
   private async setThroughFile(text: string, cursor: number): Promise<void> {
-    const file = this.lineFile!;
     const codePoints = Array.from(text.slice(0, Math.max(0, cursor))).length;
+    await this.sendThroughFile(LINE_KEYS.set, (request) => `set ${request} ${codePoints}\n${text}`);
+  }
+
+  /** Leave a numbered request in the line file, send its key, and wait for the shell to say it is done. */
+  private async sendThroughFile(key: string, content: (request: number) => string): Promise<void> {
+    const file = this.lineFile!;
     const request = this.nextRequest++;
-    writeRequest(file, `set ${request} ${codePoints}\n${text}`);
+    writeRequest(file, content(request));
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           this.pendingSet = undefined;
-          reject(new Error('The shell did not take the new line.'));
+          reject(new Error('The shell did not answer.'));
         }, this.timeoutMs);
         this.pendingSet = { request, resolve, timer };
-        this.write(LINE_KEYS.set);
+        this.write(key);
       });
     } finally {
       // The hooks remove it once read; this covers a shell that never did.

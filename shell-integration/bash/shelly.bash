@@ -231,10 +231,35 @@ if [[ -n "$__shelly_nonce" ]]; then
       __shelly_emit "line-set;$request"
     }
 
-    __shelly_line_features='capture,set'
+    # Show the file's one-line notice (`notice <request>`, then the text);
+    # readline redraws the prompt and line, unchanged, below it. The file is
+    # removed once read.
+    __shelly_line_notice() {
+      local file=${__shelly_line_file-} header='' request='' text=''
+      [[ -n "$file" && -f "$file" && ! -L "$file" ]] || return 0
+      {
+        IFS= builtin read -r header || builtin true
+        IFS= builtin read -r text || builtin true
+      } < "$file"
+      # Any other request belongs to another key.
+      [[ "$header" == 'notice '* ]] || return 0
+      request=${header#notice }
+      __shelly_is_number "$request" || return 0
+      command rm -f -- "$file"
+      # bash 5.1 and later clear the line before a bind -x command runs;
+      # earlier ones leave the cursor on it.
+      if [[ "$__shelly_point_in_bytes" == 1 ]]; then
+        builtin printf '\n'
+      fi
+      builtin printf '%s\n' "$text"
+      __shelly_emit "line-set;$request"
+    }
+
+    __shelly_line_features='capture,set,notice'
     for __shelly_keymap in emacs vi-insert vi-command; do
       builtin bind -m "$__shelly_keymap" -x '"\e[24;16~": __shelly_line_capture' 2>/dev/null \
         && builtin bind -m "$__shelly_keymap" -x '"\e[23;16~": __shelly_line_set' 2>/dev/null \
+        && builtin bind -m "$__shelly_keymap" -x '"\e[19;16~": __shelly_line_notice' 2>/dev/null \
         || __shelly_line_features=''
     done
   else

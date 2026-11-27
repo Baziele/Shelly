@@ -90,16 +90,40 @@ if test -n "$__shelly_nonce"
         __shelly_emit "line-set;$request"
     end
 
+    # Show the file's one-line notice (`notice <request>`, then the text)
+    # below the line, which is drawn again, unchanged, under it. The file is
+    # removed once read.
+    function __shelly_line_notice
+        set -l file $__shelly_line_file
+        test -n "$file" -a -f "$file" -a ! -L "$file"; or return
+        set -l header
+        set -l text
+        begin
+            read header
+            read text
+        end < $file
+        # Any other request belongs to another key.
+        string match -qr -- '^notice [0-9]+$' "$header"; or return
+        set -l request (string replace -- 'notice ' '' "$header")
+        command rm -f -- $file
+        echo
+        printf '%s\n' "$text"
+        commandline -f repaint
+        __shelly_emit "line-set;$request"
+    end
+
     # In every mode: default (emacs-like) and vi's insert and visual modes.
     for __shelly_mode in default insert visual
         if string match -qr '^[0-3]\.' -- $version
             # fish 3 matches raw sequences.
             bind -M $__shelly_mode \e\[24\;16~ __shelly_line_capture
             bind -M $__shelly_mode \e\[23\;16~ __shelly_line_set
+            bind -M $__shelly_mode \e\[19\;16~ __shelly_line_notice
         else
             bind -M $__shelly_mode ctrl-alt-shift-super-f12 __shelly_line_capture
             bind -M $__shelly_mode ctrl-alt-shift-super-f11 __shelly_line_set
+            bind -M $__shelly_mode ctrl-alt-shift-super-f8 __shelly_line_notice
         end
     end
-    __shelly_emit 'line-editor;capture,set'
+    __shelly_emit 'line-editor;capture,set,notice'
 end

@@ -146,6 +146,13 @@ const shells = ['/bin/zsh', '/bin/bash', ...(process.env.SHELLY_E2E_SHELLS?.spli
 
 const VI_MODE: Record<string, string> = { zsh: 'bindkey -v', bash: 'set -o vi', fish: 'fish_vi_key_bindings' };
 
+/** Ctrl+T runs a widget that keeps the shell busy for a while. */
+const SLOW_KEY: Record<string, string> = {
+  zsh: 'slow() { sleep 0.6; }\nzle -N slow\nbindkey "^T" slow',
+  bash: 'bind -x \'"\\C-t": sleep 0.6\'',
+  fish: 'bind ctrl-t "sleep 0.6"',
+};
+
 for (const shell of shells) {
   const kind = basename(shell);
   const canEditLine = kind !== 'bash' || bashVersion(shell) >= 4;
@@ -236,6 +243,41 @@ for (const shell of shells) {
       await session.editor.replace('echo from-command-mode');
       await enter(session);
       assert.deepEqual(execs(session.events), ['echo from-command-mode']);
+    });
+
+    it('leaves a line too long to report where it is', { skip: !canEditLine && 'bash 3.2 cannot read its line' }, async () => {
+      session = await start(shell);
+      // Over the hooks' limit once percent-encoded.
+      const long = `true ${'%'.repeat(20_001)}`;
+      await session.editor.replace(long);
+      assert.deepEqual(await session.editor.tryCapture(), { status: 'failed', reason: 'too-long' });
+      await enter(session);
+      assert.equal(execs(session.events).length, 1);
+      assert.ok(execs(session.events)[0]!.startsWith('true %%%%'), 'the line was still there to run');
+    });
+
+    it('puts back a line the shell clears after Shelly stopped waiting', { skip: !canEditLine && 'bash 3.2 cannot read its line' }, async () => {
+      session = await start(shell, SLOW_KEY[kind]);
+      await session.press('echo half');
+      // Busy in a slow widget of the user's, the shell gets to the capture late.
+      await session.press('\u0014', 0);
+      assert.deepEqual(await session.editor.tryCapture({ timeoutMs: 100 }), { status: 'failed', reason: 'no-answer' });
+      await sleep(1000);
+      assert.equal(await session.promptRow(), '$ echo half');
+      await enter(session);
+      assert.deepEqual(execs(session.events), ['echo half']);
+    });
+
+    it('shows a notice below the line, leaving the line alone', { skip: !canEditLine && 'bash 3.2 has no notices' }, async () => {
+      session = await start(shell);
+      assert.equal(session.editor.canNotify, true);
+      await session.press('echo kept');
+      await session.editor.notify('A notice from Shelly');
+      await sleep(200);
+      assert.ok(session.output().includes('A notice from Shelly'), session.output());
+      assert.equal(await session.promptRow(), '$ echo kept');
+      await enter(session);
+      assert.deepEqual(execs(session.events), ['echo kept']);
     });
 
     it('leaves no line file behind, and keeps its directory private', async () => {

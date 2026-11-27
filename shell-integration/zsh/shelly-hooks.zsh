@@ -104,6 +104,24 @@ __shelly_line_set() {
   __shelly_emit "line-set;$request"
 }
 
+# Show the file's one-line notice (`notice <request>`, then the text) below
+# the line, which stays as it is. The file is removed once read.
+__shelly_line_notice() {
+  'builtin' 'emulate' -L zsh
+  local file=$__shelly_line_file header='' request='' text=''
+  [[ -n $file && -f $file && ! -L $file ]] || return 0
+  {
+    IFS= 'builtin' 'read' -r header
+    IFS= 'builtin' 'read' -r text
+  } < $file
+  # Any other request belongs to another key.
+  [[ $header == 'notice '<-> ]] || return 0
+  request=${header#notice }
+  __shelly_remove $file
+  'builtin' 'zle' -M -- "$text"
+  __shelly_emit "line-set;$request"
+}
+
 # Bound in every keymap a user might be in, then announced to Shelly.
 __shelly_bind_line_keys() {
   'builtin' 'emulate' -L zsh
@@ -111,12 +129,14 @@ __shelly_bind_line_keys() {
   'builtin' 'zmodload' -F zsh/files b:zf_rm 2>/dev/null
   'builtin' 'zle' -N __shelly_line_capture || return 0
   'builtin' 'zle' -N __shelly_line_set || return 0
+  'builtin' 'zle' -N __shelly_line_notice || return 0
   local keymap
   for keymap in main emacs viins vicmd; do
     'builtin' 'bindkey' -M $keymap '^[[24;16~' __shelly_line_capture 2>/dev/null || return 0
     'builtin' 'bindkey' -M $keymap '^[[23;16~' __shelly_line_set 2>/dev/null || return 0
+    'builtin' 'bindkey' -M $keymap '^[[19;16~' __shelly_line_notice 2>/dev/null || return 0
   done
-  __shelly_emit 'line-editor;capture,set'
+  __shelly_emit 'line-editor;capture,set,notice'
 }
 
 # Runs once, at the first prompt, after every startup file: put Shelly's

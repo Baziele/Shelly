@@ -4,7 +4,7 @@ import { describeEnvironment, type EnvironmentInfo } from './context/environment
 import { buildAskContext, formatAskContext } from './context/session-context.js';
 import { TriggerDetector, type TriggerAction } from './input/trigger-detector.js';
 import { detectColorDepth, type ColorDepth } from './render/sgr.js';
-import { LineEditor, type CapturedLine } from './shell/line-editor.js';
+import { LineEditor, type CapturedLine, type CaptureResult } from './shell/line-editor.js';
 import { prepareShellIntegration } from './shell/shell-integration.js';
 import { ShellMarkerParser, type ShellOutputSegment } from './shell/shell-markers.js';
 import { ShellSession } from './shell/shell-session.js';
@@ -21,6 +21,12 @@ export const DEFAULT_TRIGGERS = ['::', '__'] as const;
  * protocol, and under xterm's modifyOtherKeys (fish turns both on).
  */
 export const DEFAULT_REWRITE_HOTKEYS = ['\u001d', '\u001b[93;5u', '\u001b[27;5;93~'] as const;
+
+/** Shown below the line when the rewrite hotkey could not take it. */
+const LINE_UNREADABLE = "Shelly couldn't read the line you were typing; it is left as it was.";
+/** How long that notice waits for a busy shell to be back at its prompt; after that, a bell. */
+const NOTICE_WAIT_MS = 5000;
+const NOTICE_POLL_MS = 100;
 
 /** How long a possible trigger's first character is held back before it goes to the shell. */
 const TRIGGER_HOLD_MS = 400;
@@ -66,7 +72,11 @@ export class Shelly {
   /** Reads and sets the shell's input line; absent for shells without hooks. */
   private readonly lineEditor: LineEditor | undefined;
   private readonly rewriteHotkeys: readonly string[];
-  /** Set while the input is open for a rewrite: the line taken from the shell, to put back afterwards. */
+  /**
+   * Set while the input is open for a rewrite: the line taken from the
+   * shell, to put back afterwards, or none when the shell cannot hand it
+   * over and still has it (bash 3.2).
+   */
   private rewrite: { readonly captured: CapturedLine | undefined } | undefined;
   private readonly commands: CommandLog;
   private readonly shellPath: string;
@@ -198,7 +208,9 @@ export class Shelly {
   }
 
   private findRewriteHotkey(data: string): { start: number; end: number } | undefined {
-    if (!this.lineEditor) {
+    // A shell that can neither hand over its line nor redraw it below
+    // Shelly's output gets the key itself.
+    if (!this.lineEditor || !(this.lineEditor.canCapture || this.lineEditor.canRedraw)) {
       return undefined;
     }
     let found: { start: number; end: number } | undefined;
@@ -304,21 +316,65 @@ export class Shelly {
 
   /** The rewrite hotkey, at the prompt: take the line the user was typing. */
   private async startRewrite(remainder: string): Promise<void> {
+    const editor = this.lineEditor!;
     this.mode = 'capturing';
     this.queuedInput = remainder;
-    const captured = this.lineEditor?.canCapture ? await this.lineEditor.capture().catch(() => undefined) : undefined;
+    if (!editor.canCapture) {
+      // bash 3.2: the line stays on the shell's input line, and is redrawn
+      // below anything Shelly prints.
+      this.onRewriteHotkey(undefined);
+      return;
+    }
+    const result = await editor.tryCapture().catch((): CaptureResult => ({ status: 'failed', reason: 'no-answer' }));
     if (this.disposed) {
       return;
     }
-    this.onRewriteHotkey(captured);
+    if (result.status === 'captured') {
+      this.onRewriteHotkey(result.line);
+      return;
+    }
+    // The shell still has the line (or, answering late, has it put back),
+    // so the input does not open: say so below the line instead.
+    this.mode = 'shell';
+    this.detector.markLineUnknown();
+    this.flushHeldShellOutput();
+    void this.sayLineUnreadable();
+    const typed = this.queuedInput;
+    this.queuedInput = '';
+    if (typed) {
+      this.handleInput(typed);
+    }
+  }
+
+  /**
+   * Have the shell show, below its line, that Shelly could not read it. A
+   * shell that did not answer may still be busy (in a widget that runs a
+   * program, say), so wait for it to be back at its prompt; keys never go
+   * to a program it started.
+   */
+  private async sayLineUnreadable(): Promise<void> {
+    const editor = this.lineEditor!;
+    for (let waited = 0; !editor.isAtPrompt && waited < NOTICE_WAIT_MS && !this.disposed; waited += NOTICE_POLL_MS) {
+      await new Promise((resolve) => setTimeout(resolve, NOTICE_POLL_MS));
+    }
+    if (this.disposed) {
+      return;
+    }
+    const shown = editor.canNotify && editor.isAtPrompt
+      ? await editor.notify(LINE_UNREADABLE).then(() => true, () => false)
+      : false;
+    if (!shown && !this.disposed) {
+      this.host.write('\u0007');
+    }
   }
 
   /**
    * The rewrite hotkey was pressed at the prompt. `captured` is the line the
    * user was typing, now cleared from the shell's input line; undefined when
-   * the shell cannot report it, and the line is then left as it is. Until
-   * fast mode takes over, this opens the `__` input and puts the line back
-   * once it closes.
+   * the shell cannot hand its line over (bash 3.2), which then stays where
+   * it is. Not called when a capture fails: the line is not Shelly's then.
+   * Until fast mode takes over, this opens the `__` input and puts the line
+   * back once it closes.
    */
   private onRewriteHotkey(captured: CapturedLine | undefined): void {
     this.rewrite = { captured };
@@ -363,9 +419,12 @@ export class Shelly {
         // Have the shell draw a fresh prompt below the response, then pass on
         // anything typed in the meantime.
         if (this.rewrite && !this.rewrite.captured) {
-          // The line is still on the shell's input line: Enter would run it.
-          this.host.write('\r\n');
-          this.lineEditor?.redraw();
+          // The line is still on the shell's input line, where Enter would
+          // run it: have the shell redraw it below instead.
+          if (this.lineEditor?.canRedraw && this.lineEditor.isAtPrompt) {
+            this.host.write('\r\n');
+            this.lineEditor.redraw();
+          }
         } else {
           this.shell.write('\r');
         }

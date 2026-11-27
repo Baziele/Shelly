@@ -97,7 +97,7 @@ and commands typed with a leading space are never recorded.
 Fast mode reads the line being edited and leaves its answer on the shell's
 own input line, ready to edit or run, never run for the user
 (`src/shell/line-editor.ts`). Shelly sends the shell private keys no terminal
-sends (F12, F11, F10, F9 with every modifier held, the one kind of key that
+sends (F12 down to F8 with every modifier held, the one kind of key that
 zle, readline and fish 4 can all bind), and the hooks bind them in every
 keymap (emacs and vi):
 
@@ -108,6 +108,15 @@ keymap (emacs and vi):
   `$`, `!`, tabs and newlines mean nothing to the line editor. The file sits in
   a 0700 directory with a fresh random name per session, and exists only
   until the shell reads it.
+- **notice**: the hooks show a one-line message from the file below the line,
+  leaving the line alone.
+
+Each request is numbered in the file and the hooks echo the number, so a late
+answer is never taken for a newer request's. A capture can fail even where it
+is supported: the line is too long to report (the shell leaves it alone), or
+the shell does not answer in time (when it does, it has cleared the line, and
+Shelly puts it back). The rewrite hotkey then leaves the line with the shell
+and has it show a notice, rather than opening Shelly's input.
 
 | Shell | Capture | Replace |
 |---|---|---|
