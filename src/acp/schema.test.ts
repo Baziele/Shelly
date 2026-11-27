@@ -1,3 +1,6 @@
+// Adapted from T3 Code's effect-acp (MIT License, see src/acp/LICENSE).
+// Upstream: github.com/pingdotgg/t3code, packages/effect-acp/src/schema.test.ts (pinned commit in src/acp/README.md).
+
 import { describe, expect, it } from "./test/effect-vitest.js";
 import * as Schema from "effect/Schema";
 

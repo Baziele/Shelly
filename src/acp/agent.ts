@@ -1,3 +1,6 @@
+// Adapted from T3 Code's effect-acp (MIT License, see src/acp/LICENSE).
+// Upstream: github.com/pingdotgg/t3code, packages/effect-acp/src/agent.ts (pinned commit in src/acp/README.md).
+
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as ErrorReporter from "effect/ErrorReporter";

@@ -1,3 +1,6 @@
+// Adapted from T3 Code's effect-acp (MIT License, see src/acp/LICENSE).
+// Upstream: github.com/pingdotgg/t3code, packages/effect-acp/src/_internal/stdio.ts (pinned commit in src/acp/README.md).
+
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Cause from "effect/Cause";

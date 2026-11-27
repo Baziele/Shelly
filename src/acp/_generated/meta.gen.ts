@@ -1,3 +1,6 @@
+// Adapted from T3 Code's effect-acp (MIT License, see src/acp/LICENSE).
+// Upstream: github.com/pingdotgg/t3code, packages/effect-acp/src/_generated/meta.gen.ts (pinned commit in src/acp/README.md).
+
 export const AGENT_METHODS = {
   initialize: "initialize",
   auth_login: "auth/login",

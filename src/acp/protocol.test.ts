@@ -1,3 +1,6 @@
+// Adapted from T3 Code's effect-acp (MIT License, see src/acp/LICENSE).
+// Upstream: github.com/pingdotgg/t3code, packages/effect-acp/src/protocol.test.ts (pinned commit in src/acp/README.md).
+
 import * as Path from "effect/Path";
 import * as AcpError from "./errors.js";
 import * as Effect from "effect/Effect";

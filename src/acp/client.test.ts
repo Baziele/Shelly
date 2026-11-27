@@ -1,3 +1,6 @@
+// Adapted from T3 Code's effect-acp (MIT License, see src/acp/LICENSE).
+// Upstream: github.com/pingdotgg/t3code, packages/effect-acp/src/client.test.ts (pinned commit in src/acp/README.md).
+
 import * as Path from "effect/Path";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
