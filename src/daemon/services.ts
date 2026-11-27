@@ -91,6 +91,8 @@ export type AgentUpdate =
   }
   | { readonly type: 'permission.resolved'; readonly requestId: string; readonly optionId: string | null }
   | { readonly type: 'mode'; readonly currentModeId: string; readonly availableModes: readonly AgentMode[] }
+  /** The agent named the conversation (Claude Code does, early in the first turn). */
+  | { readonly type: 'title'; readonly title: string }
   | { readonly type: 'notice'; readonly level: 'info' | 'warning' | 'error'; readonly text: string }
   | { readonly type: 'end'; readonly stopReason: StopReason; readonly error: string | null };
 
