@@ -22,10 +22,18 @@ import type { WorkerFailure } from './worker.js';
 const USERNAME = 'opencode';
 const INFO_TIMEOUT_MS = 3000;
 const REQUEST_TIMEOUT_MS = 10_000;
-const SUBSCRIBE_TIMEOUT_MS = 5000;
+export const SUBSCRIBE_TIMEOUT_MS = 5000;
 const START_TIMEOUT_MS = 20_000;
 /** The service sends a heartbeat every 15 seconds; this much silence means it is gone. */
 const SILENCE_MS = 45_000;
+/** How long the connection stays open after its last session ends, so sessions that come and go don't reconnect each time. */
+export const CONNECTION_GRACE_MS = 30_000;
+
+export interface ConnectionTimings {
+  /** How long connecting to the event stream may take. */
+  readonly subscribeTimeoutMs: number;
+}
+
 
 export const SERVICE_DIDNT_START = "OpenCode's background service didn't start. Try `opencode service start`.";
 export const SERVICE_UNREACHABLE = "Shelly couldn't reach OpenCode's background service. Try `opencode service restart`.";
@@ -119,11 +127,14 @@ export class OpenCodeConnection {
   /** Called once when the stream is lost (not when it is closed). */
   onLost: (() => void) | null = null;
 
-  private constructor(private readonly address: ServiceAddress) {}
+  /** When the connection began; sessions made before it are not this daemon's. */
+  readonly openedAt = Date.now();
+
+  private constructor(private readonly address: ServiceAddress, private readonly timings: ConnectionTimings) {}
 
   /** Subscribe to the event stream; resolves once the service has accepted it. */
-  static async open(address: ServiceAddress): Promise<OpenCodeConnection> {
-    const connection = new OpenCodeConnection(address);
+  static async open(address: ServiceAddress, timings: ConnectionTimings = { subscribeTimeoutMs: SUBSCRIBE_TIMEOUT_MS }): Promise<OpenCodeConnection> {
+    const connection = new OpenCodeConnection(address, timings);
     await connection.subscribe();
     return connection;
   }
@@ -166,14 +177,18 @@ export class OpenCodeConnection {
 
   private async subscribe(): Promise<void> {
     let response: Response;
+    // A timer, not AbortSignal.timeout: a fetch's signal stays on its body, and would end the stream itself.
+    const connectTimer = setTimeout(() => this.abort.abort(), this.timings.subscribeTimeoutMs);
     try {
       response = await fetch(`${this.address.url}/api/event`, {
         headers: { authorization: authorization(this.address.password), accept: 'text/event-stream' },
-        signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(SUBSCRIBE_TIMEOUT_MS)]),
+        signal: this.abort.signal,
       });
     } catch {
       this.close();
       throw new OpenCodeServiceError({ kind: 'failed', reason: SERVICE_UNREACHABLE });
+    } finally {
+      clearTimeout(connectTimer);
     }
     if (!response.ok || !response.body) {
       await response.body?.cancel();
@@ -181,10 +196,10 @@ export class OpenCodeConnection {
       const rejected = response.status === 401 || response.status === 403;
       throw new OpenCodeServiceError({ kind: 'failed', reason: rejected ? SERVICE_REJECTED : SERVICE_UNREACHABLE });
     }
-    // The timeout above covered connecting only; the stream itself is watched for silence.
+    // From here the stream is watched for silence only.
     const { promise: accepted, resolve: accept } = Promise.withResolvers<void>();
     void this.read(response.body, accept);
-    const timer = setTimeout(accept, SUBSCRIBE_TIMEOUT_MS);
+    const timer = setTimeout(accept, this.timings.subscribeTimeoutMs);
     await accepted;
     clearTimeout(timer);
     if (this.ended) throw new OpenCodeServiceError({ kind: 'failed', reason: SERVICE_UNREACHABLE });
@@ -254,16 +269,20 @@ export class OpenCodeService {
   private connection: Promise<OpenCodeConnection> | null = null;
   private users = 0;
   private shutDown = false;
+  private grace: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly discover: () => Promise<ServiceAddress>,
     /** Runs on each new connection, in the background. */
     private readonly onConnect: (connection: OpenCodeConnection) => void = () => {},
+    private readonly graceMs = CONNECTION_GRACE_MS,
   ) {}
 
   async acquire(): Promise<OpenCodeConnection> {
     if (this.shutDown) throw new OpenCodeServiceError({ kind: 'failed', reason: 'Shelly is shutting down.' });
     this.users++;
+    clearTimeout(this.grace);
+    this.grace = undefined;
     try {
       const pending = (this.connection ??= this.connect());
       const connection = await pending;
@@ -275,16 +294,25 @@ export class OpenCodeService {
     }
   }
 
+  /** Let go of the connection; it closes once nobody has used it for the grace period. */
   release(): void {
     this.users = Math.max(0, this.users - 1);
     if (this.users > 0 || !this.connection) return;
-    const pending = this.connection;
-    this.connection = null;
-    void pending.then((connection) => connection.close(), () => {});
+    clearTimeout(this.grace);
+    this.grace = setTimeout(() => {
+      this.grace = undefined;
+      if (this.users === 0) this.drop();
+    }, this.graceMs);
+    this.grace.unref();
   }
 
   close(): void {
     this.shutDown = true;
+    clearTimeout(this.grace);
+    this.drop();
+  }
+
+  private drop(): void {
     const pending = this.connection;
     this.connection = null;
     void pending?.then((connection) => connection.close(), () => {});

@@ -10,7 +10,7 @@ import { shellyPaths } from '../../protocol/paths.js';
 import type { FastEvent } from '../../protocol/schema.js';
 import { type ConfigFile, FastService, ShellyConfig } from '../services.js';
 import { makeClaudeBackend } from './claude-worker.js';
-import { discoverService, OpenCodeService, OpenCodeServiceError } from './opencode-server.js';
+import { CONNECTION_GRACE_MS, discoverService, OpenCodeService, OpenCodeServiceError } from './opencode-server.js';
 import { findOpenCodeExecutable, makeOpenCodeBackend, NOT_INSTALLED as OPENCODE_NOT_INSTALLED, sweepSessions } from './opencode-worker.js';
 import { FastPool } from './pool.js';
 import { buildFastMessage, FAST_SYSTEM_PROMPT } from './prompt.js';
@@ -36,6 +36,8 @@ export interface FastSettingsValue {
   readonly claudeExecutable: string | null;
   /** The opencode executable, a path or a name on PATH; null finds `opencode`. */
   readonly opencodeExecutable: string | null;
+  /** How long the connection to OpenCode's service stays open after its last session ends. */
+  readonly opencodeConnectionGraceMs: number;
   /** The environment workers start from, before each backend cleans it. */
   readonly env: NodeJS.ProcessEnv;
 }
@@ -65,6 +67,7 @@ export const fastSettingsFromEnv = (env: NodeJS.ProcessEnv): FastSettingsValue =
   noOutputTimeoutMs: millis(env.SHELLY_FAST_TIMEOUT_MS, NO_OUTPUT_TIMEOUT_MS),
   claudeExecutable: null,
   opencodeExecutable: null,
+  opencodeConnectionGraceMs: CONNECTION_GRACE_MS,
   env,
 });
 
@@ -141,6 +144,7 @@ const make = Effect.gen(function* () {
       return discoverService(executable, settings.env);
     },
     (connection) => void sweepSessions(connection, opencodeHome(settings), () => opencodeSessions),
+    settings.opencodeConnectionGraceMs,
   );
   const shared: Shared = { opencode, opencodeSessions };
   // The pool first: its workers delete their sessions over the connection.

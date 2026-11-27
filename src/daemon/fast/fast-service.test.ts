@@ -48,6 +48,7 @@ const harness = (options: {
     claudeExecutable: FAKE_CLAUDE,
     // Never the real OpenCode: its tests have their own fake.
     opencodeExecutable: '/nonexistent/opencode',
+    opencodeConnectionGraceMs: 0,
     env: { ...process.env, FAKE_CLAUDE_LOG: logFile, ...options.env },
     ...options.settings,
   };

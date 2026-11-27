@@ -22,11 +22,11 @@ export interface FakeOpenCode {
   /** Every request, in order: `METHOD /path` plus the JSON body. */
   readonly requests: { readonly method: string; readonly path: string; readonly body: unknown }[];
   /** Live sessions by id. */
-  readonly sessions: Map<string, { readonly body: unknown; readonly directory: string; turns: number }>;
+  readonly sessions: Map<string, { readonly body: unknown; readonly directory: string; readonly created: number; turns: number }>;
   /** Event streams currently open. */
   readonly streams: () => number;
-  /** Add a session that no live client owns, as a crashed daemon would leave. */
-  readonly addLeftover: (directory: string) => string;
+  /** Add a session that no live client owns, as a crashed daemon would leave; made a minute ago unless `created` says. */
+  readonly addLeftover: (directory: string, created?: number) => string;
   readonly close: () => Promise<void>;
 }
 
@@ -41,7 +41,12 @@ const readBody = async (request: IncomingMessage): Promise<unknown> => {
   return text === '' ? undefined : JSON.parse(text);
 };
 
-export const startFakeOpenCode = async (options: { readonly password?: string; readonly deltaMs?: number } = {}): Promise<FakeOpenCode> => {
+export const startFakeOpenCode = async (options: {
+  readonly password?: string;
+  readonly deltaMs?: number;
+  /** Send a heartbeat comment on every stream this often, as the real service does every 15 s. */
+  readonly heartbeatMs?: number;
+} = {}): Promise<FakeOpenCode> => {
   const password = options.password ?? 'pässword';
   const deltaMs = options.deltaMs ?? 5;
   const expected = `Basic ${Buffer.from(`opencode:${password}`, 'utf8').toString('base64')}`;
@@ -127,13 +132,13 @@ export const startFakeOpenCode = async (options: { readonly password?: string; r
     if (id === undefined && request.method === 'GET') {
       const directory = url.searchParams.get('directory');
       const data = [...sessions].filter(([, s]) => directory === null || s.directory === directory)
-        .map(([sessionId, s]) => ({ id: sessionId, location: { directory: s.directory } }));
+        .map(([sessionId, s]) => ({ id: sessionId, location: { directory: s.directory }, time: { created: s.created } }));
       return json(response, 200, { data, cursor: {} });
     }
     if (id === undefined && request.method === 'POST') {
       const sessionId = `ses_fake${++nextId}`;
       const directory = (body as { location?: { directory?: string } })?.location?.directory ?? '/';
-      sessions.set(sessionId, { body, directory, turns: 0 });
+      sessions.set(sessionId, { body, directory, created: Date.now(), turns: 0 });
       return json(response, 200, { data: { id: sessionId } });
     }
     const session = id === undefined ? undefined : sessions.get(id);
@@ -159,6 +164,11 @@ export const startFakeOpenCode = async (options: { readonly password?: string; r
     return json(response, 404, { message: 'Not found' });
   });
 
+  const heartbeat = options.heartbeatMs === undefined ? undefined : setInterval(() => {
+    for (const stream of streams) stream.write(': heartbeat\n\n');
+  }, options.heartbeatMs);
+  heartbeat?.unref();
+
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
 
@@ -168,12 +178,13 @@ export const startFakeOpenCode = async (options: { readonly password?: string; r
     requests,
     sessions,
     streams: () => streams.size,
-    addLeftover: (directory) => {
+    addLeftover: (directory, created = Date.now() - 60_000) => {
       const sessionId = `ses_left${++nextId}`;
-      sessions.set(sessionId, { body: {}, directory, turns: 0 });
+      sessions.set(sessionId, { body: {}, directory, created, turns: 0 });
       return sessionId;
     },
     close: async () => {
+      clearInterval(heartbeat);
       for (const stream of streams) stream.destroy();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

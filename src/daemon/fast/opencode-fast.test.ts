@@ -13,7 +13,7 @@ import { type FakeOpenCode, startFakeOpenCode } from '../../../test/fixtures/fak
 import type { FastEvent, FastInput } from '../../protocol/schema.js';
 import { type ConfigFile, FastService, ShellyConfig } from '../services.js';
 import * as Fast from './fast-service.js';
-import { SERVICE_REJECTED } from './opencode-server.js';
+import { OpenCodeConnection, type OpenCodeEvent, SERVICE_REJECTED } from './opencode-server.js';
 import { AGENT_ID, NOT_INSTALLED, SIGNED_OUT } from './opencode-worker.js';
 import { FAST_SYSTEM_PROMPT } from './prompt.js';
 
@@ -49,6 +49,7 @@ const harness = async (options: {
     noOutputTimeoutMs: 5000,
     claudeExecutable: '/nonexistent/claude',
     opencodeExecutable: FAKE_OPENCODE,
+    opencodeConnectionGraceMs: 0,
     env: {
       PATH: process.env.PATH,
       HOME: dir,
@@ -375,14 +376,71 @@ describe('FastService on OpenCode', () => {
   it('deletes sessions an earlier daemon left in its folder, and nothing else', async () => {
     const fast = await harness();
     try {
-      const leftover = fast.fake.addLeftover(join(fast.settings.fastHome, 'opencode'));
+      const cwd = join(fast.settings.fastHome, 'opencode');
+      const leftover = fast.fake.addLeftover(cwd);
       const users = fast.fake.addLeftover('/Users/someone/project');
+      // Made after the connection opened, as this daemon's own session is before its id is known.
+      const fresh = fast.fake.addLeftover(cwd, Date.now() + 60_000);
       await fast.ask('hello');
       await until(() => !fast.fake.sessions.has(leftover));
       assert.ok(fast.fake.sessions.has(users));
+      assert.ok(fast.fake.sessions.has(fresh), 'a session newer than the connection is never swept');
       fast.fake.sessions.delete(users);
+      fast.fake.sessions.delete(fresh);
     } finally {
       await fast.dispose();
+    }
+  });
+
+  it('keeps the connection for a grace period after the last session, so sessions that come and go share it', async () => {
+    const fast = await harness({ settings: { keepWarmMs: 0, opencodeConnectionGraceMs: 400 } });
+    try {
+      await fast.ask('hello', 'a');
+      await fast.end('a');
+      await until(() => fast.fake.sessions.size === 0);
+      assert.equal(fast.fake.streams(), 1, 'still open within the grace period');
+      await fast.ask('hello', 'b');
+      await fast.end('b');
+      assert.equal(fast.fake.requests.filter((r) => r.path === '/api/event').length, 1, 'one connection for both');
+      await until(() => fast.fake.streams() === 0, 5000);
+    } finally {
+      await fast.dispose();
+    }
+  });
+});
+
+describe('OpenCodeConnection', () => {
+  it('keeps the event stream open well past the subscribe timeout', async () => {
+    const fake = await startFakeOpenCode({ heartbeatMs: 50 });
+    const connection = await OpenCodeConnection.open({ url: fake.url, password: fake.password }, { subscribeTimeoutMs: 200 });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      assert.equal(connection.closed, false);
+      const created = await connection.request<{ data: { id: string } }>('POST', '/api/session', { location: { directory: '/x' } });
+      const events: OpenCodeEvent[] = [];
+      connection.listen(created.data.id, (event) => events.push(event));
+      await connection.request('POST', `/api/session/${created.data.id}/prompt`, { text: 'reply: ls' });
+      await until(() => events.some((event) => event.type === 'session.execution.succeeded'));
+      assert.equal(fake.streams(), 1);
+      assert.equal(fake.requests.filter((r) => r.path === '/api/event').length, 1, 'never reconnected');
+    } finally {
+      connection.close();
+      await fake.close();
+    }
+  });
+
+  it('gives up on a service that never answers the subscription', async () => {
+    const { createServer } = await import('node:http');
+    const server = createServer(() => {}); // accepts, never responds
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    try {
+      const started = performance.now();
+      await assert.rejects(OpenCodeConnection.open({ url: `http://127.0.0.1:${port}`, password: 'x' }, { subscribeTimeoutMs: 200 }));
+      assert.ok(performance.now() - started < 2000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

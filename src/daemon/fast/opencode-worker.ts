@@ -80,15 +80,21 @@ export const parseModel = (model: string): { readonly providerID: string; readon
   return { providerID: model.slice(0, slash), id: model.slice(slash + 1) };
 };
 
-/** Delete the sessions an earlier daemon left behind in Shelly's folder (it crashed, say). */
+/**
+ * Delete the sessions an earlier daemon left behind in Shelly's folder (it
+ * crashed, say). Only sessions made before this connection opened: one this
+ * daemon is making right now may not be registered yet.
+ */
 export const sweepSessions = async (connection: OpenCodeConnection, cwd: string, keep: () => ReadonlySet<string>): Promise<void> => {
   try {
-    const page = await connection.request<{ data?: { id?: unknown; location?: { directory?: unknown } }[] }>(
+    const page = await connection.request<{ data?: { id?: unknown; location?: { directory?: unknown }; time?: { created?: unknown } }[] }>(
       'GET',
       `/api/session?directory=${encodeURIComponent(cwd)}&limit=100`,
     );
     for (const session of page?.data ?? []) {
+      const created = session.time?.created;
       if (typeof session.id !== 'string' || session.location?.directory !== cwd || keep().has(session.id)) continue;
+      if (typeof created !== 'number' || created >= connection.openedAt) continue;
       await connection.request('DELETE', `/api/session/${encodeURIComponent(session.id)}`, undefined, DELETE_TIMEOUT_MS).catch(() => {});
     }
   } catch {
