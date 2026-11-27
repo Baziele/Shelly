@@ -40,7 +40,7 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -184,6 +184,12 @@ function tap(stream: Stream, rec: Recorder): Stream {
 
 type PermissionPolicy = "allow_once" | "reject_once";
 
+/** A minimal environment for agent-run commands: no API keys or tokens from the user's. */
+const probeCommandEnv = (): NodeJS.ProcessEnv => {
+  const keep = ["PATH", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+  return Object.fromEntries(keep.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]])));
+};
+
 class Probe {
   rec = new Recorder();
   permissionPolicy: PermissionPolicy = "allow_once";
@@ -194,6 +200,31 @@ class Probe {
   private termSeq = 0;
 
   constructor(readonly cwd: string) {}
+
+  /**
+   * `path`, resolved, if it lies inside the probe directory; a request error
+   * otherwise. Compares real, resolved paths, so `..` and a sibling directory
+   * that shares the prefix cannot get out.
+   */
+  insideProbeDir(path: string): string {
+    const root = realpathSync(this.cwd);
+    const target = resolve(root, path);
+    let real = target;
+    try {
+      real = realpathSync(target);
+    } catch {
+      // A file about to be written: check its directory instead.
+      try {
+        real = join(realpathSync(dirname(target)), target.slice(dirname(target).length + 1));
+      } catch {
+        // Its directory does not exist either; the resolved path decides.
+      }
+    }
+    if (real !== root && !real.startsWith(root + sep)) {
+      throw RequestError.invalidParams({ path }, "outside the probe directory");
+    }
+    return real;
+  }
 
   spawn(): Spawned {
     const { command, args, env } = agentCommand();
@@ -220,22 +251,23 @@ class Probe {
         return { outcome: { outcome: "selected", optionId: option.optionId } };
       })
       .onRequest("fs/read_text_file", ({ params }) => {
-        const text = readFileSync(params.path, "utf8");
+        const text = readFileSync(this.insideProbeDir(params.path), "utf8");
         if (params.line == null && params.limit == null) return { content: text };
         const lines = text.split("\n");
         const start = Math.max(0, (params.line ?? 1) - 1);
         return { content: lines.slice(start, params.limit == null ? undefined : start + params.limit).join("\n") };
       })
       .onRequest("fs/write_text_file", ({ params }) => {
-        if (!params.path.startsWith(this.cwd)) throw RequestError.invalidParams({ path: params.path }, "outside the probe directory");
-        writeFileSync(params.path, params.content);
+        writeFileSync(this.insideProbeDir(params.path), params.content);
         return {};
       })
       .onRequest("terminal/create", ({ params }) => {
         const id = `term-${++this.termSeq}`;
+        // The agent is a live model with permissions auto-allowed: keep its
+        // commands in the probe directory and away from the user's secrets.
         const proc = spawn(params.command, params.args ?? [], {
-          cwd: params.cwd ?? this.cwd,
-          env: { ...process.env, ...Object.fromEntries((params.env ?? []).map((e) => [e.name, e.value])) },
+          cwd: this.insideProbeDir(params.cwd ?? this.cwd),
+          env: { ...probeCommandEnv(), ...Object.fromEntries((params.env ?? []).map((e) => [e.name, e.value])) },
           shell: (params.args ?? []).length === 0,
         });
         const entry = {
