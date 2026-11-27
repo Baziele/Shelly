@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import * as Deferred from 'effect/Deferred';
 import * as Effect from 'effect/Effect';
 import * as Exit from 'effect/Exit';
@@ -10,9 +11,10 @@ import * as DaemonLog from './DaemonLog.js';
 import * as DaemonPaths from './DaemonPaths.js';
 import * as Lifecycle from './Lifecycle.js';
 import { type DaemonLockResult, takeDaemonLock } from './lock.js';
-import * as Placeholders from './placeholders.js';
+import * as AgentRuntimeAcp from './agents/runtime.js';
+import * as Fast from './fast/fast-service.js';
 import * as DaemonServer from './server.js';
-import type { AgentRuntime, FastService } from './services.js';
+import type { AgentRuntime, FastService, ShellyConfig } from './services.js';
 import * as ShellyConfigFile from './ShellyConfigFile.js';
 import * as ThreadStore from './store/ThreadStore.js';
 import { ensureThreadHome } from './thread-home.js';
@@ -30,7 +32,15 @@ export const DEFAULT_IDLE_MS = 10 * 60 * 1000;
 /** macOS allows 104 bytes for a unix socket path, including the terminator. */
 const MAX_SOCKET_PATH_BYTES = 103;
 
-type AgentLayers = Layer.Layer<AgentRuntime | FastService>;
+/** Agent mode and fast mode; both read their per-agent settings from ShellyConfig. */
+type AgentLayers = Layer.Layer<AgentRuntime | FastService, never, ShellyConfig>;
+
+/** Agent mode over ACP (src/daemon/agents/) and fast mode's warm workers (src/daemon/fast/). */
+export const realAgentLayers = (env: NodeJS.ProcessEnv): AgentLayers =>
+  Layer.mergeAll(
+    AgentRuntimeAcp.layerWith({ env }),
+    Fast.layer.pipe(Layer.provide(Layer.succeed(Fast.FastSettings, Fast.fastSettingsFromEnv(env)))),
+  ).pipe(Layer.provide(NodeServices.layer));
 
 /**
  * The agent layers. Tests point SHELLY_DAEMON_TEST_RUNTIME at a module that
@@ -42,18 +52,17 @@ const loadAgentLayers = async (env: NodeJS.ProcessEnv): Promise<AgentLayers> => 
     const loaded = (await import(pathToFileURL(testModule).href)) as { layer: AgentLayers };
     return loaded.layer;
   }
-  // The real AgentRuntime (src/daemon/agents/) and FastService (src/daemon/fast/) replace these.
-  return Placeholders.layer;
+  return realAgentLayers(env);
 };
 
 export const makeDaemonLayer = (env: NodeJS.ProcessEnv, agentLayers: AgentLayers, shutdown: Deferred.Deferred<string>) => {
   const idleMs = Number(env.SHELLY_DAEMON_IDLE_MS) > 0 ? Number(env.SHELLY_DAEMON_IDLE_MS) : DEFAULT_IDLE_MS;
   const paths = DaemonPaths.layer(env);
+  const config = ShellyConfigFile.layer.pipe(Layer.provide(paths));
   const base = Layer.mergeAll(
     paths,
-    agentLayers,
+    agentLayers.pipe(Layer.provideMerge(config)),
     ThreadStore.layer.pipe(Layer.provide(paths)),
-    ShellyConfigFile.layer.pipe(Layer.provide(paths)),
     Lifecycle.layer(shutdown),
   );
   const services = ThreadService.layer.pipe(
