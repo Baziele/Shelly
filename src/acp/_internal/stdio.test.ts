@@ -1,10 +1,10 @@
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, it } from "../test/effect-vitest.js";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/process";
 
-import * as AcpError from "../errors.ts";
-import { makeTerminationError } from "./stdio.ts";
+import * as AcpError from "../errors.js";
+import { makeTerminationError } from "./stdio.js";
 
 describe("ACP child process termination", () => {
   it.effect("retains the process identifier and exact exit-status cause", () =>

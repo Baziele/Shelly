@@ -8,18 +8,18 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import { assert, it } from "@effect/vitest";
+import { assert, it } from "./test/effect-vitest.js";
 
-import * as AcpAgent from "./agent.ts";
-import * as AcpSchema from "./_generated/schema.gen.ts";
-import type * as AcpProtocol from "./protocol.ts";
+import * as AcpAgent from "./agent.js";
+import * as AcpSchema from "./_generated/schema.gen.js";
+import type * as AcpProtocol from "./protocol.js";
 import {
   encodeJsonl,
   jsonRpcNotification,
   jsonRpcRequest,
   jsonRpcResponse,
-} from "./_internal/shared.ts";
-import { makeInMemoryStdio } from "./_internal/stdio.ts";
+} from "./_internal/shared.js";
+import { makeInMemoryStdio } from "./_internal/stdio.js";
 
 const RequestPermissionRequest = jsonRpcRequest(
   "session/request_permission",

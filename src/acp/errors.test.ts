@@ -1,10 +1,10 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "./test/effect-vitest.js";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as RpcClientError from "effect/rpc/RpcClientError";
 
-import { callRpc } from "./_internal/shared.ts";
-import * as AcpError from "./errors.ts";
+import { callRpc } from "./_internal/shared.js";
+import * as AcpError from "./errors.js";
 
 const decodeNestedNumberPayload = Schema.decodeUnknownEffect(
   Schema.Struct({ profile: Schema.Struct({ token: Schema.Number }) }),

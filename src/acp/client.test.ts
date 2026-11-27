@@ -15,23 +15,23 @@ import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it, assert } from "@effect/vitest";
+import { it, assert } from "./test/effect-vitest.js";
 
-import * as AcpClient from "./client.ts";
-import * as AcpSchema from "./_generated/schema.gen.ts";
-import * as AcpSchemaV1 from "./_generated/schema-v1.gen.ts";
-import * as AcpError from "./errors.ts";
-import type * as AcpCompat from "./compat.ts";
-import type * as AcpProtocol from "./protocol.ts";
+import * as AcpClient from "./client.js";
+import * as AcpSchema from "./_generated/schema.gen.js";
+import * as AcpSchemaV1 from "./_generated/schema-v1.gen.js";
+import * as AcpError from "./errors.js";
+import type * as AcpCompat from "./compat.js";
+import type * as AcpProtocol from "./protocol.js";
 import {
   encodeJsonl,
   jsonRpcNotification,
   jsonRpcRequest,
   jsonRpcResponse,
-} from "./_internal/shared.ts";
-import { makeInMemoryStdio } from "./_internal/stdio.ts";
+} from "./_internal/shared.js";
+import { makeInMemoryStdio } from "./_internal/stdio.js";
 
-import antigravityInitialize from "../test/fixtures/antigravity-initialize.json" with { type: "json" };
+import antigravityInitialize from "./test/fixtures/antigravity-initialize.json" with { type: "json" };
 
 const InitializeRequest = jsonRpcRequest("initialize", AcpSchema.InitializeRequest);
 const InitializeResponse = jsonRpcResponse(AcpSchema.InitializeResponse);
@@ -84,9 +84,9 @@ const XAiSessionsChangedNotification = jsonRpcNotification(
   }),
 );
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
-  path.join(import.meta.dirname, "../test/fixtures/acp-mock-peer.ts"),
+  path.join(import.meta.dirname, "./test/fixtures/acp-mock-peer.ts"),
 );
-const mockPeerArgs = (path: string) => [path];
+const mockPeerArgs = (path: string) => ["--import", "tsx", path];
 const mockStartupNotice = "Mock ACP startup notice";
 const stripMockStartupNotice = (stdout: ChildProcessSpawner.ChildProcessHandle["stdout"]) =>
   stdout.pipe(
@@ -191,7 +191,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
   it.effect("retains only transformed session updates in raw notifications and handlers", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();
-      const delivered = yield* Deferred.make<import("./compat.ts").SessionNotification>();
+      const delivered = yield* Deferred.make<import("./compat.js").SessionNotification>();
       const imageData = "A".repeat(1_048_576);
       const normalized = {
         sessionId: "session-1",
@@ -199,7 +199,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: "Image data omitted." },
         },
-      } satisfies import("./compat.ts").SessionNotification;
+      } satisfies import("./compat.js").SessionNotification;
       let transformCalls = 0;
       const acp = yield* AcpClient.make(stdio, {
         transformSessionUpdate: (notification) => {
@@ -1695,7 +1695,8 @@ it.effect.each(["accept", "decline", "cancel"] as const)(
       for (const method of ["elicitation/create", "session/elicitation"]) {
         const { stdio, input, output } = yield* makeInMemoryStdio();
         const acp = yield* AcpClient.make(stdio);
-        const answer = action === "accept" ? { action, content: { choice: "yes" } } : { action };
+        const answer: AcpSchema.CreateElicitationResponse =
+          action === "accept" ? { action, content: { choice: "yes" } } : { action };
         const response = { ...answer, _meta: { trace: "fixture" } };
         yield* acp.handleElicitation((request) => {
           assert.deepEqual(request, elicitationForm);

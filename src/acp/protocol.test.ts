@@ -1,5 +1,5 @@
 import * as Path from "effect/Path";
-import * as AcpError from "./errors.ts";
+import * as AcpError from "./errors.js";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -16,18 +16,18 @@ import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { it, assert, expect } from "@effect/vitest";
+import { it, assert, expect } from "./test/effect-vitest.js";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
-import * as AcpSchema from "./schema.ts";
-import * as AcpProtocol from "./protocol.ts";
+import * as AcpSchema from "./schema.js";
+import * as AcpProtocol from "./protocol.js";
 import {
   encodeJsonl,
   jsonRpcNotification,
   jsonRpcRequest,
   jsonRpcResponse,
-} from "./_internal/shared.ts";
-import { makeInMemoryStdio, makeTerminationError, makeChildStdio } from "./_internal/stdio.ts";
+} from "./_internal/shared.js";
+import { makeInMemoryStdio, makeTerminationError, makeChildStdio } from "./_internal/stdio.js";
 
 const SessionCancelNotification = jsonRpcNotification(
   "session/cancel",
@@ -73,9 +73,9 @@ const largeNotification = (index: number, textLength: number) =>
     })}\n`,
   );
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
-  path.join(import.meta.dirname, "../test/fixtures/acp-mock-peer.ts"),
+  path.join(import.meta.dirname, "./test/fixtures/acp-mock-peer.ts"),
 );
-const mockPeerArgs = (path: string) => [path];
+const mockPeerArgs = (path: string) => ["--import", "tsx", path];
 
 const makeHandle = (env?: Record<string, string>) =>
   Effect.gen(function* () {

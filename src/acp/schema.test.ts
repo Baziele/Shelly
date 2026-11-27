@@ -1,8 +1,8 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "./test/effect-vitest.js";
 import * as Schema from "effect/Schema";
 
-import * as V1 from "./_generated/schema-v1.gen.ts";
-import * as V2 from "./schema.ts";
+import * as V1 from "./_generated/schema-v1.gen.js";
+import * as V2 from "./schema.js";
 
 describe("pinned ACP wire schemas", () => {
   it("validates known content variants without accepting malformed ones as future content", () => {
