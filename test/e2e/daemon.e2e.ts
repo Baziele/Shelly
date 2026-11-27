@@ -246,6 +246,28 @@ describe('daemon lifecycle', () => {
     assert.equal((await client.status()).pid, hello.pid);
   });
 
+  it('lets exactly one of several daemons racing for a stale lock survive', async () => {
+    const home = newHome();
+    const paths = shellyPaths({ SHELLY_HOME: home });
+    mkdirSync(paths.runDir, { recursive: true, mode: 0o700 });
+    const gone = spawn(process.execPath, ['-e', '']);
+    await new Promise((resolve) => gone.once('exit', resolve));
+    writeFileSync(paths.lock, JSON.stringify({ pid: gone.pid, startedAt: Date.now() - 60_000 }));
+
+    const daemons = Array.from({ length: 4 }, () => runDaemonProcess(home));
+    await waitFor(() => probeSocket(paths.socket), 'a daemon to listen');
+    // The losers exit on their own; give them time to get there.
+    await waitFor(() => daemons.filter(({ child }) => child.exitCode === null).length === 1, 'all but one daemon to exit');
+    const [survivor] = daemons.filter(({ child }) => child.exitCode === null);
+    for (const daemon of daemons.filter((candidate) => candidate !== survivor)) {
+      assert.equal(daemon.child.exitCode, 0);
+      assert.match(daemon.output(), /another daemon is running/);
+    }
+    const client = newClient(home, { autoStart: false });
+    assert.equal((await connect(client)).pid, survivor?.child.pid);
+    assert.equal(JSON.parse(readFileSync(paths.lock, 'utf8')).pid, survivor?.child.pid);
+  });
+
   it('takes over a stale lock and a stale socket', async () => {
     const home = newHome();
     const paths = shellyPaths({ SHELLY_HOME: home });
