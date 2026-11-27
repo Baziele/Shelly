@@ -10,7 +10,7 @@ import * as AgentDirectory from './AgentDirectory.js';
 import * as DaemonLog from './DaemonLog.js';
 import * as DaemonPaths from './DaemonPaths.js';
 import * as Lifecycle from './Lifecycle.js';
-import { acquireLock, type LockHolder, releaseLock } from './lock.js';
+import { acquireDaemonLock, type DaemonLockResult, loadFlock } from './lock.js';
 import * as Placeholders from './placeholders.js';
 import * as DaemonServer from './server.js';
 import type { AgentRuntime, FastService } from './services.js';
@@ -69,15 +69,28 @@ const say = (text: string): void => {
   process.stderr.write(`${new Date().toISOString()} shelly daemon: ${text}\n`);
 };
 
-const takeLock = async (lockPath: string, socketPath: string): Promise<LockHolder | undefined> => {
-  const first = acquireLock(lockPath);
-  if (first.acquired) {
-    return undefined;
+/**
+ * Take the single-instance lock. With flock there is nothing more to it.
+ * The file-based fallback also treats a live holder as stale when nothing
+ * answers on the socket long after it started (its pid was reused).
+ */
+const takeLock = async (lockPath: string, socketPath: string, env: NodeJS.ProcessEnv): Promise<DaemonLockResult> => {
+  // Test hooks: force the fallback, and start several daemons' attempts at the same instant.
+  const mechanism = env.SHELLY_DAEMON_LOCK === 'file' ? 'file' : 'auto';
+  const startAt = Number(env.SHELLY_DAEMON_TEST_LOCK_AT);
+  if (startAt > Date.now()) {
+    await new Promise((resolve) => setTimeout(resolve, startAt - Date.now()));
   }
-  // A live holder with nothing on the socket long after it started is not a Shelly daemon.
+  const first = await acquireDaemonLock(lockPath, { mechanism });
+  const usesFlock = mechanism !== 'file' && (await loadFlock()) !== undefined;
+  if (first.acquired || usesFlock || first.holder === undefined) {
+    return first;
+  }
   const answers = await probeSocket(socketPath);
-  const second = acquireLock(lockPath, { isStale: (holder) => !answers && Date.now() - holder.startedAt > LOCK_GRACE_MS });
-  return second.acquired ? undefined : second.holder;
+  return acquireDaemonLock(lockPath, {
+    mechanism,
+    isStale: (holder) => !answers && Date.now() - holder.startedAt > LOCK_GRACE_MS,
+  });
 };
 
 /** Runs the daemon to completion; resolves with the process exit code. */
@@ -94,9 +107,10 @@ export const runDaemon = async (env: NodeJS.ProcessEnv = process.env): Promise<n
   }
   chmodSync(paths.runDir, 0o700);
 
-  const holder = await takeLock(paths.lock, paths.socket);
-  if (holder) {
-    say(`another daemon is running (pid ${holder.pid})`);
+  // The socket is cleared and bound only once this lock is held.
+  const taken = await takeLock(paths.lock, paths.socket, env);
+  if (!taken.acquired) {
+    say(`another daemon is running${taken.holder?.pid ? ` (pid ${taken.holder.pid})` : ''}`);
     return 0;
   }
 
@@ -114,7 +128,7 @@ export const runDaemon = async (env: NodeJS.ProcessEnv = process.env): Promise<n
 
     const program = Effect.gen(function* () {
       const lifecycle = yield* Lifecycle.Lifecycle;
-      yield* Effect.logInfo(`started pid=${process.pid}`);
+      yield* Effect.logInfo(`started pid=${process.pid} lock=${taken.lock.mechanism}`);
       const reason = yield* lifecycle.awaitShutdown;
       yield* Effect.logInfo(`stopping: ${reason}`);
     }).pipe(
@@ -134,6 +148,6 @@ export const runDaemon = async (env: NodeJS.ProcessEnv = process.env): Promise<n
     }
     return 0;
   } finally {
-    releaseLock(paths.lock);
+    taken.lock.release();
   }
 };

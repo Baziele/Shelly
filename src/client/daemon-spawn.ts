@@ -67,6 +67,22 @@ export const portableExecArgv = (execArgv: readonly string[], cwd = process.cwd(
   return out;
 };
 
+/**
+ * The daemon's Node flags: this process's, made portable, plus
+ * --experimental-ffi, which the daemon's lock needs (flock through
+ * node:ffi), with its experimental warning kept out of the log.
+ */
+export const daemonExecArgv = (execArgv: readonly string[], cwd = process.cwd()): string[] => {
+  const args = portableExecArgv(execArgv, cwd);
+  if (!args.includes('--experimental-ffi')) {
+    args.unshift('--experimental-ffi');
+  }
+  if (!args.some((arg) => arg === '--no-warnings' || arg.startsWith('--disable-warning'))) {
+    args.unshift('--disable-warning=ExperimentalWarning');
+  }
+  return args;
+};
+
 /** Start a daemon in the background, detached from this process, its output going to the log. */
 export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefined => {
   const env = options.env ?? process.env;
@@ -78,7 +94,7 @@ export const spawnDaemon = (options: DaemonStartOptions = {}): number | undefine
   mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
   const log = openSync(paths.daemonLog, 'a', 0o600);
   try {
-    const child = spawn(process.execPath, [...portableExecArgv(options.execArgv ?? process.execArgv), resolve(entry), 'daemon'], {
+    const child = spawn(process.execPath, [...daemonExecArgv(options.execArgv ?? process.execArgv), resolve(entry), 'daemon'], {
       // Its own session, so closing the terminal does not take it down, and
       // its own directory, so it never holds on to the user's.
       detached: true,

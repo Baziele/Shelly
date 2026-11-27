@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { after, afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { DaemonClient, DaemonDisconnected, type DaemonClientOptions } from '../../src/client/daemon-client.js';
-import { isProcessAlive } from '../../src/daemon/lock.js';
+import { isProcessAlive, readLock } from '../../src/daemon/lock.js';
 import { shellyPaths } from '../../src/protocol/paths.js';
 import { probeSocket } from '../../src/protocol/probe.js';
 import type { PromptContext, ThreadEvent } from '../../src/protocol/schema.js';
@@ -21,7 +21,8 @@ import type { PromptContext, ThreadEvent } from '../../src/protocol/schema.js';
 const ENTRY = fileURLToPath(new URL('../../src/index.ts', import.meta.url));
 const FAKE_RUNTIME = fileURLToPath(new URL('./fake-runtime.ts', import.meta.url));
 const TSX = import.meta.resolve('tsx');
-const EXEC_ARGV = ['--import', TSX];
+// As the shelly script runs it: --experimental-ffi gives the daemon its flock lock.
+const EXEC_ARGV = ['--experimental-ffi', '--no-warnings', '--import', TSX];
 // tsx compiles on the fly, so a spawned daemon is slower to answer here than when built.
 const START_TIMEOUT_MS = 15_000;
 
@@ -179,7 +180,8 @@ describe('daemon over its socket', () => {
     assert.equal(await client.shutdown(false), true);
     await waitFor(() => !isProcessAlive(hello.pid), 'the daemon to exit');
     assert.equal(existsSync(paths.socket), false);
-    assert.equal(existsSync(paths.lock), false);
+    // An flock'd lock file is never removed (that would reopen the race); it is emptied.
+    assert.equal(readLock(paths.lock), undefined);
   });
 
   it('keeps a turn going after its stream is dropped, and answers permissions', async () => {
@@ -246,27 +248,54 @@ describe('daemon lifecycle', () => {
     assert.equal((await client.status()).pid, hello.pid);
   });
 
-  it('lets exactly one of several daemons racing for a stale lock survive', async () => {
-    const home = newHome();
-    const paths = shellyPaths({ SHELLY_HOME: home });
-    mkdirSync(paths.runDir, { recursive: true, mode: 0o700 });
-    const gone = spawn(process.execPath, ['-e', '']);
-    await new Promise((resolve) => gone.once('exit', resolve));
-    writeFileSync(paths.lock, JSON.stringify({ pid: gone.pid, startedAt: Date.now() - 60_000 }));
+  for (const mechanism of ['flock', 'file'] as const) {
+    it(`lets exactly one of several daemons racing for a stale lock survive (${mechanism})`, async () => {
+      const home = newHome();
+      const paths = shellyPaths({ SHELLY_HOME: home });
+      mkdirSync(paths.runDir, { recursive: true, mode: 0o700 });
+      const gone = spawn(process.execPath, ['-e', '']);
+      await new Promise((resolve) => gone.once('exit', resolve));
+      writeFileSync(paths.lock, JSON.stringify({ pid: gone.pid, startedAt: Date.now() - 60_000, mechanism }));
 
-    const daemons = Array.from({ length: 4 }, () => runDaemonProcess(home));
-    await waitFor(() => probeSocket(paths.socket), 'a daemon to listen');
-    // The losers exit on their own; give them time to get there.
-    await waitFor(() => daemons.filter(({ child }) => child.exitCode === null).length === 1, 'all but one daemon to exit');
-    const [survivor] = daemons.filter(({ child }) => child.exitCode === null);
-    for (const daemon of daemons.filter((candidate) => candidate !== survivor)) {
-      assert.equal(daemon.child.exitCode, 0);
-      assert.match(daemon.output(), /another daemon is running/);
-    }
-    const client = newClient(home, { autoStart: false });
-    assert.equal((await connect(client)).pid, survivor?.child.pid);
-    assert.equal(JSON.parse(readFileSync(paths.lock, 'utf8')).pid, survivor?.child.pid);
-  });
+      // Several windows restored at once: every daemon reaches for the lock at the same instant.
+      const lockAt = String(Date.now() + 3000);
+      const extra = { SHELLY_DAEMON_TEST_LOCK_AT: lockAt, ...(mechanism === 'file' ? { SHELLY_DAEMON_LOCK: 'file' } : {}) };
+      const daemons = Array.from({ length: 4 }, () => runDaemonProcess(home, extra));
+      await waitFor(() => probeSocket(paths.socket), 'a daemon to listen');
+      await waitFor(() => daemons.filter(({ child }) => child.exitCode === null).length <= 1, 'all but one daemon to exit');
+      const survivors = daemons.filter(({ child }) => child.exitCode === null);
+      assert.equal(survivors.length, 1, 'exactly one daemon survives');
+      for (const daemon of daemons.filter((candidate) => candidate !== survivors[0])) {
+        assert.equal(daemon.child.exitCode, 0);
+        assert.match(daemon.output(), /another daemon is running/);
+      }
+      const client = newClient(home, { autoStart: false });
+      assert.equal((await connect(client)).pid, survivors[0]?.child.pid);
+      const lock = JSON.parse(readFileSync(paths.lock, 'utf8'));
+      assert.equal(lock.pid, survivors[0]?.child.pid);
+      assert.equal(lock.mechanism, mechanism);
+    });
+
+    it(`lets a new daemon start at once after one is killed holding the lock (${mechanism})`, async () => {
+      const home = newHome();
+      const paths = shellyPaths({ SHELLY_HOME: home });
+      const extra: Record<string, string> = mechanism === 'file' ? { SHELLY_DAEMON_LOCK: 'file' } : {};
+      const first = runDaemonProcess(home, extra);
+      await waitFor(() => probeSocket(paths.socket), 'the first daemon to listen');
+      first.child.kill('SIGKILL');
+      await first.exited;
+      // It left its socket file and its lock file behind.
+      assert.ok(existsSync(paths.socket));
+      assert.equal(JSON.parse(readFileSync(paths.lock, 'utf8')).pid, first.child.pid);
+
+      const second = runDaemonProcess(home, extra);
+      await waitFor(() => probeSocket(paths.socket), 'the second daemon to listen');
+      assert.equal(second.child.exitCode, null);
+      const client = newClient(home, { autoStart: false });
+      assert.equal((await connect(client)).pid, second.child.pid);
+      assert.equal(JSON.parse(readFileSync(paths.lock, 'utf8')).pid, second.child.pid);
+    });
+  }
 
   it('takes over a stale lock and a stale socket', async () => {
     const home = newHome();
