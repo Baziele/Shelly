@@ -95,6 +95,12 @@ export class FakeAgents {
               ? Effect.fail(new UnknownRequest({ requestId }))
               : Effect.sync(() => {
                 this.responses.push({ requestId, optionId });
+                // A scripted agent finishes its turn once it has its answer.
+                if (this.script && this.current) {
+                  Queue.offerUnsafe(this.current, { type: 'permission.resolved', requestId, optionId });
+                  Queue.offerUnsafe(this.current, { type: 'chunk', kind: 'text', text: optionId === 'allow' ? 'Done.' : 'Stopped.' });
+                  Queue.offerUnsafe(this.current, { type: 'end', stopReason: 'end_turn', error: null });
+                }
               }),
           setMode: (modeId: string) => Effect.sync(() => {
             this.modes.push(modeId);
