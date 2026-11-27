@@ -26,6 +26,8 @@ export interface PoolTimings {
   readonly sessionIdleMs: number;
   /** How many conversations may keep a worker at once. */
   readonly maxSessions: number;
+  /** A monotonic clock in ms; tests pass their own. */
+  readonly now?: () => number;
 }
 
 interface AgentPool {
@@ -51,7 +53,11 @@ export class FastPool {
   private readonly live = new Set<FastWorker>();
   private closed = false;
 
-  constructor(private readonly timings: PoolTimings) {}
+  private readonly now: () => number;
+
+  constructor(private readonly timings: PoolTimings) {
+    this.now = timings.now ?? (() => performance.now());
+  }
 
   get workerCount(): number {
     return this.live.size;
@@ -174,20 +180,29 @@ export class FastPool {
   }
 
   private touch(pool: AgentPool): void {
-    pool.lastUsedAt = Date.now();
+    pool.lastUsedAt = this.now();
+    this.armExpiry(pool, this.timings.keepWarmMs);
+  }
+
+  private armExpiry(pool: AgentPool, delayMs: number): void {
     clearTimeout(pool.expiry);
-    pool.expiry = setTimeout(() => this.expire(pool), this.timings.keepWarmMs);
+    pool.expiry = setTimeout(() => this.expire(pool), delayMs);
     pool.expiry.unref();
   }
 
   private expire(pool: AgentPool): void {
-    if (Date.now() - pool.lastUsedAt < this.timings.keepWarmMs) return;
+    const remaining = this.timings.keepWarmMs - (this.now() - pool.lastUsedAt);
+    // A timer can fire a little before the clock says the window is over: wait out the rest.
+    if (remaining > 0) {
+      this.armExpiry(pool, remaining);
+      return;
+    }
     this.dropWarm(pool);
   }
 
   private ensureWarm(pool: AgentPool): void {
     if (this.closed || pool.warm?.alive) return;
-    if (Date.now() - pool.lastUsedAt >= this.timings.keepWarmMs) return;
+    if (this.now() - pool.lastUsedAt >= this.timings.keepWarmMs) return;
     const spawned = this.spawn(pool);
     pool.warm = isWorkerFailure(spawned) ? null : spawned;
   }

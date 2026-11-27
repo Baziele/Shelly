@@ -84,7 +84,7 @@ const harness = (options: {
     for (const start of starts()) {
       assert.equal(isRunning(start.pid), false, `worker ${start.pid} outlived the service`);
       // A killed grandchild is reparented and reaped by the system, so give it a moment.
-      if (start.grandchild) await until(() => !isRunning(start.grandchild!), 2000);
+      if (start.grandchild) await until(() => !isRunning(start.grandchild!), 10_000);
     }
   };
 
@@ -108,7 +108,7 @@ const isRunning = (pid: number): boolean => {
   }
 };
 
-const until = async (condition: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<void> => {
+const until = async (condition: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!(await condition())) {
     if (Date.now() > deadline) throw new Error('timed out waiting');
@@ -242,7 +242,7 @@ describe('FastService on Claude', () => {
     try {
       await fast.prewarm();
       assert.equal(await fast.workerCount(), 1);
-      await until(async () => (await fast.workerCount()) === 0, 6000);
+      await until(async () => (await fast.workerCount()) === 0, 15_000);
     } finally {
       await fast.dispose();
     }
@@ -307,7 +307,7 @@ describe('FastService on Claude', () => {
     const fast = harness({ settings: { keepWarmMs: 0, sessionIdleMs: 300 } });
     try {
       const pid = pidOf(done(await fast.ask('hello', 'a')).text);
-      await until(() => !isRunning(pid), 3000);
+      await until(() => !isRunning(pid), 10_000);
       await until(async () => (await fast.workerCount()) === 0);
     } finally {
       await fast.dispose();

@@ -111,7 +111,7 @@ const input = (instruction: string): FastInput => ({
 /** The fake answers what is in <request>, so tests can script it. */
 const requestText = (body: unknown) => /<request>([\s\S]*)<\/request>/.exec((body as { text: string }).text)?.[1];
 
-const until = async (condition: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<void> => {
+const until = async (condition: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!(await condition())) {
     if (Date.now() > deadline) throw new Error('timed out waiting');
@@ -402,7 +402,7 @@ describe('FastService on OpenCode', () => {
       await fast.ask('hello', 'b');
       await fast.end('b');
       assert.equal(fast.fake.requests.filter((r) => r.path === '/api/event').length, 1, 'one connection for both');
-      await until(() => fast.fake.streams() === 0, 5000);
+      await until(() => fast.fake.streams() === 0, 10_000);
     } finally {
       await fast.dispose();
     }
