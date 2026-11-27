@@ -1,33 +1,17 @@
 #!/usr/bin/env -S node --experimental-ffi --no-warnings
-import { defaultShell } from './shell/shell-session.js';
-import { Shelly } from './shelly.js';
-import { HostTerminal } from './terminal/host-terminal.js';
 
-const host = new HostTerminal();
+/*
+ * Dispatch on argv before importing anything: `shelly daemon …` must not
+ * load the terminal side, and plain `shelly` must not load Effect or any
+ * daemon code on its startup path.
+ */
 
-if (!host.isInteractive) {
-  process.stderr.write('shelly: needs an interactive terminal (stdin and stdout must be a TTY).\n');
-  process.exit(1);
+const [command, ...rest] = process.argv.slice(2);
+
+if (command === 'daemon') {
+  const { main } = await import('./daemon/cli.js');
+  // Exit explicitly: the daemon's runtime and sockets are done by now.
+  process.exit(await main(rest));
+} else {
+  await import('./run-shelly.js');
 }
-
-// Whatever goes wrong, never leave the user's terminal stuck in raw mode.
-const crash = (error: unknown): never => {
-  host.stop();
-  process.stderr.write(`\r\nshelly crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\r\n`);
-  process.exit(1);
-};
-process.on('uncaughtException', crash);
-process.on('unhandledRejection', crash);
-
-const shelly = new Shelly({
-  host,
-  shell: defaultShell(),
-  cwd: process.cwd(),
-  env: process.env,
-});
-
-for (const signal of ['SIGHUP', 'SIGTERM'] as const) {
-  process.on(signal, () => shelly.terminate());
-}
-
-process.exitCode = await shelly.run();
