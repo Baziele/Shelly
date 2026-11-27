@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import type { DaemonClient, HelloResult } from './daemon-client.js';
 import { ensureDaemonStarted } from './daemon-spawn.js';
 
@@ -126,6 +127,11 @@ export class DaemonLink {
 }
 
 const describe = (error: unknown): string => {
-  const text = error instanceof Error ? error.message : String(error);
-  return text.split('\n')[0]?.trim() || "Shelly's background service is not answering.";
+  const text = (error instanceof Error ? error.message : String(error)).split('\n')[0]?.trim();
+  if (!text) {
+    return "Shelly's background service is not answering.";
+  }
+  // One line under the input: paths under the home directory with `~`, so the log's fits.
+  const home = homedir();
+  return home.length > 1 ? text.replaceAll(home, '~') : text;
 };

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { lastPromptRow, startShelly, type ShellyHarness } from './harness.js';
 
@@ -64,6 +67,30 @@ describe('Shelly in a real terminal', { timeout: 30_000 }, () => {
     const transcript = screen.indexOf('$ :: what is up');
     assert.match(screen[transcript + 1] ?? '', /✗ .*agent/i);
     assert.equal(lastPromptRow(screen), transcript + 2, 'no blank line before the prompt');
+  });
+
+  it('stays a plain shell when its background service cannot start, and says why on ::', async () => {
+    // A socket path past the 104-byte limit: the daemon refuses to start.
+    const home = mkdtempSync(join(tmpdir(), 'shelly-'));
+    const shellyHome = join(home, 'x'.repeat(60));
+    try {
+      shelly = await startShelly({ shell: '/bin/zsh', cols: 220, env: { SHELLY_HOME: shellyHome, SHELLY_DAEMON_START_TIMEOUT_MS: '1500' } });
+      await shelly.type('::');
+      const screen = await shelly.waitFor(
+        (rows) => rows.some((row) => row.includes("background service did not start")),
+        'the reason under the input',
+        { timeoutMs: 15_000 },
+      );
+      assert.ok(screen.some((row) => row.includes(join(shellyHome, 'logs', 'daemon.log'))), `names the log:\n${screen.join('\n')}`);
+      await shelly.type(ESCAPE);
+      await shelly.waitFor((rows) => rows[lastPromptRow(rows)]?.trimEnd() === '$', 'the prompt back');
+      await shelly.type('echo still a shell\r');
+      await shelly.waitFor((rows) => rows.includes('still a shell'), 'the shell to run commands');
+    } finally {
+      await shelly?.close();
+      shelly = undefined;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('exits with the shell', async () => {
