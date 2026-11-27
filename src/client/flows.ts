@@ -60,6 +60,11 @@ export class Flows {
     this.agent.relayout();
   }
 
+  /** The daemon connection is up (loaded at idle): fetch what the first prompt will need. */
+  connected(client: DaemonClient): void {
+    void this.agent.connected(client).catch(() => undefined);
+  }
+
   goodbye(client: DaemonClient): Promise<unknown> {
     return this.agent.goodbye(client);
   }

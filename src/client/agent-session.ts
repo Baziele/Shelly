@@ -98,6 +98,8 @@ export class AgentSession {
   /** Per thread, the newest command it has heard about from this terminal. */
   private readonly sentUpTo = new Map<string, number | undefined>();
   private readonly modes = new Map<string, ModeState>();
+  /** Per thread, the mode the user last saw reported, so only changes are shown. */
+  private readonly shownModes = new Map<string, string>();
   private live: LiveTurn | undefined;
   private unseen: UnseenTurn | undefined;
   /** The view on screen now, for resizes. */
@@ -196,7 +198,8 @@ export class AgentSession {
         return `● ${thread.agentId} is working · enter to watch`;
       }
       const mode = this.modeLabel(thread.id);
-      const title = thread.title ? `“${truncateEnd(oneLine(thread.title), TITLE_IN_HINT)}”` : 'this thread';
+      // A thread with no message yet (started by /mode, say) is still a new thread to the user.
+      const title = thread.title ? `“${truncateEnd(oneLine(thread.title), TITLE_IN_HINT)}”` : 'new thread';
       return `${thread.agentId}${mode ? ` · ${mode}` : ''} · ${title}`;
     }
     const agent = this.nextAgentId();
@@ -238,6 +241,7 @@ export class AgentSession {
         this.agents = await client.listAgents();
       }
       const thread = await this.ensureThread(client);
+      view.setAgentName(thread.agentId);
       threadId = thread.id;
       context = await this.contextFor(threadId);
     } catch (error) {
@@ -306,7 +310,8 @@ export class AgentSession {
         case 'background':
           if (live.view === view) {
             live.view = undefined;
-            this.releaseView(view);
+            // The view writes its note and closes right after telling us; give the prompt back after that.
+            setImmediate(() => this.releaseView(view));
           }
           return;
       }
@@ -332,7 +337,7 @@ export class AgentSession {
         if (event.type === 'turn.started' && event.turnId === tracker.turnId) {
           onStarted?.();
         }
-        if (live.view === view) {
+        if (live.view === view && this.shows(event, live.threadId)) {
           view.apply(event);
         }
         if (event.type === 'turn.ended' && event.turnId === tracker.turnId) {
@@ -346,6 +351,19 @@ export class AgentSession {
       }
       throw error;
     }
+  }
+
+  /**
+   * Whether the view shows an event. A thread's first mode report is not a
+   * change (the agent starts in its usual mode), so it says nothing.
+   */
+  private shows(event: ThreadEvent, threadId: string): boolean {
+    if (event.type !== 'mode.changed') {
+      return true;
+    }
+    const known = this.shownModes.get(threadId);
+    this.shownModes.set(threadId, event.currentModeId);
+    return known !== undefined && known !== event.currentModeId;
   }
 
   private track(tracker: Tracker, live: LiveTurn, event: ThreadEvent): void {
@@ -962,6 +980,13 @@ export class AgentSession {
         return "Lost the connection to Shelly's background service · try again";
       default:
         return messageOf(error) || 'Something went wrong.';
+    }
+  }
+
+  /** Once connected: learn the agents now, so the first prompt's view names the right one. */
+  async connected(client: DaemonClient): Promise<void> {
+    if (this.agents.length === 0) {
+      this.agents = await client.listAgents();
     }
   }
 

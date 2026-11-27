@@ -361,7 +361,7 @@ export class Shelly {
         this.warmupTimer = setTimeout(whenIdle, IDLE_MS - quietFor);
         return;
       }
-      void this.link.get().catch(() => undefined);
+      void this.link.get().then((client) => this.flows?.connected(client), () => undefined);
     };
     this.warmupTimer = setTimeout(whenIdle, IDLE_MS);
   }
@@ -496,8 +496,13 @@ export class Shelly {
     this.open = undefined;
     this.busyKeys = undefined;
 
-    // Anything the shell printed meanwhile goes first, on its own lines.
-    const held = this.takeHeldShellOutput();
+    // Anything the shell printed meanwhile goes first, on its own lines. A
+    // shell idle at its prompt only redraws that prompt (on a resize, say),
+    // which the new one replaces: drawn down here, it would show twice.
+    let held = this.takeHeldShellOutput();
+    if (cursor === 'fresh-line' && !held.includes('\n') && this.lineEditor?.isAtPrompt) {
+      held = '';
+    }
     if (held) {
       this.host.write(cursor === 'fresh-line' && !held.endsWith('\n') ? `${held}\r\n` : held);
     }

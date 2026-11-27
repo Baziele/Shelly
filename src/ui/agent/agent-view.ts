@@ -127,7 +127,7 @@ export class AgentView {
   private readonly listeners = new Set<(action: AgentAction) => void>();
   private readonly now: () => number;
   /** The agent's name as shown: it comes from config or the daemon, so it is sanitized. */
-  private readonly agentName: string;
+  private agentName: string;
 
   private state: State = 'created';
   private startedAt = 0;
@@ -209,6 +209,12 @@ export class AgentView {
     if (event.type === 'turn.ended') {
       this.timers.clearInterval(this.spinnerTimer);
     }
+    this.schedule();
+  }
+
+  /** The agent turned out to be another than the view was made for (it was not known yet). */
+  setAgentName(name: string): void {
+    this.agentName = oneLine(name) || 'agent';
     this.schedule();
   }
 
