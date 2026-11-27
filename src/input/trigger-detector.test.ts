@@ -55,6 +55,29 @@ describe('TriggerDetector', () => {
     assert.ok(triggered(subject.push('::')));
   });
 
+  it("ignores the terminal's replies to the shell's queries", () => {
+    const replies = [
+      '\u001b[?62;22c', // device attributes
+      '\u001b[?0u', // keyboard protocol flags
+      '\u001b[?2026;2$y', // mode report
+      '\u001b[12;5R', // cursor position
+      '\u001b[I', // focus in
+      '\u001b]11;rgb:0000/0000/0000\u001b\\', // background color
+      '\u001bP1+r696e646e=78\u001b\\', // capability
+    ];
+    for (const reply of replies) {
+      const subject = detector();
+      assert.equal(forwarded(subject.push(reply)), reply);
+      assert.ok(triggered(subject.push('::')), `after ${JSON.stringify(reply)}`);
+    }
+
+    // Even arriving between the two characters of a trigger.
+    const subject = detector();
+    const actions = subject.push(':\u001b[?62c:');
+    assert.equal(forwarded(actions), '\u001b[?62c');
+    assert.ok(triggered(actions));
+  });
+
   it('does not fire inside a bracketed paste', () => {
     assert.equal(triggered(detector().push('\u001b[200~::x\u001b[201~')), undefined);
   });

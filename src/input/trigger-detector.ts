@@ -11,6 +11,9 @@
  * from keystrokes: Enter and Ctrl+C start a fresh line, printable characters
  * and backspaces are counted, and anything else (arrow keys, Tab, history
  * search, pastes) marks the line as unknown until the next fresh line.
+ * Replies the terminal sends to the shell's own queries (fish asks for device
+ * attributes and colors at every prompt, for one) travel the same way but are
+ * not keystrokes, so they pass through without counting.
  */
 
 export type TriggerAction =
@@ -29,6 +32,38 @@ const CTRL_C = '\u0003';
 const CTRL_U = '\u0015';
 const BACKSPACE = '\b';
 const DELETE = '\u007f';
+
+/**
+ * Sequences only a terminal sends, in reply to a query or to report an event:
+ * CSI with a private marker (device attributes, mode and keyboard-protocol
+ * reports, SGR mouse), cursor position reports, focus in/out, window reports,
+ * and OSC/DCS/APC strings (colors, capabilities). No key produces these.
+ */
+const TERMINAL_REPORT = new RegExp(
+  [
+    '\\u001b\\[[?>=<][0-9;:$]*[A-Za-z~]',
+    '\\u001b\\[\\d+;\\d+R',
+    '\\u001b\\[[IO]',
+    '\\u001b\\[[0-9;]*t',
+    '\\u001b\\][^\\u0007\\u001b]*(?:\\u0007|\\u001b\\\\)',
+    '\\u001b[P_^][^\\u001b]*\\u001b\\\\',
+  ].join('|'),
+  'gu',
+);
+
+/** Code points, except that terminal reports stay whole. */
+const tokenize = (input: string): string[] => {
+  const tokens: string[] = [];
+  let cursor = 0;
+  for (const match of input.matchAll(TERMINAL_REPORT)) {
+    tokens.push(...Array.from(input.slice(cursor, match.index)), match[0]);
+    cursor = match.index + match[0].length;
+  }
+  tokens.push(...Array.from(input.slice(cursor)));
+  return tokens;
+};
+
+const isTerminalReport = (token: string): boolean => token.length > 1 && token.startsWith('\u001b');
 
 export class TriggerDetector {
   private readonly triggers: readonly string[];
@@ -54,11 +89,17 @@ export class TriggerDetector {
 
   push(input: string): TriggerAction[] {
     const actions: TriggerAction[] = [];
-    const characters = Array.from(input);
+    const characters = tokenize(input);
     let forward = '';
 
     for (let index = 0; index < characters.length; index++) {
       const character = characters[index]!;
+
+      if (isTerminalReport(character)) {
+        // Neither typed text nor an edit; a trigger being held keeps forming.
+        forward += character;
+        continue;
+      }
 
       if (this.held) {
         const candidate = this.held + character;
