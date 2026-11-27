@@ -514,10 +514,13 @@ export class Shelly {
     this.busyKeys = undefined;
 
     // Anything the shell printed meanwhile goes first, on its own lines. A
-    // shell idle at its prompt only redraws that prompt (on a resize, say),
-    // which the new one replaces: drawn down here, it would show twice.
+    // shell idle at its prompt only draws its line editor (a prompt redrawn
+    // on a resize, an async prompt segment), with cursor moves relative to
+    // the old prompt further up: drawn down here, it would land on Shelly's
+    // output (fish 3 repaints over the last rows) and show the prompt twice.
+    // The new prompt replaces all of it.
     let held = this.takeHeldShellOutput();
-    if (cursor === 'fresh-line' && !held.includes('\n') && this.lineEditor?.isAtPrompt) {
+    if (cursor === 'fresh-line' && this.lineEditor?.isAtPrompt) {
       held = '';
     }
     if (held) {

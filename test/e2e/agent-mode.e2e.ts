@@ -199,6 +199,27 @@ for (const shell of E2E_SHELLS) {
       assertClean(lines);
     });
 
+    it('keeps its output when the idle shell redraws its prompt meanwhile', { skip: basename(shell) !== 'zsh' && 'a zsh prompt that redraws itself' }, async () => {
+      // A two-line prompt redrawn every second, as fish 3 does on a resize and async prompts do:
+      // each redraw moves the cursor up from where the shell thinks its prompt is.
+      stack = await startStack({
+        shell,
+        cols: 90,
+        rows: 20,
+        files: { '.zshrc': "PS1=$'top\\n$ '\nTMOUT=1\nTRAPALRM() { zle reset-prompt }\n" },
+      });
+      const driver = stack.driver;
+      await driver.type('::slow redraws\r');
+      const lines = await driver.waitFor(
+        (rows) => rows.some((row) => row.includes('The build passed')) && rows.some((row) => /^✓ /.test(row)) && atPrompt(rows),
+        'the turn to end and the prompt to come back',
+        { timeoutMs: TURN_MS },
+      );
+      const summary = lines.findIndex((row) => /^✓ /.test(row));
+      assert.deepEqual(lines.slice(summary, summary + 3).map((row) => row.trimEnd()), [lines[summary]!.trimEnd(), 'top', '$'], lines.join('\n'));
+      assert.equal(lines.filter((row) => row.trimEnd() === 'top').length, 2, 'one prompt before the request, one after');
+    });
+
     it('starts the daemon on demand, and carries on after it is killed', async () => {
       const driver = await start();
       // Straight away: the daemon is started by the first prompt, or by this.
