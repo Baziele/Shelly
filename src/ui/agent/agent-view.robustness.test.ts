@@ -189,7 +189,17 @@ describe('cost after big output', { timeout: 60_000 }, () => {
     const code = Array.from({ length: 3000 }, (_, index) => `line ${index}`).join('\n');
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `\`\`\`\n${code}` }));
     await sleep(400);
-    assert.ok(view.renderStats.averageFrameMs > 1, `frames reported at ${view.renderStats.averageFrameMs} ms`);
+    const statsBefore = view.renderStats;
+    const cpuBefore = process.cpuUsage();
+    await sleep(1000);
+    const cpu = process.cpuUsage(cpuBefore);
+    const statsAfter = view.renderStats;
+    const frames = statsAfter.frames - statsBefore.frames;
+    const reportedMs = statsAfter.averageFrameMs * statsAfter.frames - statsBefore.averageFrameMs * statsBefore.frames;
+    const cpuMs = (cpu.user + cpu.system) / 1000;
+    assert.ok(frames > 0);
+    // Nearly all the work here is OpenTUI drawing the open block; the stats must not leave it out.
+    assert.ok(reportedMs >= cpuMs * 0.3, `stats report ${reportedMs.toFixed(0)} ms for ${frames} frames that took ${cpuMs.toFixed(0)} ms of CPU`);
   });
 
   it('redraws a waiting prompt about once a second, not every spinner frame', async () => {
@@ -259,8 +269,8 @@ describe('narrow terminals', () => {
     const code = Array.from({ length: 40 }, (_, index) => `line ${index}`).join('\n');
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `Here:\n\n\`\`\`ts\n${code}` }));
     await waitForScreen(term, (lines) => lines.some((line) => line.includes('⋮')));
-    const buffer = term.terminal.buffer.active;
-    const wrapped = Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)).filter((line) => line?.isWrapped).length;
-    assert.equal(wrapped, 0, (await term.screen()).join('\n'));
+    const note = (await term.screen()).find((line) => line.includes('⋮'))!;
+    // Fitted with an ellipsis, not cut off mid-word by the terminal's edge.
+    assert.ok(note.length <= 40 && note.endsWith('…'), JSON.stringify(note));
   });
 });
