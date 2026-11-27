@@ -170,6 +170,7 @@ export class LineEditor {
     try {
       // mkdtemp makes the directory 0700.
       this.lineDir = mkdtempSync(join(options.runtimeDir ?? tmpdir(), 'shelly-'));
+      removeOnExit(this.lineDir);
       this.lineFile = join(this.lineDir, `line-${randomBytes(12).toString('hex')}`);
     } catch {
       this.lineDir = undefined;
@@ -376,6 +377,7 @@ export class LineEditor {
       this.pendingSet = undefined;
     }
     if (this.lineDir) {
+      liveDirs.delete(this.lineDir);
       rmSync(this.lineDir, { recursive: true, force: true });
     }
   }
@@ -519,6 +521,28 @@ export class LineEditor {
     this.write(LINE_KEYS.clear + text.replace(/\t/g, ' ').replace(CONTROL_CHARACTERS, ''));
   }
 }
+
+/** Line file directories not yet disposed of, removed if the process exits first (a crash, say). */
+const liveDirs = new Set<string>();
+let exitHookInstalled = false;
+
+const removeOnExit = (dir: string): void => {
+  liveDirs.add(dir);
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    // `exit` handlers must be synchronous; this is the last chance.
+    process.on('exit', () => {
+      for (const live of liveDirs) {
+        try {
+          rmSync(live, { recursive: true, force: true });
+        } catch {
+          // Best effort.
+        }
+      }
+      liveDirs.clear();
+    });
+  }
+};
 
 /** The index in `text` (UTF-16) of the code point at position `count`. */
 const codePointsToIndex = (text: string, count: number): number => {

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { LINE_KEYS, LineEditor } from './line-editor.js';
 
@@ -36,6 +38,31 @@ describe('LineEditor', () => {
     editor = undefined;
     rmSync(runtimeDir, { recursive: true, force: true });
   });
+
+  for (const ending of ['exits normally', 'dies of an uncaught exception'] as const) {
+    it(`removes the line file's directory when the process ${ending} without disposing of it`, () => {
+      const scriptDir = mkdtempSync(join(tmpdir(), 'shelly-line-editor-exit-'));
+      try {
+        const script = join(scriptDir, 'exit.ts');
+        writeFileSync(
+          script,
+          [
+            `import { LineEditor } from ${JSON.stringify(fileURLToPath(new URL('./line-editor.ts', import.meta.url)))};`,
+            'const editor = new LineEditor({ write: () => undefined, runtimeDir: process.argv[2] });',
+            'console.log(editor.lineFile);',
+            "if (process.argv[3] === 'throw') setTimeout(() => { throw new Error('boom'); }, 0);",
+          ].join('\n'),
+        );
+        const mode = ending === 'exits normally' ? 'exit' : 'throw';
+        const result = spawnSync(process.execPath, ['--import', 'tsx', script, runtimeDir, mode], { encoding: 'utf8' });
+        assert.equal(result.status, mode === 'exit' ? 0 : 1, result.stderr);
+        assert.match(result.stdout, /shelly-[^/]+\/line-[0-9a-f]{24}\n$/, 'it made the directory');
+        assert.deepEqual(readdirSync(runtimeDir), [], 'and it is gone');
+      } finally {
+        rmSync(scriptDir, { recursive: true, force: true });
+      }
+    });
+  }
 
   it('keeps the line file in a private directory that goes away on dispose', () => {
     const subject = create(['capture', 'set']);
