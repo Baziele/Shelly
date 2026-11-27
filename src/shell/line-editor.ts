@@ -88,10 +88,20 @@ export interface LineEditorOptions {
   readonly timeoutMs?: number;
   /** After the line is captured, how long the shell's output must be quiet before its redraw counts as done. */
   readonly settleMs?: number;
+  /**
+   * After an Enter, how long the shell may stay quiet without starting a
+   * command before it counts as still at its prompt.
+   */
+  readonly enterQuietMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 1000;
 const DEFAULT_SETTLE_MS = 30;
+/**
+ * A shell reports a command (`exec`) as soon as it takes the line, so after
+ * this long with nothing from it, the Enter did not run one.
+ */
+const DEFAULT_ENTER_QUIET_MS = 300;
 /** However busy the output, a capture is done this long after the shell answered. */
 const MAX_SETTLE_MS = 300;
 
@@ -128,8 +138,17 @@ export class LineEditor {
   private readonly isShellInForeground: () => boolean;
   private readonly timeoutMs: number;
   private readonly settleMs: number;
+  private readonly enterQuietMs: number;
   private features = new Set<string>();
+  /** The shell has drawn a prompt (`cwd`) and not started a command (`exec`) since. */
   private atPrompt = false;
+  /**
+   * Set from an Enter at the prompt until the shell starts a command, draws
+   * a new prompt, or stays quiet for `enterQuietMs`: an Enter that continues
+   * the line (an open quote, a trailing `\`) or accepts a completion menu or
+   * a history search leaves the shell at the same prompt, with no marker.
+   */
+  private enterTimer: NodeJS.Timeout | undefined;
   private bracketedPaste = false;
   private pendingCapture: PendingCapture | undefined;
   private pendingSet: PendingSet | undefined;
@@ -147,9 +166,11 @@ export class LineEditor {
     this.isShellInForeground = options.isShellInForeground ?? (() => true);
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
+    this.enterQuietMs = options.enterQuietMs ?? DEFAULT_ENTER_QUIET_MS;
     try {
       // mkdtemp makes the directory 0700.
       this.lineDir = mkdtempSync(join(options.runtimeDir ?? tmpdir(), 'shelly-'));
+      removeOnExit(this.lineDir);
       this.lineFile = join(this.lineDir, `line-${randomBytes(12).toString('hex')}`);
     } catch {
       this.lineDir = undefined;
@@ -179,10 +200,11 @@ export class LineEditor {
 
   /**
    * The shell is waiting at its prompt: it has drawn one (`cwd`) and not
-   * started a command since, and nothing else owns the terminal.
+   * started a command since, is not just taking an Enter, and nothing else
+   * owns the terminal.
    */
   get isAtPrompt(): boolean {
-    return this.atPrompt && !this.disposed && this.isShellInForeground();
+    return this.atPrompt && this.enterTimer === undefined && !this.disposed && this.isShellInForeground();
   }
 
   private get canSet(): boolean {
@@ -197,9 +219,11 @@ export class LineEditor {
         break;
       case 'cwd':
         this.atPrompt = true;
+        this.clearEnter();
         break;
       case 'exec':
         this.atPrompt = false;
+        this.clearEnter();
         break;
       case 'line':
         this.handleLine(event.request, event.line);
@@ -223,6 +247,8 @@ export class LineEditor {
         this.bracketedPaste = match[1] === 'h';
       }
     }
+    // Still busy with the Enter: wait for it to go quiet.
+    this.enterTimer?.refresh();
     const capture = this.pendingCapture;
     if (capture?.answer) {
       this.settle(capture);
@@ -231,8 +257,8 @@ export class LineEditor {
 
   /**
    * Keystrokes on their way to the shell. Removes Shelly's private keys
-   * while the shell is at its prompt, so typing one cannot set off a widget,
-   * and notes Enter, after which the shell may have started a command.
+   * until the shell reports a command, so typing one cannot set off a
+   * widget, and notes Enter, after which the shell may be starting one.
    */
   filterInput(data: string): string {
     // A pasted newline is text, not Enter.
@@ -240,8 +266,14 @@ export class LineEditor {
     if (!this.atPrompt) {
       return data;
     }
-    if (/[\r\n]/.test(typed)) {
-      this.atPrompt = false;
+    if (/[\r\n]/.test(typed) && !this.disposed) {
+      // Until the shell says what the Enter did. The keys are still removed
+      // meanwhile: whatever the shell starts, nothing it runs needs them.
+      clearTimeout(this.enterTimer);
+      this.enterTimer = setTimeout(() => {
+        this.enterTimer = undefined;
+      }, this.enterQuietMs);
+      this.enterTimer.unref();
     }
     return data.includes('\u001b[') ? data.replace(LINE_KEY_PATTERN, '') : data;
   }
@@ -332,6 +364,7 @@ export class LineEditor {
   /** Stop waiting for the shell and remove the line file's directory. */
   dispose(): void {
     this.disposed = true;
+    this.clearEnter();
     if (this.pendingCapture) {
       clearTimeout(this.pendingCapture.timer);
       clearTimeout(this.pendingCapture.settleTimer);
@@ -344,6 +377,7 @@ export class LineEditor {
       this.pendingSet = undefined;
     }
     if (this.lineDir) {
+      liveDirs.delete(this.lineDir);
       rmSync(this.lineDir, { recursive: true, force: true });
     }
   }
@@ -377,6 +411,11 @@ export class LineEditor {
     if (late && line?.buffer && this.canSet) {
       this.setLine(line.buffer, codePointsToIndex(line.buffer, line.cursor)).catch(() => undefined);
     }
+  }
+
+  private clearEnter(): void {
+    clearTimeout(this.enterTimer);
+    this.enterTimer = undefined;
   }
 
   private abandon(request: number): void {
@@ -482,6 +521,28 @@ export class LineEditor {
     this.write(LINE_KEYS.clear + text.replace(/\t/g, ' ').replace(CONTROL_CHARACTERS, ''));
   }
 }
+
+/** Line file directories not yet disposed of, removed if the process exits first (a crash, say). */
+const liveDirs = new Set<string>();
+let exitHookInstalled = false;
+
+const removeOnExit = (dir: string): void => {
+  liveDirs.add(dir);
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    // `exit` handlers must be synchronous; this is the last chance.
+    process.on('exit', () => {
+      for (const live of liveDirs) {
+        try {
+          rmSync(live, { recursive: true, force: true });
+        } catch {
+          // Best effort.
+        }
+      }
+      liveDirs.clear();
+    });
+  }
+};
 
 /** The index in `text` (UTF-16) of the code point at position `count`. */
 const codePointsToIndex = (text: string, count: number): number => {

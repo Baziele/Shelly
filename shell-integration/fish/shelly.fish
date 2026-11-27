@@ -68,6 +68,9 @@ if test -n "$__shelly_nonce"
         test -n "$file" -a -f "$file" -a ! -L "$file"; or return
         set -l header
         set -l text
+        # An empty IFS: `read` neither splits nor trims, whatever the user's
+        # IFS, so leading and trailing whitespace stays on the line.
+        set -l IFS
         begin
             read header
             # Up to a NUL, which never comes: everything else, newlines included.

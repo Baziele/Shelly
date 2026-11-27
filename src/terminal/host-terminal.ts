@@ -69,18 +69,31 @@ export class HostTerminal {
   /**
    * Leave raw mode and stop reading, and leave the screen usable whatever was
    * drawing on it (a crash mid-frame included): synchronized output ended,
-   * attributes reset, cursor shown. Safe to call more than once.
+   * attributes reset, cursor shown. Safe to call more than once, and with
+   * the output already gone (EPIPE at teardown): raw mode goes first.
    */
   stop(): void {
-    if (this.started) {
-      this.started = false;
-      this.write(ansi.endSynchronizedUpdate + ansi.resetStyle + ansi.showCursor);
-    }
     this.input.off('data', this.handleData);
     if (this.input.isTTY) {
-      this.input.setRawMode(false);
+      try {
+        this.input.setRawMode(false);
+      } catch {
+        // The terminal is gone; there is no mode to restore.
+      }
     }
     this.input.pause();
+    if (this.started) {
+      this.started = false;
+      const output = this.output;
+      // Writing to a stream that has ended or been destroyed fails later, as an error event.
+      if (output.writable && !output.destroyed) {
+        try {
+          output.write(ansi.endSynchronizedUpdate + ansi.resetStyle + ansi.showCursor);
+        } catch {
+          // Nothing left to draw on.
+        }
+      }
+    }
     // Nothing is delivered or settled after this: the query in flight fails, and every timer goes.
     this.inputListener = undefined;
     const query = this.pendingCursorQuery;

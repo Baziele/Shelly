@@ -38,6 +38,62 @@ const SLOW_KEY: Record<string, string> = {
 
 const NOTICE = "Shelly couldn't read the line you were typing";
 
+/** The input, open in place of the line or (bash 3.2) after it, on a prompt's or a continuation line's row. */
+const inputOpen = (rows: string[]): boolean => rows.some((row) => /__(?:\s|$)/.test(row));
+
+interface StayingEnter {
+  readonly name: string;
+  readonly shells: readonly string[];
+  /** Appended to the shell's startup file. */
+  readonly startup?: Partial<Record<string, string>>;
+  /** Typed before the Enter, each with what the screen shows once the shell has it (absent: a pause). */
+  readonly before: readonly { readonly keys: string; readonly shown?: (rows: string[]) => boolean }[];
+  /** The Enter, when not `\r`. */
+  readonly enter?: Partial<Record<string, string>>;
+  /** Typed after the hotkey round trip; and what shows the line still works. */
+  readonly finish: string;
+  readonly finished: (rows: string[]) => boolean;
+}
+
+/**
+ * Enters that leave the shell at the same prompt, with no command run and no
+ * new prompt drawn, so no marker says so.
+ */
+const STAYING_ENTERS: readonly StayingEnter[] = [
+  {
+    name: 'an open quote, which asks for a continuation line',
+    shells: ['zsh', 'bash', 'fish'],
+    before: [{ keys: "echo 'a", shown: (rows) => promptRow(rows) === "$ echo 'a" }],
+    finish: "b'\r",
+    finished: (rows) => rows.includes('a') && rows.includes('b'),
+  },
+  {
+    name: 'accepting a completion from the selection menu',
+    shells: ['zsh'],
+    startup: {
+      zsh: ": > menu-one; : > menu-two\nzmodload zsh/complist\nautoload -Uz compinit && compinit -u\nzstyle ':completion:*' menu select\n",
+    },
+    before: [
+      { keys: 'echo ./menu-', shown: (rows) => promptRow(rows) === '$ echo ./menu-' },
+      { keys: '\t' },
+      { keys: '\t', shown: (rows) => /^\$ echo \.\/menu-(one|two)/.test(promptRow(rows)) },
+    ],
+    finish: '\r',
+    finished: (rows) => rows.some((row) => /^\.\/menu-(one|two)$/.test(row)),
+  },
+  {
+    name: 'accepting a history search',
+    shells: ['zsh', 'bash', 'fish'],
+    // zsh runs the line on Enter unless the user binds it to accept the search.
+    startup: { zsh: "bindkey -M isearch '^M' accept-search\n" },
+    before: [{ keys: 'echo found\r', shown: (rows) => rows.includes('found') }, { keys: '\u0012found' }],
+    // readline ends a search on Ctrl+J without running the line; then to
+    // the end of it, as bash 3.2 opens the input where the cursor is.
+    enter: { bash: '\n\u0005' },
+    finish: '\r',
+    finished: (rows) => rows.filter((row) => row === 'found').length === 2,
+  },
+];
 const shells = ['/bin/zsh', '/bin/bash', ...(process.env.SHELLY_E2E_SHELLS?.split(':').filter(Boolean) ?? [])]
   .filter((shell) => existsSync(shell) && basename(shell) in STARTUP_FILES);
 
@@ -176,6 +232,31 @@ for (const shell of shells) {
         assert.ok(!screen.includes('half'), 'the line did not run');
         await session.type('\r');
         await session.waitFor((rows) => rows.includes('half'), 'the command to run');
+      });
+    }
+
+    for (const enter of STAYING_ENTERS.filter((candidate) => candidate.shells.includes(kind))) {
+      it(`works again after ${enter.name}`, async () => {
+        const session = await start(enter.startup?.[kind]);
+        for (const step of enter.before) {
+          await session.type(step.keys);
+          if (step.shown) {
+            await session.waitFor(step.shown, JSON.stringify(step.keys));
+          } else {
+            await sleep(400);
+          }
+        }
+        await session.type(enter.enter?.[kind] ?? '\r');
+        // The shell takes the Enter, and runs nothing.
+        await sleep(600);
+        const line = promptRow(await session.screen());
+
+        await session.type(HOTKEY);
+        await session.waitFor(inputOpen, 'the input');
+        await session.type(ESCAPE);
+        await session.waitFor((rows) => !inputOpen(rows) && promptRow(rows) === line, 'the line put back');
+        await session.type(enter.finish);
+        await session.waitFor(enter.finished, 'the line to run as it was');
       });
     }
 
