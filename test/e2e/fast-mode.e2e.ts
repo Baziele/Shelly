@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { basename } from 'node:path';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { shellyPaths } from '../../src/protocol/paths.js';
+import { probeSocket } from '../../src/protocol/probe.js';
 import { lastPromptRow, type ScenarioDriver } from '../tools/scenario.js';
 import { E2E_SHELLS, type Stack, startStack } from './stack.js';
 
@@ -61,6 +66,42 @@ for (const shell of E2E_SHELLS) {
       await openFast(driver);
       await driver.type('something else\r');
       await driver.waitFor((rows) => /^\$ echo pid=\d+ turn=1$/.test(promptRow(rows)), 'a new conversation', { timeoutMs: REPLY_MS });
+    });
+
+    it('never sends a request stopped while it was getting ready, and the next one works', async () => {
+      const log = join(tmpdir(), `shelly-fake-claude-${process.pid}-${Date.now()}.ndjson`);
+      try {
+        // The daemon waits 4 s before it answers (a test hook), so the first request waits for it to connect.
+        stack = await startStack({
+          shell,
+          cols: 100,
+          rows: 24,
+          fakeClaudeEnv: { FAKE_CLAUDE_LOG: log },
+          env: { SHELLY_DAEMON_TEST_LOCK_AT: String(Date.now() + 4000) },
+        });
+        const driver = stack.driver;
+        await openFast(driver);
+        await driver.type('reply: never sent\r');
+        await driver.waitFor((rows) => rows.some((row) => /__ reply: never sent [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(row)), 'the request getting ready');
+        await driver.press('esc');
+        await driver.waitFor((rows) => promptRow(rows) === '$' && !rows.some((row) => row.includes('never sent')), 'the input closed');
+        // Let the daemon come up, and anything still pending reach it, before asking again.
+        const socket = shellyPaths({ SHELLY_HOME: stack.shellyHome }).socket;
+        for (let waited = 0; waited < 15_000 && !(await probeSocket(socket)); waited += 100) {
+          await sleep(100);
+        }
+        await sleep(1500);
+
+        await openFast(driver);
+        await driver.type('reply: # The second one.\r');
+        await driver.waitFor((rows) => rows.some((row) => row === 'The second one.') && promptRow(rows) === '$', 'the next request', { timeoutMs: REPLY_MS });
+        const requests = existsSync(log)
+          ? readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { event: string; request?: string }).filter((entry) => entry.event === 'request')
+          : [];
+        assert.deepEqual(requests.map((entry) => entry.request), ['reply: # The second one.'], 'only the second request reached claude');
+      } finally {
+        rmSync(log, { force: true });
+      }
     });
 
     it('prints an answer below the request, then the prompt', async () => {

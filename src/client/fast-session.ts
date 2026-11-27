@@ -65,13 +65,20 @@ export class FastSession {
     );
   }
 
-  /** Esc (or Ctrl-C): stop the request if one is running, close, and put the user's line back. */
+  /**
+   * Esc (or Ctrl-C): stop the request if one is running, close, and put the
+   * user's line back. A request stopped part-way gives up its conversation:
+   * the next one starts on a fresh session key, so the two never share a
+   * worker, however long the old one takes to wind down.
+   */
   cancel(): void {
     const request = this.request;
     if (request) {
       request.cancelled = true;
+      // Ends the stream (and so the daemon's request) once it exists; run() does it otherwise.
       void request.iterator?.return?.().catch(() => undefined);
       this.request = undefined;
+      this.reset();
     }
     this.host.overlay.close();
     this.host.release({ cursor: 'prompt', line: { type: 'as-before' } });
@@ -105,14 +112,19 @@ export class FastSession {
     overlay.setBusy(true);
     try {
       const client = await link.get();
-      const input = await buildFastInput(
-        this.host.commands,
-        await this.host.environment(),
-        this.host.cwd(),
-        text,
-        open.rewrite?.captured?.buffer ?? '',
-      );
-      if (Date.now() - this.lastRequestAt > FOLLOW_UP_MS) {
+      if (request.cancelled) {
+        return;
+      }
+      const environment = await this.host.environment();
+      if (request.cancelled) {
+        return;
+      }
+      const input = await buildFastInput(this.host.commands, environment, this.host.cwd(), text, open.rewrite?.captured?.buffer ?? '');
+      // Esc while getting ready: the request is never sent.
+      if (request.cancelled) {
+        return;
+      }
+      if (this.lastRequestAt > 0 && Date.now() - this.lastRequestAt > FOLLOW_UP_MS) {
         this.reset();
       }
       const iterator = client.fastRequest({ sessionKey: this.sessionKey, input })[Symbol.asyncIterator]();
@@ -121,7 +133,12 @@ export class FastSession {
       let done: Extract<FastEvent, { type: 'done' }> | undefined;
       for (;;) {
         const next = await iterator.next();
-        if (request.cancelled || next.done) {
+        if (request.cancelled) {
+          // Stop listening, which stops the daemon's request and frees its worker.
+          await iterator.return?.().catch(() => undefined);
+          break;
+        }
+        if (next.done) {
           break;
         }
         if (next.value.type === 'delta') {
