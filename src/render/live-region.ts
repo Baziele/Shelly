@@ -140,9 +140,12 @@ export class LiveRegion {
    *
    * A terminal that reflows rewraps the live rows above the parked one, and
    * the cursor moves down with them; one that does not reflow leaves the
-   * cursor where it was. When the rows above would have wrapped but the
-   * cursor did not move (and it is not pinned to the bottom row), the
-   * terminal did not reflow, and the rows above still take one row each.
+   * cursor where it was. Only when the cursor moved down at least as far as
+   * those rows grew (or sits on the bottom row, where content scrolls
+   * instead) is the rewrap counted; otherwise the rows above count one row
+   * each, which may leave stale rows but never paints over committed text.
+   * (A terminal that does not reflow, with the region on the bottom row, is
+   * the one case still taken as reflowing.)
    *
    * Without a report (`undefined`), the live region restarts at the row the
    * cursor was parked on: it may leave stale rows above, but it never moves
@@ -159,8 +162,12 @@ export class LiveRegion {
     } else {
       const unwrapped = this.textAbovePark.length;
       const rewrapped = this.textAbovePark.reduce((sum, text) => sum + rowsNeeded(text, cols), 0);
-      const didNotMove = cursor.row === this.parkedRow && cursor.row < rows;
-      anchor = cursor.row - (rewrapped !== unwrapped && didNotMove ? unwrapped : rewrapped);
+      // Rewrapping pushes the cursor down at least as far as the rows above it grew, unless it is on
+      // the bottom row (where the terminal scrolls content up instead). Anything less is ambiguous,
+      // and then the anchor that cannot reach committed text wins: at worst it leaves stale rows.
+      const grown = rewrapped - unwrapped;
+      const reflowed = grown === 0 || cursor.row - this.parkedRow >= grown || cursor.row >= rows;
+      anchor = cursor.row - (reflowed ? rewrapped : unwrapped);
     }
     this.anchorRow = Math.min(Math.max(1, anchor), rows);
     this.textAbovePark = [];

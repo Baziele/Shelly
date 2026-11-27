@@ -10,8 +10,9 @@ const row = (text: string): PaintRow => [{ text, width: displayWidth(text), styl
 const rows = (...texts: string[]): PaintRow[] => texts.map(row);
 
 /** An emulated terminal: everything written lands in xterm.js, scrollback included. */
-const emulate = (cols: number, height: number) => {
-  const terminal = new xterm.Terminal({ cols, rows: height, allowProposedApi: true, scrollback: 1000 });
+const emulate = (cols: number, height: number, { reflow = true }: { reflow?: boolean } = {}) => {
+  // xterm.js does not reflow in its (deprecated) Windows mode.
+  const terminal = new xterm.Terminal({ cols, rows: height, allowProposedApi: true, scrollback: 1000, ...(reflow ? {} : { windowsMode: true }) });
   // Wide characters as modern terminals (and Shelly) measure them.
   useModernWidths(terminal);
   let written = '';
@@ -175,6 +176,45 @@ describe('LiveRegion', () => {
     // Committed text is untouched; the live region restarts on the row the cursor was parked on (the 4th).
     assert.equal(visible[0], 'committed');
     assert.equal(visible.indexOf('after'), 3, visible.join('\n'));
+  });
+});
+
+describe('LiveRegion re-anchoring when the cursor report is ambiguous', () => {
+  // The live rows above the parked one would grow from 2 rows to 6 at 20 columns.
+  const setupNearTop = async (reflow = true) => {
+    const term = emulate(60, 20, { reflow });
+    const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 1, col: 1 });
+    region.update(rows('committed one', 'committed two'), rows('x'.repeat(60), 'y'.repeat(60), 'status'));
+    await term.flush();
+    return { term, region };
+  };
+
+  for (const [label, moved] of [['did not move', 0], ['moved less than the rows above grew', 1]] as const) {
+    it(`never erases committed text when the cursor ${label}`, async () => {
+      // A terminal that does not reflow, narrowed: the rows above the parked one keep one row each.
+      const { term, region } = await setupNearTop(false);
+      term.terminal.resize(20, 20);
+      // Parked on row 5 (two committed rows, then three live rows); the report says 5 + moved.
+      region.relayout({ row: 5 + moved, col: 1 });
+      region.update([], rows('repainted'));
+      const visible = await term.visible();
+      assert.deepEqual(visible.slice(0, 2), ['committed one', 'committed two'], visible.join('\n'));
+      // The live region restarts below the committed rows (possibly leaving a stale row: the safe side).
+      // In this mode xterm.js keeps cells past the narrowed width, so rows may read back with old text
+      // beyond column 20.
+      assert.ok(visible.slice(2).some((line) => line.startsWith('repainted')), JSON.stringify(visible));
+    });
+  }
+
+  it('counts the rewrap when the cursor moved down as far as the rows above grew', async () => {
+    const { term, region } = await setupNearTop();
+    await term.flush();
+    term.terminal.resize(20, 20);
+    region.relayout(await term.cursor());
+    region.update([], rows('repainted'));
+    const visible = await term.visible();
+    assert.deepEqual(visible.slice(0, 3), ['committed one', 'committed two', 'repainted'], visible.join('\n'));
   });
 });
 
