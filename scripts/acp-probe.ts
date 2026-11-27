@@ -19,7 +19,8 @@
  *   --lean                 Claude: tools, MCP and settings off, short system
  *                          prompt, haiku. OpenCode: the `shelly-fast` agent from
  *                          an opencode.json in the probe dir.
- *   --caps fs|none|all     Client capabilities to offer (default fs).
+ *   --caps fs|none         Client capabilities to offer (default fs). The probe
+ *                          never offers terminals: neither agent uses them.
  *   --model <id>           Model (claude default "haiku", opencode default
  *                          "opencode-go/hy4-flash-free").
  *   --runs <n>             Runs for `latency` (default 3).
@@ -57,7 +58,7 @@ import {
 // CLI
 
 type AgentName = "claude" | "opencode";
-type Caps = "fs" | "none" | "all";
+type Caps = "fs" | "none";
 
 const { values: argv } = parseArgs({
   options: {
@@ -184,20 +185,12 @@ function tap(stream: Stream, rec: Recorder): Stream {
 
 type PermissionPolicy = "allow_once" | "reject_once";
 
-/** A minimal environment for agent-run commands: no API keys or tokens from the user's. */
-const probeCommandEnv = (): NodeJS.ProcessEnv => {
-  const keep = ["PATH", "LANG", "LC_ALL", "TERM", "TMPDIR"];
-  return Object.fromEntries(keep.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]])));
-};
-
 class Probe {
   rec = new Recorder();
   permissionPolicy: PermissionPolicy = "allow_once";
-  terminals = new Map<string, { child: ChildProcess; output: string; exit: Promise<{ exitCode: number | null; signal: string | null }> }>();
   current?: Spawned;
   expectingExit = false;
   unexpectedExits: { code: number | null; signal: string | null; at: number; stderrTail: string }[] = [];
-  private termSeq = 0;
 
   constructor(readonly cwd: string) {}
 
@@ -259,52 +252,6 @@ class Probe {
       })
       .onRequest("fs/write_text_file", ({ params }) => {
         writeFileSync(this.insideProbeDir(params.path), params.content);
-        return {};
-      })
-      .onRequest("terminal/create", ({ params }) => {
-        const id = `term-${++this.termSeq}`;
-        // The agent is a live model with permissions auto-allowed: keep its
-        // commands in the probe directory and away from the user's secrets.
-        const proc = spawn(params.command, params.args ?? [], {
-          cwd: this.insideProbeDir(params.cwd ?? this.cwd),
-          env: { ...probeCommandEnv(), ...Object.fromEntries((params.env ?? []).map((e) => [e.name, e.value])) },
-          shell: (params.args ?? []).length === 0,
-        });
-        const entry = {
-          child: proc,
-          output: "",
-          exit: new Promise<{ exitCode: number | null; signal: string | null }>((res) => {
-            proc.on("exit", (exitCode, signal) => res({ exitCode, signal }));
-            // A command that cannot start (ENOENT, say) emits "error" and never "exit".
-            proc.on("error", (error) => {
-              entry.output += `${error.message}\n`;
-              res({ exitCode: 127, signal: null });
-            });
-          }),
-        };
-        proc.stdout?.on("data", (d: Buffer) => (entry.output += d.toString()));
-        proc.stderr?.on("data", (d: Buffer) => (entry.output += d.toString()));
-        this.terminals.set(id, entry);
-        return { terminalId: id };
-      })
-      .onRequest("terminal/output", async ({ params }) => {
-        const t = this.terminals.get(params.terminalId);
-        if (!t) throw RequestError.resourceNotFound(params.terminalId);
-        const done = t.child.exitCode !== null || t.child.signalCode !== null;
-        return { output: t.output, truncated: false, ...(done ? { exitStatus: await t.exit } : {}) };
-      })
-      .onRequest("terminal/wait_for_exit", async ({ params }) => {
-        const t = this.terminals.get(params.terminalId);
-        if (!t) throw RequestError.resourceNotFound(params.terminalId);
-        return await t.exit;
-      })
-      .onRequest("terminal/kill", ({ params }) => {
-        this.terminals.get(params.terminalId)?.child.kill();
-        return {};
-      })
-      .onRequest("terminal/release", ({ params }) => {
-        this.terminals.get(params.terminalId)?.child.kill();
-        this.terminals.delete(params.terminalId);
         return {};
       })
       .onRequest("*", ({ method }) => {
@@ -397,7 +344,6 @@ class Probe {
         } catch {}
       }
     }
-    for (const t of this.terminals.values()) t.child.kill();
     this.current = undefined;
     this.expectingExit = false;
   }
@@ -418,7 +364,7 @@ function errInfo(error: unknown): unknown {
 function clientCapabilities(): Record<string, unknown> {
   if (caps === "none") return {};
   const fs = { readTextFile: true, writeTextFile: true };
-  return caps === "all" ? { fs, terminal: true } : { fs };
+  return { fs };
 }
 
 async function initialize(p: Probe) {
@@ -949,7 +895,7 @@ async function main(): Promise<void> {
   if (agentName !== "claude" && agentName !== "opencode") throw new Error("--agent must be claude or opencode");
   const run = scenarios[scenarioName];
   if (!run) throw new Error(`--scenario must be one of: ${Object.keys(scenarios).join(", ")}`);
-  if (!["fs", "none", "all"].includes(caps)) throw new Error("--caps must be fs, none or all");
+  if (!["fs", "none"].includes(caps)) throw new Error("--caps must be fs or none");
   const dir = makeProbeDir();
   const p = new Probe(dir);
   let failed: unknown;
