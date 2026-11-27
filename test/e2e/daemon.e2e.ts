@@ -328,6 +328,25 @@ describe('daemon lifecycle', () => {
     await running;
   });
 
+  for (const mechanism of ['flock', 'file'] as const) {
+    it(`starts when the lock names a live process that is not a daemon, a reused pid (${mechanism})`, async () => {
+      const home = newHome();
+      const paths = shellyPaths({ SHELLY_HOME: home });
+      mkdirSync(paths.runDir, { recursive: true, mode: 0o700 });
+      // An old lock from a daemon that used the file-based lock, its pid now someone else's.
+      const stranger = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      try {
+        writeFileSync(paths.lock, JSON.stringify({ pid: stranger.pid, startedAt: Date.now() - 60_000, mechanism: 'file' }));
+        const daemon = runDaemonProcess(home, mechanism === 'file' ? { SHELLY_DAEMON_LOCK: 'file' } : {});
+        await waitFor(() => probeSocket(paths.socket), 'the daemon to listen');
+        assert.equal(daemon.child.exitCode, null);
+        assert.equal(JSON.parse(readFileSync(paths.lock, 'utf8')).pid, daemon.child.pid);
+      } finally {
+        stranger.kill('SIGKILL');
+      }
+    });
+  }
+
   it('takes over a stale lock and a stale socket', async () => {
     const home = newHome();
     const paths = shellyPaths({ SHELLY_HOME: home });

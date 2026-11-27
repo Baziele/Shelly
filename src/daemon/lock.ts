@@ -119,7 +119,7 @@ export const loadFlock = (): Promise<Flock | undefined> =>
     }
   })());
 
-const acquireFlock = (path: string, flock: Flock, holder: LockHolder): DaemonLockResult => {
+const acquireFlock = (path: string, flock: Flock, holder: LockHolder, isStale: (holder: LockHolder) => boolean): DaemonLockResult => {
   const fd = openSync(path, constants.O_RDWR | constants.O_CREAT, 0o600);
   const errno = flock.tryLock(fd);
   if (errno !== 0) {
@@ -129,9 +129,10 @@ const acquireFlock = (path: string, flock: Flock, holder: LockHolder): DaemonLoc
     }
     return { acquired: false, holder: readLock(path) };
   }
-  // A daemon using the file-based lock (no node:ffi) does not flock: respect it.
+  // A daemon using the file-based lock (no node:ffi) does not flock: respect
+  // it, unless its pid now belongs to something else (`isStale`).
   const previous = readLock(path);
-  if (previous?.mechanism === 'file' && previous.pid !== holder.pid && isProcessAlive(previous.pid)) {
+  if (previous?.mechanism === 'file' && previous.pid !== holder.pid && isProcessAlive(previous.pid) && !isStale(previous)) {
     closeSync(fd);
     return { acquired: false, holder: previous };
   }
@@ -313,7 +314,7 @@ export const acquireDaemonLock = async (
   const holder: LockHolder = { pid: options.pid ?? process.pid, startedAt: options.now ?? Date.now() };
   const flock = options.mechanism === 'file' ? undefined : await loadFlock();
   if (flock) {
-    return acquireFlock(path, flock, holder);
+    return acquireFlock(path, flock, holder, options.isStale ?? (() => false));
   }
   if (options.mechanism === 'flock') {
     throw new Error('flock is not available: run Node with --experimental-ffi.');
