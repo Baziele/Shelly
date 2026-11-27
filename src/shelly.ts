@@ -38,6 +38,9 @@ const RESIZE_SETTLE_MS = 50;
 const MARKER_HOLD_MS = 50;
 /** How long the terminal must be quiet (no keys, no output) before the daemon connection loads. */
 const IDLE_MS = 300;
+/** Longest Shelly waits for a prompt it asked for before carrying on anyway. */
+const PROMPT_WAIT_MS = 1500;
+const NO_HOOKS_PROMPT_WAIT_MS = 100;
 /** Moves the cursor up one row: onto the last line Shelly printed, which the shell's newline then leaves. */
 const CURSOR_UP = '\u001b[A';
 
@@ -62,8 +65,10 @@ export interface ShellyOptions {
  * - busy: Shelly is drawing below the prompt (an agent turn, an answer).
  *   Keys go to what it is drawing, the rest is queued for the shell, and
  *   shell output is held, until the shell has its line back.
+ * - returning: Shelly asked the shell for a new prompt and waits for it to
+ *   be drawn; input is queued, shell output (the prompt) shows.
  */
-type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'busy';
+type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'busy' | 'returning';
 
 /**
  * A transparent proxy between the terminal and the user's shell. Until a
@@ -106,6 +111,8 @@ export class Shelly {
   private triggerHoldTimer: NodeJS.Timeout | undefined;
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
+  /** Waiting for the shell to draw the prompt Shelly asked for: then this runs. */
+  private promptWait: { sawCwd: boolean; readonly run: () => void; readonly timer: NodeJS.Timeout } | undefined;
 
   constructor(options: ShellyOptions) {
     this.host = options.host;
@@ -207,6 +214,7 @@ export class Shelly {
         break;
       case 'capturing':
       case 'opening':
+      case 'returning':
         this.queuedInput += data;
         break;
       case 'busy':
@@ -307,6 +315,9 @@ export class Shelly {
         this.lineEditor?.handleEvent(segment.event);
         if (segment.event.type === 'cwd') {
           this.warmUp();
+          if (this.promptWait) {
+            this.promptWait.sawCwd = true;
+          }
         } else if (segment.event.type === 'exec') {
           this.flows?.commandStarted();
         }
@@ -314,12 +325,16 @@ export class Shelly {
         this.lineEditor?.observeOutput(segment.data);
         this.commands.recordOutput(segment.data);
         this.forwardShellOutput(segment.data);
+        if (this.promptWait?.sawCwd) {
+          // The prompt is being drawn, so the line editor has the terminal again.
+          this.promptReady();
+        }
       }
     }
   }
 
   private forwardShellOutput(data: string): void {
-    if (this.mode === 'shell' || this.mode === 'capturing') {
+    if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
       this.host.write(data);
     } else {
       this.heldShellOutput.push(data);
@@ -480,32 +495,66 @@ export class Shelly {
     const rewrite = this.open?.rewrite;
     this.open = undefined;
     this.busyKeys = undefined;
-    this.mode = 'shell';
 
-    if (cursor === 'fresh-line') {
-      if (rewrite && !rewrite.captured) {
-        // bash 3.2: the line is still on the shell's input line, where Enter
-        // would run it: have the shell redraw prompt and line down here.
-        this.lineEditor?.redraw();
-      } else {
-        this.freshPrompt();
+    // Anything the shell printed meanwhile goes first, on its own lines.
+    const held = this.takeHeldShellOutput();
+    if (held) {
+      this.host.write(cursor === 'fresh-line' && !held.endsWith('\n') ? `${held}\r\n` : held);
+    }
+
+    const finish = (): void => {
+      this.mode = 'shell';
+      this.detector.markLineEmpty();
+      if (line.type === 'set') {
+        this.detector.markLineUnknown();
+        this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
+      } else if (rewrite) {
+        this.putLineBack(rewrite);
       }
-    }
+      this.flushHeldShellOutput();
+      const typed = this.queuedInput;
+      this.queuedInput = '';
+      if (typed) {
+        this.handleInput(typed);
+      }
+    };
 
-    this.detector.markLineEmpty();
-    if (line.type === 'set') {
-      this.detector.markLineUnknown();
-      this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
-    } else if (rewrite) {
-      this.putLineBack(rewrite);
+    if (cursor === 'prompt') {
+      finish();
+    } else if (rewrite && !rewrite.captured) {
+      // bash 3.2: the line is still on the shell's input line, where Enter
+      // would run it: have the shell redraw prompt and line down here.
+      this.lineEditor?.redraw();
+      finish();
+    } else {
+      // Keys sent before the new prompt is up would be echoed by the
+      // terminal driver, and a line set then would be lost: wait for it.
+      this.mode = 'returning';
+      this.whenPromptReady(finish);
+      this.freshPrompt();
     }
+  }
 
-    this.flushHeldShellOutput();
-    const typed = this.queuedInput;
-    this.queuedInput = '';
-    if (typed) {
-      this.handleInput(typed);
+  private whenPromptReady(run: () => void): void {
+    clearTimeout(this.promptWait?.timer);
+    // A shell without hooks never says; give it a moment.
+    const timer = setTimeout(() => this.promptReady(), this.markers ? PROMPT_WAIT_MS : NO_HOOKS_PROMPT_WAIT_MS);
+    this.promptWait = { sawCwd: false, run, timer };
+  }
+
+  private promptReady(): void {
+    const wait = this.promptWait;
+    if (!wait) {
+      return;
     }
+    this.promptWait = undefined;
+    clearTimeout(wait.timer);
+    // After this chunk of output has gone to the terminal.
+    setImmediate(() => {
+      if (!this.disposed) {
+        wait.run();
+      }
+    });
   }
 
   /**
@@ -522,9 +571,16 @@ export class Shelly {
   }
 
   private flushHeldShellOutput(): void {
+    const output = this.takeHeldShellOutput();
+    if (output) {
+      this.host.write(output);
+    }
+  }
+
+  private takeHeldShellOutput(): string {
     const output = this.heldShellOutput.join('');
     this.heldShellOutput = [];
-    this.host.write(output);
+    return output;
   }
 
   private handleResize(size: TerminalSize): void {
@@ -557,6 +613,7 @@ export class Shelly {
     clearTimeout(this.resizeTimer);
     clearTimeout(this.markerHoldTimer);
     clearTimeout(this.warmupTimer);
+    clearTimeout(this.promptWait?.timer);
     this.lineEditor?.dispose();
     this.overlay?.destroy();
     this.host.stop();
