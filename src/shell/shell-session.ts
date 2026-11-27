@@ -4,6 +4,7 @@ import type { TerminalSize } from '../terminal/host-terminal.js';
 
 export interface ShellSessionOptions {
   readonly shell: string;
+  readonly args?: readonly string[];
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly size: TerminalSize;
@@ -30,7 +31,7 @@ export class ShellSession {
       Object.entries(options.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
     );
 
-    const terminal = pty.spawn(options.shell, [], {
+    const terminal = pty.spawn(options.shell, [...(options.args ?? [])], {
       name: env.TERM ?? 'xterm-256color',
       cols: options.size.cols,
       rows: options.size.rows,
