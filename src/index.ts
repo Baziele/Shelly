@@ -1,159 +1,33 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --experimental-ffi --no-warnings
+import { defaultShell } from './shell/shell-session.js';
+import { Shelly } from './shelly.js';
+import { HostTerminal } from './terminal/host-terminal.js';
 
-import * as pty from 'node-pty';
-import * as os from 'os';
-import { createContext } from './context.js';
-import { createHistoryLogPath, ShellHistoryManager } from './history.js';
-import * as readline from 'readline';
+const host = new HostTerminal();
 
-const shell = os.platform() === 'win32'
-  ? process.env.ComSpec ?? process.env.COMSPEC ?? 'powershell.exe'
-  : process.env.SHELL ?? 'sh';
-const env = process.env as {[key: string]: string};
-
-if (process.stdin.isTTY){
-  process.stdin.setRawMode(true);
+if (!host.isInteractive) {
+  process.stderr.write('shelly: needs an interactive terminal (stdin and stdout must be a TTY).\n');
+  process.exit(1);
 }
-process.stdin.resume();
 
+// Whatever goes wrong, never leave the user's terminal stuck in raw mode.
+const crash = (error: unknown): never => {
+  host.stop();
+  process.stderr.write(`\r\nshelly crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\r\n`);
+  process.exit(1);
+};
+process.on('uncaughtException', crash);
+process.on('unhandledRejection', crash);
 
-const ptyProcess = pty.spawn(shell, [], {
-  name: 'xterm-color',
-  cols: process.stdout.columns || 80,
-  rows: process.stdout.rows || 30,
+const shelly = new Shelly({
+  host,
+  shell: defaultShell(),
   cwd: process.cwd(),
-  env: env
+  env: process.env,
 });
 
-const context = createContext();
-const history = new ShellHistoryManager();
-// const promptInterceptor = new PromptInterceptor();
-let suppressShellOutput = false;
-
-const respondToAiPrompt = (prompt: string): void => {
-  setTimeout(() => {
-    const response = `Dummy AI response: received "${prompt || '(empty prompt)'}".`;
-    history.recordCommand(`AI prompt: ${prompt}`);
-    history.recordOutput(`${response}\n`);
-    process.stdout.write(`${response}\n`);
-
-    // The intercepted line was never sent to the shell. Cancel its current
-    // editor state so it redraws a clean prompt after the response.
-    suppressShellOutput = true;
-    ptyProcess.write('\u0003');
-  }, 100);
-};
-
-const PROMPT_PREFIXES = ['__', '::'] as const;
-const AI_PROMPT_DISPLAY_COLOR = '\u001b[32m';
-const ANSI_RESET = '\u001b[0m';
-let activeRl: readline.Interface | undefined;
-const state = {
-  candidateMatch: '',
-  mode: shell,
-  interceptedLine: '',
-  intercepted: false
+for (const signal of ['SIGHUP', 'SIGTERM'] as const) {
+  process.on(signal, () => shelly.terminate());
 }
 
-const enterAi = ()=>{
-  state.mode = "ai";
-   setImmediate(() => {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-      activeRl = rl;
-      state.intercepted = true;
-      // rl.prompt();
-      rl.on('SIGINT', () => {   // Ctrl+C = cancel, not death
-      exitAiMode();
-      process.stdout.write('^C\r\n');
-      suppressShellOutput = true;
-      ptyProcess.write('\u0003');
-      })
-
-      rl.on('line', (aiprompt)=>{
-        exitAiMode();
-        respondToAiPrompt(aiprompt);
-        // state.intercepted = false;
-        // process.stdout.write(`${ANSI_RESET}\r\n`);
-      })
-    
-  });
-}
-
-const exitAiMode = (): void => {
-  activeRl?.close();
-  activeRl = undefined;
-  // if (undoHook) process.stdin.removeListener('keypress', undoHook);
-  // undoHook = undefined;
-  process.stdin.setRawMode(true);  // rl.close() turned this off  (bug #1)
-  process.stdin.resume();          // rl.close() paused the stream (bug #1)
-  // mode = 'shell';
-  state.mode = 'shell';
-  state.interceptedLine = '';
-};
-
-// We recieve data from the terminal and write it to the shell
-process.stdin.on('data', async (data: Buffer) => {
-
-  const text = typeof data === 'string' ? data : data.toString('utf8');
-
-  for (const char of text) {
-    if (state.mode === "ai") {
-      
-      continue;
-    }
-
-    if ((char === '_' || char === ':')) {
-      if (state.candidateMatch === '') {
-        // Possible start of an AI prompt prefix; see what the next char is.
-        state.candidateMatch = char;
-        // continue
-      } else if (PROMPT_PREFIXES.some((prefix) => prefix === state.candidateMatch + char)) {
-        state.candidateMatch = '';
-        process.stdout.write(`${AI_PROMPT_DISPLAY_COLOR}${char}`);
-        enterAi();
-        continue;
-      } else {
-        state.candidateMatch = '';
-      }
-    } else {
-      state.candidateMatch = '';
-    }
-
-    suppressShellOutput = false;
-    ptyProcess.write(char);
-  
-
-}
-})
-
-
-// We recieve data from the shell and write it to the terminal
-ptyProcess.onData((data: string) => {
-  process.stdout.write(data);
-  if (!suppressShellOutput) {
-    history.recordOutput(data);
-  }
-});
-
-process.stdout.on('resize', () => {
-  const cols = process.stdout.columns || 80;
-  const rows = process.stdout.rows || 30;
-  ptyProcess.resize(cols, rows);
-})
-
-ptyProcess.onExit(async ({exitCode}) => {
-  if (process.stdin.isTTY){
-    process.stdin.setRawMode(false);
-  }
-  process.stdin.pause();
-  console.log(`Shell exited with code ${exitCode}`);
-  console.log('context:', context);
-  try {
-    const logFile = await history.complete(createHistoryLogPath());
-    console.log(`History written to ${logFile}`);
-  } catch (error) {
-    console.error('Could not write history log:', error);
-  }
-
-process.exit(exitCode);
-})
+process.exitCode = await shelly.run();
