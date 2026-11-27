@@ -116,7 +116,12 @@ export class ThreadService extends Context.Service<
     readonly rename: (threadId: string, clientId: string, title: string) => Effect.Effect<void, ThreadNotFound | ThreadBusy>;
     readonly remove: (threadId: string, clientId: string) => Effect.Effect<void, ThreadNotFound | ThreadBusy>;
     /** Start the agent (and the thread's session) in the background. Returns at once. */
-    readonly prewarm: (input: { readonly threadId?: string | undefined; readonly agentId?: string | undefined }) => Effect.Effect<void>;
+    readonly prewarm: (input: {
+      readonly threadId?: string | undefined;
+      readonly agentId?: string | undefined;
+      /** The shell's directory, as the coming prompt's context will give it. */
+      readonly cwd?: string | undefined;
+    }) => Effect.Effect<void>;
     readonly runningTurns: Effect.Effect<number>;
   }
 >()('shelly/daemon/ThreadService') {}
@@ -700,12 +705,14 @@ const make = Effect.gen(function* () {
   const prewarm = Effect.fn('ThreadService.prewarm')(function* (input: {
     readonly threadId?: string | undefined;
     readonly agentId?: string | undefined;
+    readonly cwd?: string | undefined;
   }) {
     const work = Effect.gen(function* () {
       const row = input.threadId ? yield* store.getThread(input.threadId) : undefined;
       if (row) {
         const thread = yield* liveThread(row.id);
-        yield* runtime.prewarm({ agentId: row.agentId, session: sessionRequest(row, row.lastShellCwd) });
+        // The same request the prompt will make (startTurn uses its context's cwd), or the session is opened twice.
+        yield* runtime.prewarm({ agentId: row.agentId, session: sessionRequest(row, input.cwd ?? row.lastShellCwd) });
         // Deleted while the agent started: let go of the session it opened.
         yield* Semaphore.withPermit(
           thread.lock,

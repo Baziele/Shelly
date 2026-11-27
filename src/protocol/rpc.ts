@@ -170,7 +170,18 @@ export const DeleteThread = Rpc.make('thread.delete', {
  * Returns at once; the work happens in the background.
  */
 export const PrewarmThread = Rpc.make('thread.prewarm', {
-  payload: { threadId: Schema.optionalKey(Schema.String), agentId: Schema.optionalKey(Schema.String) },
+  payload: {
+    threadId: Schema.optionalKey(Schema.String),
+    agentId: Schema.optionalKey(Schema.String),
+    /**
+     * The shell's directory now, which the prompt will send as its context's
+     * `cwd`: a home thread's session is opened with access to it, so warming
+     * it with another directory means the prompt opens the session again.
+     * Defaults to the directory of the thread's last prompt. Added without a
+     * protocol version bump; an older daemon ignores it.
+     */
+    cwd: Schema.optionalKey(Schema.String),
+  },
 });
 
 // ─── Fast mode ──────────────────────────────────────────────────────────────

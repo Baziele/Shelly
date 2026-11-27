@@ -386,7 +386,8 @@ export class DaemonClient {
     return this.call((client) => client['thread.delete']({ threadId, clientId: this.clientId }));
   }
 
-  prewarmThread(input: { readonly threadId?: string; readonly agentId?: string } = {}): Promise<void> {
+  /** `cwd`: the shell's directory now, as the coming prompt's context will give it. */
+  prewarmThread(input: { readonly threadId?: string; readonly agentId?: string; readonly cwd?: string } = {}): Promise<void> {
     return this.call((client) => client['thread.prewarm'](input));
   }
 

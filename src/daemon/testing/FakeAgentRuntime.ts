@@ -31,6 +31,8 @@ export class FakeAgents {
   readonly modes: string[] = [];
   readonly released: string[] = [];
   readonly prewarmed: { agentId: string; threadId: string | null }[] = [];
+  /** The session requests prewarm was given, in the order they came. */
+  readonly prewarmSessions: AgentSessionRequest[] = [];
   readonly fastRequests: string[] = [];
   cancels = 0;
   /** When set, every turn answers itself with these updates (then waits for more, unless one is `end`). */
@@ -127,6 +129,9 @@ export class FakeAgents {
         return gate ? Effect.promise(() => gate) : Effect.void;
       }).pipe(Effect.andThen(Effect.sync(() => {
         this.prewarmed.push({ agentId, threadId: session?.threadId ?? null });
+        if (session) {
+          this.prewarmSessions.push(session);
+        }
       }))),
     release: (threadId) => Effect.sync(() => {
       this.released.push(threadId);

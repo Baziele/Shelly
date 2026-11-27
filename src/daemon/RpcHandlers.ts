@@ -58,7 +58,7 @@ export const layer = DaemonRpcs.toLayer(
         bind(options, clientId).pipe(Effect.andThen(threads.rename(threadId, clientId, title))),
       'thread.delete': ({ threadId, clientId }, options) =>
         bind(options, clientId).pipe(Effect.andThen(threads.remove(threadId, clientId))),
-      'thread.prewarm': ({ threadId, agentId }) => threads.prewarm({ threadId, agentId }),
+      'thread.prewarm': ({ threadId, agentId, cwd }) => threads.prewarm({ threadId, agentId, cwd }),
 
       'fast.prewarm': ({ agentId }) =>
         directory.resolve(agentId).pipe(

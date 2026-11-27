@@ -673,3 +673,26 @@ describe('ThreadService under races and shutdown', () => {
       }), { fake, wrapStore });
   });
 });
+
+describe('ThreadService prewarm', () => {
+  it('warms a home thread\'s session with the shell\'s current directory, as the prompt will ask for it', async () => {
+    const fake = new FakeAgents({ script: () => [{ type: 'end', stopReason: 'end_turn', error: null }] });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        yield* Stream.runDrain(threads.prompt(promptInput(thread.id, 'first')));
+        // The user cd'ed since: the client passes the new directory.
+        yield* threads.prewarm({ threadId: thread.id, cwd: '/work/other' });
+        yield* eventually(() => fake.prewarmSessions.length === 1);
+        const next = { ...promptInput(thread.id, 'second'), context: { ...CONTEXT, cwd: '/work/other' } };
+        yield* Stream.runDrain(threads.prompt(next));
+        assert.deepEqual(fake.prewarmSessions[0], fake.sessionRequests.at(-1), 'the prompt asks for the session that was warmed');
+        assert.deepEqual(fake.prewarmSessions[0]?.additionalDirectories, ['/work/other']);
+
+        // Without one, the last prompt's directory.
+        yield* threads.prewarm({ threadId: thread.id });
+        yield* eventually(() => fake.prewarmSessions.length === 2);
+        assert.deepEqual(fake.prewarmSessions[1]?.additionalDirectories, ['/work/other']);
+      }), { fake });
+  });
+});
