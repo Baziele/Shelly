@@ -297,6 +297,37 @@ describe('daemon lifecycle', () => {
     });
   }
 
+  it('starts a new daemon for a client that arrives while the old one is still stopping', async () => {
+    const home = newHome();
+    const paths = shellyPaths({ SHELLY_HOME: home });
+    const old = runDaemonProcess(home);
+    await waitFor(() => probeSocket(paths.socket), 'the daemon to listen');
+    const driver = newClient(home, { autoStart: false });
+    await connect(driver);
+    const thread = await driver.createThread({ location: 'home', cwd: '/work' });
+    await driver.attachThread(thread.id);
+    const seen: ThreadEvent[] = [];
+    const running = (async () => {
+      for await (const event of driver.prompt(thread.id, 'wait, and ignore cancel', CONTEXT)) {
+        seen.push(event);
+      }
+    })().catch(() => {});
+    await waitFor(() => seen.some((event) => event.type === 'message.chunk'), 'the turn to start');
+
+    // The old daemon closes its socket at once, then gives the stuck turn
+    // 2 s while it still holds the lock.
+    assert.equal(await driver.shutdown(false), true);
+    await waitFor(async () => !(await probeSocket(paths.socket)), 'the old daemon to close its socket');
+    assert.equal(old.child.exitCode, null, 'the old daemon is still stopping');
+
+    const client = newClient(home);
+    const hello = await connect(client);
+    assert.notEqual(hello.pid, old.child.pid);
+    assert.equal(await old.exited, 0);
+    assert.equal((await client.listThreads())[0]?.id, thread.id);
+    await running;
+  });
+
   it('takes over a stale lock and a stale socket', async () => {
     const home = newHome();
     const paths = shellyPaths({ SHELLY_HOME: home });

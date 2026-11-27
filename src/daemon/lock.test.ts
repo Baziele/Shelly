@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireLock, readLock } from './lock.js';
+import type { SocketState } from '../protocol/probe.js';
+import { acquireLock, readLock, takeDaemonLock } from './lock.js';
 
 const dirs: string[] = [];
 after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -152,5 +153,64 @@ describe('acquireDaemonLock with flock', () => {
       racer.child.stdin!.end();
     }
     await Promise.all(racers.map((racer) => racer.exited));
+  });
+});
+
+// ─── takeDaemonLock (with the file-based lock, in this process) ─────────────
+
+describe('takeDaemonLock', () => {
+  const OTHER = 4242;
+  const SOCKET = '/nonexistent/daemon.sock';
+  const fast = { mechanism: 'file' as const, pid: 101, isAlive: alive(101, OTHER), retryMs: 5 };
+  const answer = (state: SocketState) => async () => state;
+  const holdLock = (path: string, startedAt: number) => writeFileSync(path, JSON.stringify({ pid: OTHER, startedAt, mechanism: 'file' }));
+
+  it('waits for a daemon that has closed its socket to let go of the lock', async () => {
+    const path = lockPath();
+    holdLock(path, Date.now() - 60_000);
+    // The old daemon finishes closing and releases the lock a little later.
+    setTimeout(() => rmSync(path), 150);
+    const result = await takeDaemonLock(path, SOCKET, { ...fast, probe: answer('refused'), waitMs: 3000 });
+    assert.equal(result.acquired, true);
+    assert.equal(readLock(path)?.pid, 101);
+    if (result.acquired) {
+      result.lock.release();
+    }
+  });
+
+  it('leaves a daemon that answers on its socket alone, at once', async () => {
+    const path = lockPath();
+    holdLock(path, Date.now() - 60_000);
+    const startedAt = Date.now();
+    const result = await takeDaemonLock(path, SOCKET, { ...fast, probe: answer('answers'), waitMs: 3000 });
+    assert.equal(result.acquired, false);
+    assert.equal(result.acquired ? 0 : result.holder?.pid, OTHER);
+    assert.ok(Date.now() - startedAt < 1000);
+  });
+
+  it('takes over from a long-running holder whose socket keeps refusing (its pid was reused)', async () => {
+    const path = lockPath();
+    holdLock(path, Date.now() - 60_000);
+    const result = await takeDaemonLock(path, SOCKET, { ...fast, probe: answer('refused'), waitMs: 2000, abandonedAfterMs: 200 });
+    assert.equal(result.acquired, true);
+    if (result.acquired) {
+      result.lock.release();
+    }
+  });
+
+  it('never takes over from a holder whose socket is only slow to answer (a busy daemon)', async () => {
+    const path = lockPath();
+    holdLock(path, Date.now() - 60_000);
+    const result = await takeDaemonLock(path, SOCKET, { ...fast, probe: answer('silent'), waitMs: 400, abandonedAfterMs: 50 });
+    assert.equal(result.acquired, false);
+    assert.equal(readLock(path)?.pid, OTHER);
+  });
+
+  it('never takes over from a holder that started moments ago', async () => {
+    const path = lockPath();
+    holdLock(path, Date.now());
+    const result = await takeDaemonLock(path, SOCKET, { ...fast, probe: answer('refused'), waitMs: 400, abandonedAfterMs: 50 });
+    assert.equal(result.acquired, false);
+    assert.equal(readLock(path)?.pid, OTHER);
   });
 });
