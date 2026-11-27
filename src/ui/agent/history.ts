@@ -5,7 +5,7 @@ import { displayWidth, truncateEnd } from '../../render/text-width.js';
 import { formatSummary, formatToolSummary, relativeTime, type FormatContext } from './format.js';
 import { fitLine, oneLine, seg, type Line } from './lines.js';
 import { lineToPaintRow } from './paint-line.js';
-import { renderMarkdownRows, rowsToText } from './static-render.js';
+import { layoutMarkdown, rowsToText } from './static-render.js';
 
 export interface HistoryOptions {
   readonly agentName: string;
@@ -74,6 +74,27 @@ const lastExchange = (events: readonly ThreadEvent[]): Exchange | undefined => {
   return exchange;
 };
 
+/**
+ * The first `maxRows` rows of an answer, and about how many it has in all.
+ * A long answer is laid out only as far as it is shown: its source is cut at
+ * a blank line well past what fills `maxRows`, and the rest is counted by
+ * its non-blank source lines.
+ */
+const layoutAnswerStart = async (answer: string, width: number, maxRows: number): Promise<{ rows: PaintRow[]; totalRows: number }> => {
+  const lines = answer.split('\n');
+  const budget = maxRows * 4;
+  if (lines.length > budget) {
+    const blank = lines.lastIndexOf('', budget);
+    const end = blank > maxRows ? blank : budget;
+    const start = await layoutMarkdown(lines.slice(0, end).join('\n'), width, maxRows);
+    if (start.totalRows >= maxRows) {
+      const rest = lines.slice(end).filter((line) => line.trim() !== '').length;
+      return { rows: start.rows, totalRows: start.totalRows + rest };
+    }
+  }
+  return layoutMarkdown(answer, width, maxRows);
+};
+
 /** `── “title” · claude · 2h ago ─────` across the width. */
 const headerRule = (options: HistoryOptions, now: number): Line => {
   const meta = ` · ${options.agentName} · ${relativeTime(options.updatedAt, now)} `;
@@ -118,15 +139,15 @@ export const renderHistory = async (events: readonly ThreadEvent[], options: His
   }
 
   if (exchange.answer.trim()) {
-    const answer = await renderMarkdownRows(exchange.answer, options.width);
+    const answer = await layoutAnswerStart(exchange.answer, options.width, maxAnswerRows + 1);
     // Cutting a row short of the limit beats a lone row after the note.
-    const cut = answer.length > maxAnswerRows + 1 ? maxAnswerRows : answer.length;
+    const cut = answer.totalRows > maxAnswerRows + 1 ? maxAnswerRows : answer.totalRows;
     if (shownTools.length > 0) {
       rows.push([]);
     }
-    rows.push(...answer.slice(0, cut));
-    if (cut < answer.length) {
-      rows.push(lineToPaintRow([seg(`… (${answer.length - cut} more lines)`, 'muted')]));
+    rows.push(...answer.rows.slice(0, cut));
+    if (cut < answer.totalRows) {
+      rows.push(lineToPaintRow([seg(`… (${answer.totalRows - cut} more lines)`, 'muted')]));
     }
   }
 

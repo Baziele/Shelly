@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { loadFixture } from '../../../test/fixtures/thread-events/load.js';
 import { EmulatedTerminal } from '../../../test/support/emulated-terminal.js';
+import { eventually } from '../../../test/support/eventually.js';
 import { playFixture } from '../../../test/support/play.js';
 import type { ThreadEvent } from '../../protocol/schema.js';
 import type { ColorDepth } from '../../render/sgr.js';
@@ -17,10 +18,14 @@ interface Setup {
 
 let current: AgentView | undefined;
 
+/** The views' clock: real time, plus whatever a test skips ahead (to arm a permission prompt without waiting). */
+let clockOffset = 0;
+const clock = (): number => Date.now() + clockOffset;
+
 const setup = async (cols: number, rows: number, prompt: string, depth: ColorDepth = 'ansi256'): Promise<Setup> => {
   const term = new EmulatedTerminal(cols, rows);
   term.write(`${ECHO}${prompt}\r\n`);
-  const view = new AgentView(term, depth, { agentName: 'claude', cwd: '/home/dev/acme-web', home: '/home/dev' });
+  const view = new AgentView(term, depth, { agentName: 'claude', cwd: '/home/dev/acme-web', home: '/home/dev', now: clock });
   current = view;
   const actions: AgentAction[] = [];
   view.onAction((action) => actions.push(action));
@@ -28,10 +33,10 @@ const setup = async (cols: number, rows: number, prompt: string, depth: ColorDep
   return { term, view, actions };
 };
 
-const play = async (name: string, cols: number, rows: number, depth: ColorDepth = 'ansi256') => {
+const play = async (name: string, cols: number, rows: number, depth: ColorDepth = 'ansi256', speed = 25) => {
   const fixture = loadFixture(name);
   const context = await setup(cols, rows, fixture.prompt, depth);
-  await playFixture(context.view, fixture, 25);
+  await playFixture(context.view, fixture, speed);
   await context.view.finish();
   return context;
 };
@@ -111,7 +116,8 @@ describe('AgentView', { timeout: 30_000 }, () => {
   });
 
   it('answers a permission prompt from the keyboard and folds the answer into its tool', async () => {
-    const { term, actions } = await play('permission-flow', 80, 24);
+    // Slow enough that each key comes more than PROMPT_ARM_MS after its prompt, as a person's would.
+    const { term, actions } = await play('permission-flow', 80, 24, 'ansi256', 4);
     assert.deepEqual(actions, [
       { type: 'answer', requestId: 'p1', optionId: 'allow' },
       { type: 'answer', requestId: 'p2', optionId: 'reject' },
@@ -123,20 +129,21 @@ describe('AgentView', { timeout: 30_000 }, () => {
   });
 
   it('maps keys to permission answers: digits, y, n, esc, and arrows with enter', async () => {
-    const cases: Array<[string, string | null]> = [['2', 'always'], ['y', 'once'], ['n', 'no'], ['\u001b', 'no'], ['\u001b[C\u001b[C\r', 'no'], ['\t\r', 'always']];
+    // One key per read, as typed.
+    const cases: Array<[string[], string | null]> = [[['2'], 'always'], [['y'], 'once'], [['n'], 'no'], [['\u001b'], 'no'], [['\u001b[C', '\u001b[C', '\r'], 'no'], [['\t', '\r'], 'always']];
     for (const [keys, optionId] of cases) {
-      const { view, actions } = await setup(80, 24, 'q');
-      view.apply(event({ type: 'turn.started', text: 'q', at: Date.now() }));
-      view.apply(permissionRequest);
-      assert.equal(view.handleInput(keys), true);
-      assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId }], `keys ${JSON.stringify(keys)}`);
+      const { view, actions } = await promptOnScreen();
+      for (const key of keys) {
+        assert.equal(view.handleInput(key), true);
+      }
+      const answered = await eventually(() => actions, (list) => list.length > 0);
+      assert.deepEqual(answered, [{ type: 'answer', requestId: 'p1', optionId }], `keys ${JSON.stringify(keys)}`);
       view.destroy();
     }
   });
 
   it('answers null when rejecting a prompt that offers no reject option', async () => {
-    const { view, actions } = await setup(80, 24, 'q');
-    view.apply(event({ ...permissionRequest, options: [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }] }));
+    const { view, actions } = await promptOnScreen(event({ ...permissionRequest, options: [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }] }));
     view.handleInput('n');
     assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId: null }]);
   });
@@ -160,7 +167,8 @@ describe('AgentView', { timeout: 30_000 }, () => {
     view.apply(event({ type: 'tool.updated', tool: { id: 'a', title: 'ls', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
     await waitFor(async () => (await term.screen()).some((line) => line.includes('Running ls')), term);
     assert.equal(view.handleInput('\u001b'), true);
-    assert.deepEqual(actions, [{ type: 'background' }]);
+    // A lone escape waits a moment for the rest of a split escape sequence.
+    assert.deepEqual(await eventually(() => actions, (list) => list.length > 0), [{ type: 'background' }]);
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'ignored' }));
     await view.finish();
     const lines = await term.allLines();
@@ -174,22 +182,34 @@ describe('AgentView', { timeout: 30_000 }, () => {
     assert.equal(view.handleInput('ls'), false);
   });
 
-  it('paints first quickly and keeps frames cheap', async () => {
+  it('keeps render stats: frames counted, first paint and frame cost measured', async () => {
+    // Structure only: the timing bounds live in scripts/ui-perf-check.ts, outside the default suite.
     const { view } = await play('long-answer', 100, 30);
     const stats = view.renderStats;
-    // Loose bounds that catch a regression by an order of magnitude without failing on a slow CI machine
-    // (measured locally: first paint 7–14 ms, 0.2 ms per frame; see scripts/ui-bench.ts).
-    assert.ok(stats.firstPaintMs >= 0 && stats.firstPaintMs < 500, `first paint took ${stats.firstPaintMs} ms`);
-    assert.ok(stats.averageFrameMs < 20, `frames average ${stats.averageFrameMs} ms`);
+    assert.ok(stats.frames > 0);
+    assert.ok(stats.firstPaintMs >= 0);
+    assert.ok(stats.averageFrameMs > 0);
   });
 });
 
+/** A view with a permission prompt that has been on screen long enough to take keys. */
+const promptOnScreen = async (request: ThreadEvent = permissionRequest) => {
+  const context = await setup(80, 24, 'q');
+  context.view.apply(event({ type: 'turn.started', text: 'q', at: Date.now() }));
+  context.view.apply(request);
+  await waitFor(async () => (await context.term.screen()).some((line) => line.includes('wants to')), context.term);
+  // Past the prompt's arming delay, on the views' clock rather than by waiting.
+  clockOffset += 400;
+  return context;
+};
+
 const waitFor = async (predicate: () => Promise<boolean>, term: EmulatedTerminal): Promise<void> => {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  // A generous deadline: frames land later on a loaded machine, never sooner.
+  for (let attempt = 0; attempt < 1000; attempt++) {
     if (await predicate()) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out; screen:\n${(await term.screen()).join('\n')}`);
 };

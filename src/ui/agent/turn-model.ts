@@ -264,7 +264,12 @@ export class TurnModel {
     this.blocks.push({ kind: 'line', key: this.key(), content, final: true, version: 0 });
   }
 
-  private end(event: ThreadEventOf<'turn.ended'>): void {
+  /**
+   * Make everything on screen final as it stands, without a summary: for a
+   * view finished before its turn ended (the connection dropped, say).
+   * Running tools show as stopped; open prompts as cancelled.
+   */
+  settle(): void {
     this.finalizeMessages();
     for (const block of this.blocks.slice(this.committed)) {
       if (block.kind === 'tool' && !block.final) {
@@ -279,10 +284,14 @@ export class TurnModel {
     if (this.plan && this.plan.length > 0) {
       this.appendLine({ type: 'plan', entries: this.plan });
     }
-    this.appendLine({ type: 'summary', ended: event, toolCount: this.toolCount });
-    this.ended = event;
     this.thought = undefined;
     this.plan = undefined;
+  }
+
+  private end(event: ThreadEventOf<'turn.ended'>): void {
+    this.settle();
+    this.appendLine({ type: 'summary', ended: event, toolCount: this.toolCount });
+    this.ended = event;
   }
 
   private finalizeMessages(): void {

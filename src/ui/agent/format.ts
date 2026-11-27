@@ -7,7 +7,7 @@ import type {
   ToolContent,
 } from '../../protocol/schema.js';
 import { truncateStart } from '../../render/text-width.js';
-import { diffExcerpt, diffLines, diffStats, type DiffLine } from './diff.js';
+import { diffExcerpt, diffOf, diffStats, type DiffLine } from './diff.js';
 import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, type Line, type Segment } from './lines.js';
 
 /** Braille spinner, one frame per 80 ms. */
@@ -114,7 +114,7 @@ const toolGlyph = (tool: ToolCall, spinner: string, stopped: boolean): Segment =
 const toolSuffix = (tool: ToolCall): Segment[] => {
   const diffs = diffsOf(tool.content);
   if (diffs.length > 0) {
-    const stats = diffs.map((diff) => diffStats(diffLines(diff.oldText, diff.newText)));
+    const stats = diffs.map((diff) => diffStats(diffOf(diff)));
     const added = stats.reduce((sum, stat) => sum + stat.added, 0);
     const removed = stats.reduce((sum, stat) => sum + stat.removed, 0);
     const files = diffs.length > 1 ? [seg(` in ${diffs.length} files`, 'muted')] : [];
@@ -203,10 +203,10 @@ export const formatTool = (tool: ToolCall, context: FormatContext, options: Tool
   const diffs = diffsOf(tool.content);
   if (diffs.length > 0) {
     const first = diffs[0]!;
-    const excerpt = diffExcerpt(diffLines(first.oldText, first.newText), MAX_DIFF_LINES);
+    const excerpt = diffExcerpt(diffOf(first), MAX_DIFF_LINES);
     rows.push(...excerpt.lines.map((line) => formatDiffLine(line, width)));
     const more = excerpt.moreChanges + diffs.slice(1).reduce((sum, diff) => {
-      const stats = diffStats(diffLines(diff.oldText, diff.newText));
+      const stats = diffStats(diffOf(diff));
       return sum + stats.added + stats.removed;
     }, 0);
     if (more > 0) {

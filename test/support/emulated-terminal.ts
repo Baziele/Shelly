@@ -10,8 +10,10 @@ export class EmulatedTerminal {
   readonly terminal: xterm.Terminal;
   private written = '';
 
-  constructor(cols: number, rows: number) {
-    this.terminal = new xterm.Terminal({ cols, rows, allowProposedApi: true, scrollback: 5000 });
+  /** `reflow: false` behaves like a terminal that truncates rows on narrowing instead of rewrapping them. */
+  constructor(cols: number, rows: number, { reflow = true }: { reflow?: boolean } = {}) {
+    // xterm.js does not reflow in its (deprecated) Windows mode.
+    this.terminal = new xterm.Terminal({ cols, rows, allowProposedApi: true, scrollback: 5000, ...(reflow ? {} : { windowsMode: true }) });
   }
 
   get size(): { cols: number; rows: number } {

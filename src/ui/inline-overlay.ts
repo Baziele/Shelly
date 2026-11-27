@@ -32,6 +32,8 @@ interface OverlaySession {
   anchor: CursorPosition;
   /** The cursor as last painted, in frame coordinates. */
   lastCursor: PaintFrame['cursor'] | undefined;
+  /** The terminal size the overlay was laid out for; after a resize it waits for relayout(). */
+  laidOutSize: { readonly cols: number; readonly rows: number };
 }
 
 /**
@@ -74,7 +76,7 @@ export class InlineOverlay {
     const fitsInline = cols - cursor.col + 1 >= MIN_INLINE_INPUT_COLS;
     const anchor = fitsInline ? { ...cursor } : { row: cursor.row + 1, col: 1 };
 
-    this.session = { origin: { ...cursor }, anchor, lastCursor: undefined };
+    this.session = { origin: { ...cursor }, anchor, lastCursor: undefined, laidOutSize: { ...this.host.size } };
     this.headless.resize({ width: cols, height: MAX_VIEW_ROWS });
     this.painter.invalidate();
     this.view.open({ inputCol: anchor.col, trigger, ...options });
@@ -161,13 +163,15 @@ export class InlineOverlay {
     session.anchor = { row: session.anchor.row + rowShift, col: Math.max(1, session.anchor.col + colShift) };
     session.origin = { row: session.origin.row + rowShift, col: Math.max(1, session.origin.col + colShift) };
 
+    session.laidOutSize = { ...this.host.size };
     this.host.write(this.painter.erase(session.anchor));
     this.headless.resize({ width: this.host.size.cols, height: MAX_VIEW_ROWS });
     this.headless.requestRender();
   }
 
   destroy(): void {
-    this.session = undefined;
+    // Torn down while open (the shell exited, say): erase it and give the cursor back.
+    this.close();
     this.view.destroy();
     this.headless.destroy();
   }
@@ -175,6 +179,12 @@ export class InlineOverlay {
   private paint(frame: PaintFrame): void {
     const session = this.session;
     if (!session) {
+      return;
+    }
+
+    const { cols, rows: screenRows } = this.host.size;
+    if (cols !== session.laidOutSize.cols || screenRows !== session.laidOutSize.rows) {
+      // Resized, and relayout() has not run yet: painting at the old anchor would land on reflowed text.
       return;
     }
 

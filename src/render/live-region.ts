@@ -2,6 +2,7 @@ import { ansi } from '../terminal/ansi.js';
 import type { CursorPosition } from '../terminal/cursor-report.js';
 import { encodeRow, type PaintSpan } from './inline-painter.js';
 import type { ColorDepth } from './sgr.js';
+import { graphemeWidth } from './text-width.js';
 
 export type PaintRow = ReadonlyArray<PaintSpan>;
 
@@ -25,11 +26,18 @@ export interface LiveRegionOptions {
  *
  * The live region always starts at column 1 of the anchor row, and owns every
  * row from there to the bottom of the screen. Between updates the (hidden)
- * cursor is parked on the anchor, so that after a resize the terminal's
- * cursor report says where the live region now starts.
+ * cursor is parked in the first column of the last live row: nothing is
+ * below it to reflow, and column 1 stays on that row's first line whether
+ * or not the terminal rewraps it. After a resize, the terminal's cursor
+ * report, less the height the live rows above it reflowed to, says where the
+ * live region now starts.
  */
 export class LiveRegion {
   private anchorRow = 1;
+  /** The text of each live row above the parked one, for working out where they went after a reflow. */
+  private textAbovePark: string[] = [];
+  /** The screen row the cursor was parked on. */
+  private parkedRow = 1;
   private painted: string[] = [];
   private started = false;
   private readonly marginRows: number;
@@ -118,20 +126,51 @@ export class LiveRegion {
     }
     this.painted = encoded;
 
-    output += ansi.cursorTo(this.anchorRow, 1) + ansi.endSynchronizedUpdate;
+    const last = Math.max(0, shown.length - 1);
+    this.textAbovePark = shown.slice(0, last).map(rowText);
+    this.parkedRow = this.anchorRow + last;
+    output += ansi.cursorTo(this.anchorRow + last, 1) + ansi.endSynchronizedUpdate;
     this.screen.write(output);
   }
 
   /**
    * Re-anchor after a resize. `cursor` is where the terminal now reports the
-   * cursor, which was parked on the live region's first row. The old live
-   * rows are erased; the caller repaints at the new width with `update`.
+   * cursor, which was parked in column 1 of the live region's last row; the
+   * old live rows are erased and the caller repaints at the new width.
+   *
+   * A terminal that reflows rewraps the live rows above the parked one, and
+   * the cursor moves down with them; one that does not reflow leaves the
+   * cursor where it was. Only when the cursor moved down at least as far as
+   * those rows grew (or sits on the bottom row, where content scrolls
+   * instead) is the rewrap counted; otherwise the rows above count one row
+   * each, which may leave stale rows but never paints over committed text.
+   * (A terminal that does not reflow, with the region on the bottom row, is
+   * the one case still taken as reflowing.)
+   *
+   * Without a report (`undefined`), the live region restarts at the row the
+   * cursor was parked on: it may leave stale rows above, but it never moves
+   * up onto committed text.
    */
-  relayout(cursor: CursorPosition): void {
+  relayout(cursor: CursorPosition | undefined): void {
     if (!this.started) {
       return;
     }
-    this.anchorRow = Math.min(Math.max(1, cursor.row), this.screen.size.rows);
+    const { cols, rows } = this.screen.size;
+    let anchor: number;
+    if (!cursor) {
+      anchor = this.parkedRow;
+    } else {
+      const unwrapped = this.textAbovePark.length;
+      const rewrapped = this.textAbovePark.reduce((sum, text) => sum + rowsNeeded(text, cols), 0);
+      // Rewrapping pushes the cursor down at least as far as the rows above it grew, unless it is on
+      // the bottom row (where the terminal scrolls content up instead). Anything less is ambiguous,
+      // and then the anchor that cannot reach committed text wins: at worst it leaves stale rows.
+      const grown = rewrapped - unwrapped;
+      const reflowed = grown === 0 || cursor.row - this.parkedRow >= grown || cursor.row >= rows;
+      anchor = cursor.row - (reflowed ? rewrapped : unwrapped);
+    }
+    this.anchorRow = Math.min(Math.max(1, anchor), rows);
+    this.textAbovePark = [];
     this.painted = [];
     this.screen.write(ansi.cursorTo(this.anchorRow, 1) + ansi.resetStyle + ansi.eraseDown);
   }
@@ -149,3 +188,30 @@ export class LiveRegion {
     );
   }
 }
+
+/** A row's text, trailing blanks left out: what a terminal rewraps. */
+const rowText = (row: PaintRow): string => row.map((span) => span.text).join('').replace(/ +$/, '');
+
+/**
+ * Rows `text` takes when a terminal wraps it at `cols`, counting cells as
+ * the terminal does: a wide character that does not fit at the end of a row
+ * moves whole to the next.
+ */
+export const rowsNeeded = (text: string, cols: number): number => {
+  let rowsUsed = 1;
+  let col = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    const width = graphemeWidth(segment);
+    if (width === 0) {
+      continue;
+    }
+    if (col + width > cols) {
+      rowsUsed++;
+      col = 0;
+    }
+    col += width;
+  }
+  return rowsUsed;
+};
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });

@@ -83,6 +83,10 @@ const playAgent = async (fixture: Fixture): Promise<void> => {
     if (action.type === 'event') {
       view.apply(action.event);
     } else if (action.type === 'keys') {
+      // Keys for a permission prompt wait until it is drawn and armed, however long that takes.
+      for (let waited = 0; view.promptState === 'arming' && waited < 10_000; waited += 10) {
+        await sleep(10);
+      }
       view.handleInput(action.keys);
     }
   }

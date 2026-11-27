@@ -44,3 +44,67 @@ export const parseKeys = (data: string): Key[] => (data.match(KEY_PATTERN) ?? []
   }
   return { name: 'char', char: sequence };
 });
+
+const PASTE_START = '\u001b[200~';
+const PASTE_END = '\u001b[201~';
+
+/** A paste with no input for this long, or this long, is taken to have lost its end marker. */
+const PASTE_IDLE_MS = 500;
+const PASTE_MAX_CHARS = 1_000_000;
+
+/**
+ * Removes bracketed pastes (everything between ESC[200~ and ESC[201~) from
+ * raw input, following a paste across reads. Pasted text is never a key.
+ * A paste whose end marker never comes is given up after half a second with
+ * no input, or a million characters, so later keys are keys again.
+ */
+export class PasteFilter {
+  private inPaste = false;
+  private lastInputAt = 0;
+  private pastedChars = 0;
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  get isInPaste(): boolean {
+    return this.inPaste;
+  }
+
+  reset(): void {
+    this.inPaste = false;
+    this.pastedChars = 0;
+  }
+
+  filter(data: string): { readonly text: string; readonly pasted: boolean } {
+    const now = this.now();
+    if (this.inPaste && (now - this.lastInputAt > PASTE_IDLE_MS || this.pastedChars > PASTE_MAX_CHARS)) {
+      this.reset();
+    }
+    this.lastInputAt = now;
+
+    let text = '';
+    let pasted = this.inPaste;
+    let rest = data;
+    while (rest) {
+      if (this.inPaste) {
+        const end = rest.indexOf(PASTE_END);
+        if (end < 0) {
+          this.pastedChars += rest.length;
+          return { text, pasted: true };
+        }
+        this.reset();
+        rest = rest.slice(end + PASTE_END.length);
+        continue;
+      }
+      const start = rest.indexOf(PASTE_START);
+      if (start < 0) {
+        text += rest;
+        break;
+      }
+      text += rest.slice(0, start);
+      this.inPaste = true;
+      pasted = true;
+      rest = rest.slice(start + PASTE_START.length);
+    }
+    return { text, pasted };
+  }
+}

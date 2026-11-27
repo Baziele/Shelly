@@ -20,7 +20,8 @@
     "test": "node --experimental-ffi --no-warnings --import tsx --test \"src/**/*.test.ts\" \"test/tools/*.test.ts\"",
     "scenario": "node --import tsx scripts/scenario.ts",
     "test:e2e": "node --experimental-ffi --no-warnings --import tsx --test \"test/e2e/*.e2e.ts\"",
-    "demo": "node --experimental-ffi --no-warnings --import tsx scripts/ui-demo.ts"
+    "demo": "node --experimental-ffi --no-warnings --import tsx scripts/ui-demo.ts",
+    "perf:ui": "node --experimental-ffi --no-warnings --import tsx scripts/ui-perf-check.ts"
   },
   "license": "ISC",
   "devEngines": {

@@ -14,12 +14,19 @@ const FIRST_BUFFER_ROWS = 200;
  */
 export const MAX_BUFFER_ROWS = 20_000;
 
+export interface MarkdownLayout {
+  /** The rows drawn: all of them, or the first `maxRows` when there are more. */
+  readonly rows: PaintRow[];
+  /** How many rows the whole document takes. */
+  readonly totalRows: number;
+}
+
 /**
- * Markdown laid out once at `width`, as paint rows: for output printed
- * statically (history, fast-mode answers) rather than streamed. The layout
- * grows until the whole document fits.
+ * Markdown laid out once at `width`, drawing at most `maxRows` rows: for
+ * output printed statically (history, fast-mode answers) rather than
+ * streamed. `totalRows` says how tall the whole document is.
  */
-export const renderMarkdownRows = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS): Promise<PaintRow[]> => {
+export const layoutMarkdown = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS): Promise<MarkdownLayout> => {
   let bufferRows = Math.min(FIRST_BUFFER_ROWS, maxRows);
   const headless = HeadlessRenderer.create({ width, height: bufferRows });
   try {
@@ -36,11 +43,11 @@ export const renderMarkdownRows = async (markdown: string, width: number, maxRow
         headless.requestRender();
       });
       if (frame.height <= bufferRows) {
-        return trimBlankRows(frame.rows.slice(0, frame.height));
+        const rows = trimBlankRows(frame.rows.slice(0, frame.height));
+        return { rows, totalRows: rows.length };
       }
       if (bufferRows >= maxRows) {
-        const hidden = frame.height - bufferRows;
-        return [...trimBlankRows(frame.rows), lineToPaintRow([seg(`… (${hidden} more lines not shown)`, 'muted')])];
+        return { rows: trimBlankRows(frame.rows).slice(0, maxRows), totalRows: frame.height };
       }
       bufferRows = Math.min(maxRows, frame.height + 10);
       headless.resize({ width, height: bufferRows });
@@ -48,6 +55,19 @@ export const renderMarkdownRows = async (markdown: string, width: number, maxRow
   } finally {
     headless.destroy();
   }
+};
+
+/**
+ * Markdown laid out once at `width`, as paint rows. The layout grows until
+ * the whole document fits; past `maxRows` it keeps what fits with a note of
+ * how much was left out.
+ */
+export const renderMarkdownRows = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS): Promise<PaintRow[]> => {
+  const { rows, totalRows } = await layoutMarkdown(markdown, width, maxRows);
+  if (totalRows <= rows.length) {
+    return rows;
+  }
+  return [...rows, lineToPaintRow([seg(`… (${totalRows - rows.length} more lines not shown)`, 'muted')])];
 };
 
 const isBlankRow = (row: PaintRow): boolean => row.every((span) => span.text.trim() === '' && span.style.bg.kind === 'default');

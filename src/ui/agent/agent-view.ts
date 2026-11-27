@@ -21,8 +21,8 @@ import {
   spinnerFrame,
   type FormatContext,
 } from './format.js';
-import { parseKeys } from './keys.js';
-import { oneLine, seg, type Line } from './lines.js';
+import { parseKeys, PasteFilter, type Key } from './keys.js';
+import { fitLine, oneLine, seg, type Line } from './lines.js';
 import { createMarkdownStyle, MessageView, type StableSplit } from './message-view.js';
 import { lineToPaintRow } from './paint-line.js';
 import { toStyledText } from './styled.js';
@@ -42,7 +42,23 @@ export interface AgentViewOptions {
   /** Rows kept free above the live region. */
   readonly marginRows?: number;
   readonly now?: () => number;
+  /** Timers for the spinner, the Esc hold and the resize fallback; tests pass fake ones. */
+  readonly timers?: Partial<ViewTimers>;
 }
+
+export interface ViewTimers {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+  setInterval(callback: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+const REAL_TIMERS: ViewTimers = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout),
+};
 
 export type AgentAction =
   | { readonly type: 'answer'; readonly requestId: string; readonly optionId: string | null }
@@ -51,6 +67,14 @@ export type AgentAction =
 
 /** Frames are coalesced to at most one per this many milliseconds (about 60 fps). */
 const FRAME_MS = 16;
+/** Keys are ignored this long after a permission prompt appears, so a keystroke meant for something else cannot answer it. */
+const PROMPT_ARM_MS = 300;
+/** A lone ESC waits this long for the rest of an escape sequence split across reads. */
+const ESCAPE_WAIT_MS = 40;
+/** While the user is being asked, the status line (and its elapsed time) redraws once a second. */
+const WAITING_REDRAW_MS = 1000;
+/** A resize nobody passed on to relayout() is handled after the size has held still this long. */
+const AUTO_RELAYOUT_MS = 150;
 /** Longest finish() waits for the last frames before giving the terminal back anyway. */
 const FINISH_TIMEOUT_MS = 2000;
 
@@ -109,7 +133,9 @@ export class AgentView {
   private startedAt = 0;
   private bufferRows: number;
   private frameTimer: NodeJS.Timeout | undefined;
-  private spinnerTimer: NodeJS.Timeout | undefined;
+  private spinnerTimer: unknown;
+  private readonly timers: ViewTimers;
+  private autoRelayout: { timer: unknown; cols: number; rows: number } | undefined;
   private lastTickAt = 0;
   /** A frame was requested and has not been processed yet. */
   private awaitingFrame = false;
@@ -119,6 +145,14 @@ export class AgentView {
   private paused = false;
   private selectedOption = 0;
   private shownRequestId: string | undefined;
+  /** When the prompt on screen first showed; keys before PROMPT_ARM_MS after it are ignored. */
+  private promptShownAt = 0;
+  private readonly pastes: PasteFilter;
+  private pendingEscape: unknown;
+  /** The terminal size the live region was last laid out for; painting waits for relayout() after a resize. */
+  private laidOutSize: { cols: number; rows: number };
+  private lastSpinnerFrameAt = 0;
+  private tickStartedAt = 0;
   private idleWaiters: Array<() => void> = [];
   private stats = { frames: 0, renderMs: 0, firstPaintMs: -1 };
 
@@ -128,8 +162,18 @@ export class AgentView {
     private readonly options: AgentViewOptions,
   ) {
     this.now = options.now ?? Date.now;
+    // Methods are taken one by one (and bound): a timers object may be a class instance.
+    const timers = options.timers;
+    this.timers = {
+      setTimeout: timers?.setTimeout?.bind(timers) ?? REAL_TIMERS.setTimeout,
+      clearTimeout: timers?.clearTimeout?.bind(timers) ?? REAL_TIMERS.clearTimeout,
+      setInterval: timers?.setInterval?.bind(timers) ?? REAL_TIMERS.setInterval,
+      clearInterval: timers?.clearInterval?.bind(timers) ?? REAL_TIMERS.clearInterval,
+    };
+    this.pastes = new PasteFilter(this.now);
     this.agentName = oneLine(options.agentName) || 'agent';
-    this.bufferRows = Math.max(48, host.size.rows * 2);
+    this.bufferRows = this.baseBufferRows();
+    this.laidOutSize = { ...host.size };
     this.headless = HeadlessRenderer.create({ width: host.size.cols, height: this.bufferRows });
     this.region = new LiveRegion(host, colorDepth, { marginRows: options.marginRows ?? 2 });
     this.style = createMarkdownStyle(this.headless.renderer);
@@ -152,7 +196,7 @@ export class AgentView {
     this.state = 'running';
     this.startedAt = this.now();
     this.region.start(anchor);
-    this.spinnerTimer = setInterval(() => this.schedule(), SPINNER_INTERVAL_MS);
+    this.spinnerTimer = this.timers.setInterval(() => this.spin(), SPINNER_INTERVAL_MS);
     this.schedule();
   }
 
@@ -162,38 +206,92 @@ export class AgentView {
     }
     this.model.apply(event);
     if (event.type === 'turn.ended') {
-      clearInterval(this.spinnerTimer);
+      this.timers.clearInterval(this.spinnerTimer);
     }
     this.schedule();
   }
 
-  /** Keys typed while the turn runs. Returns whether the view used them. */
+  /**
+   * Keys typed while the turn runs. Returns whether the view used them; the
+   * caller passes on whatever it did not use (to the shell, after the turn).
+   *
+   * - Ctrl-C typed anywhere in a read stops the turn, prompt open or not (a
+   *   0x03 inside a bracketed paste is pasted text, not a keystroke).
+   * - Pasted text (bracketed paste, followed across reads) is never a key:
+   *   it is handed back, so a paste meant for the shell is not lost.
+   * - Only a read that is exactly one key is a keystroke for the view. A
+   *   burst (typed ahead, or bunched up over a slow link) is handed back, so
+   *   "git status⏎" typed ahead cannot answer a prompt.
+   * - While a prompt is open, a single key belongs to it, and is ignored for
+   *   its first moments on screen.
+   */
   handleInput(data: string): boolean {
     if (this.state !== 'running' || this.model.ended) {
       return false;
     }
-    let consumed = false;
-    for (const key of parseKeys(data)) {
-      if (this.state !== 'running') {
-        break;
-      }
-      if (key.name === 'ctrl-c') {
-        this.stop();
-        consumed = true;
-        continue;
-      }
-      const request = this.model.permissions[0];
-      if (request) {
-        this.handlePermissionKey(request, key);
-        consumed = true;
-        continue;
-      }
-      if (key.name === 'escape') {
-        this.background();
-        consumed = true;
-      }
+    if (this.pendingEscape) {
+      this.timers.clearTimeout(this.pendingEscape);
+      this.pendingEscape = undefined;
+      data = `\u001b${data}`;
     }
-    return consumed;
+    const { text, pasted } = this.pastes.filter(data);
+    // A Ctrl-C typed outside a paste (a 0x03 inside one is pasted text, not a keystroke).
+    if (text.includes('\u0003')) {
+      this.stop();
+      return true;
+    }
+    if (pasted) {
+      return false;
+    }
+    if (text === '\u001b') {
+      // Maybe the start of an escape sequence split across reads: wait for the rest.
+      this.pendingEscape = this.timers.setTimeout(() => {
+        this.pendingEscape = undefined;
+        this.handleKey({ name: 'escape' });
+      }, ESCAPE_WAIT_MS);
+      return true;
+    }
+    const keys = parseKeys(text);
+    if (keys.length !== 1) {
+      return false;
+    }
+    return this.handleKey(keys[0]!);
+  }
+
+  private handleKey(key: Key): boolean {
+    if (this.state !== 'running' || this.model.ended) {
+      return false;
+    }
+    if (key.name === 'ctrl-c') {
+      this.stop();
+      return true;
+    }
+    const request = this.model.permissions[0];
+    if (request) {
+      // Not on screen yet, or only just: the key was meant for something else.
+      if (this.promptState === 'ready') {
+        this.handlePermissionKey(request, key);
+      }
+      return true;
+    }
+    if (key.name === 'escape') {
+      this.background();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * `ready` when a permission prompt is on screen and past its arming delay,
+   * so a key would answer it; `arming` while it is not drawn yet or only
+   * just; `none` with no prompt open.
+   */
+  get promptState(): 'none' | 'arming' | 'ready' {
+    const request = this.model.permissions[0];
+    if (!request) {
+      return 'none';
+    }
+    return this.shownRequestId === request.requestId && this.now() - this.promptShownAt >= PROMPT_ARM_MS ? 'ready' : 'arming';
   }
 
   onAction(listener: (action: AgentAction) => void): () => void {
@@ -213,12 +311,29 @@ export class AgentView {
     if (this.state !== 'running') {
       return;
     }
+    if (this.awaitingRelayout()) {
+      // A resize nobody relaid out for: do it now, or the last output would never be painted.
+      await this.relayout();
+      // destroy() (or another finish()) may have run while the terminal answered.
+      if ((this.state as State) !== 'running') {
+        return;
+      }
+    }
     this.state = 'finishing';
-    clearInterval(this.spinnerTimer);
+    this.timers.clearInterval(this.spinnerTimer);
+    if (!this.model.ended) {
+      // No turn.ended (the connection dropped, say): what is on screen goes to scrollback as it stands.
+      this.model.settle();
+      this.schedule();
+    }
     await Promise.race([
       this.whenIdle(),
       new Promise<void>((resolve) => setTimeout(resolve, FINISH_TIMEOUT_MS).unref()),
     ]);
+    // destroy() during the wait has already given the terminal back.
+    if ((this.state as State) !== 'finishing') {
+      return;
+    }
     this.close();
   }
 
@@ -232,31 +347,44 @@ export class AgentView {
       return;
     }
     this.paused = true;
-    let cursor: CursorPosition;
+    this.cancelAutoRelayout();
+    let cursor: CursorPosition | undefined;
     try {
       cursor = await this.host.queryCursorPosition();
     } catch {
-      cursor = this.region.anchor;
+      // No report: the live region restarts at the row the cursor was parked on (see LiveRegion.relayout).
+      cursor = undefined;
     }
     // The view may have been finished or destroyed while the terminal answered.
     if ((this.state as State) === 'done') {
       return;
     }
     this.region.relayout(cursor);
+    this.laidOutSize = { ...this.host.size };
     this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
     this.paused = false;
     this.schedule();
   }
 
   destroy(): void {
+    if (this.state === 'running' || this.state === 'finishing') {
+      // Torn down mid-turn (an error, the shell exiting): no live rows or hidden cursor left behind.
+      if (this.awaitingRelayout()) {
+        this.region.relayout(undefined);
+      }
+      this.region.finish();
+    }
+    this.cancelAutoRelayout();
     this.state = 'done';
+    this.timers.clearTimeout(this.pendingEscape);
     clearTimeout(this.frameTimer);
-    clearInterval(this.spinnerTimer);
+    this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
     this.headless.destroy();
   }
 
   /** Rendering costs so far, for measurements. */
+  /** `averageFrameMs` counts OpenTUI's layout and drawing as well as Shelly's commit and paint. */
   get renderStats(): { readonly frames: number; readonly averageFrameMs: number; readonly firstPaintMs: number } {
     return {
       frames: this.stats.frames,
@@ -265,9 +393,67 @@ export class AgentView {
     };
   }
 
+  private spin(): void {
+    if (this.awaitingRelayout()) {
+      this.armAutoRelayout();
+      return;
+    }
+    // A prompt waits on a person: redraw for the elapsed time once a second, not every spinner frame.
+    if (this.model.permissions.length > 0 && this.now() - this.lastSpinnerFrameAt < WAITING_REDRAW_MS) {
+      return;
+    }
+    this.lastSpinnerFrameAt = this.now();
+    this.schedule();
+  }
+
+  private baseBufferRows(): number {
+    return Math.max(48, this.host.size.rows * 2);
+  }
+
+  /**
+   * A resize that relayout() was never called for would freeze the view:
+   * once the new size has held for AUTO_RELAYOUT_MS, relay out anyway.
+   */
+  private armAutoRelayout(): void {
+    const { cols, rows } = this.host.size;
+    if (this.autoRelayout && this.autoRelayout.cols === cols && this.autoRelayout.rows === rows) {
+      return;
+    }
+    this.cancelAutoRelayout();
+    this.autoRelayout = {
+      cols,
+      rows,
+      timer: this.timers.setTimeout(() => {
+        this.autoRelayout = undefined;
+        if (!this.awaitingRelayout()) {
+          return;
+        }
+        const size = this.host.size;
+        if (size.cols !== cols || size.rows !== rows) {
+          this.armAutoRelayout();
+          return;
+        }
+        void this.relayout();
+      }, AUTO_RELAYOUT_MS),
+    };
+  }
+
+  private cancelAutoRelayout(): void {
+    if (this.autoRelayout) {
+      this.timers.clearTimeout(this.autoRelayout.timer);
+      this.autoRelayout = undefined;
+    }
+  }
+
+  /** The terminal was resized and relayout() has not run yet: painting now would land on reflowed scrollback. */
+  private awaitingRelayout(): boolean {
+    const { cols, rows } = this.host.size;
+    return cols !== this.laidOutSize.cols || rows !== this.laidOutSize.rows;
+  }
+
   // ─── Input ────────────────────────────────────────────────────────────────
 
-  private handlePermissionKey(request: PermissionRequest, key: ReturnType<typeof parseKeys>[number]): void {
+  private handlePermissionKey(request: PermissionRequest, key: Key): void {
     const count = request.options.length;
     const move = (step: number): void => {
       if (count > 0) {
@@ -330,7 +516,7 @@ export class AgentView {
   private background(): void {
     this.emit({ type: 'background' });
     this.state = 'finishing';
-    clearInterval(this.spinnerTimer);
+    this.timers.clearInterval(this.spinnerTimer);
     clearTimeout(this.frameTimer);
     const row = lineToPaintRow(formatBackgrounded(this.formatContext()));
     this.region.update([row], []);
@@ -367,11 +553,15 @@ export class AgentView {
     if (this.state === 'created' || this.state === 'done') {
       return;
     }
-    if (this.awaitingFrame || this.paused) {
+    if (this.awaitingFrame || this.paused || this.awaitingRelayout()) {
+      if (this.awaitingRelayout()) {
+        this.armAutoRelayout();
+      }
       this.dirty = true;
       return;
     }
     this.lastTickAt = this.now();
+    this.tickStartedAt = performance.now();
     this.dirty = false;
     this.sync();
     this.awaitingFrame = true;
@@ -472,11 +662,11 @@ export class AgentView {
       }];
     });
     const snapshot: FrameSnapshot = { rows: frame.rows, height: this.root.height, blocks };
-    const startedAt = performance.now();
     // Let OpenTUI finish its frame before the tree changes.
     queueMicrotask(() => {
       this.processFrame(snapshot);
-      this.stats.renderMs += performance.now() - startedAt;
+      // From the tick to here: syncing the tree, OpenTUI's layout and drawing, then commit and paint.
+      this.stats.renderMs += performance.now() - this.tickStartedAt;
     });
   }
 
@@ -485,7 +675,10 @@ export class AgentView {
     if (this.state === 'done' || this.state === 'created') {
       return;
     }
-    if (this.paused) {
+    if (this.paused || this.awaitingRelayout()) {
+      if (!this.paused) {
+        this.armAutoRelayout();
+      }
       this.dirty = true;
       return;
     }
@@ -534,6 +727,7 @@ export class AgentView {
       }
       this.model.markCommitted(end);
       this.dirty = true;
+      this.shrinkBuffer(snapshot.height - commitEnd);
     }
     if (split) {
       const view = this.views.get(split.key);
@@ -543,6 +737,15 @@ export class AgentView {
       }
     }
     this.afterFrame();
+  }
+
+  /** After a tall block went to scrollback, draw into a small buffer again: every frame draws the whole buffer. */
+  private shrinkBuffer(liveRows: number): void {
+    const target = Math.max(this.baseBufferRows(), liveRows + this.host.size.rows);
+    if (this.bufferRows > target * 2) {
+      this.bufferRows = target;
+      this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
+    }
   }
 
   private afterFrame(): void {
@@ -563,7 +766,7 @@ export class AgentView {
     }
     const kept = rows.slice(rows.length - (max - 1));
     const hidden = rows.length - kept.length;
-    const note = lineToPaintRow([seg(`  ⋮ ${hidden} more line${hidden === 1 ? '' : 's'} above, in scrollback when done`, 'muted')]);
+    const note = lineToPaintRow(fitLine([seg(`  ⋮ ${hidden} more line${hidden === 1 ? '' : 's'} above, in scrollback when done`, 'muted')], this.host.size.cols));
     return [note, ...kept];
   }
 
@@ -594,7 +797,7 @@ export class AgentView {
     this.state = 'done';
     clearTimeout(this.frameTimer);
     this.frameTimer = undefined;
-    clearInterval(this.spinnerTimer);
+    this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
   }
 
@@ -640,6 +843,7 @@ export class AgentView {
     const request = this.model.permissions[0];
     if (request?.requestId !== this.shownRequestId) {
       this.shownRequestId = request?.requestId;
+      this.promptShownAt = this.now();
       this.selectedOption = 0;
     }
     if (request && !ended) {

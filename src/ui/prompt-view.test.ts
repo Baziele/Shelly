@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, it } from 'node:test';
 import { EmulatedTerminal } from '../../test/support/emulated-terminal.js';
+import { eventually, sameAs } from '../../test/support/eventually.js';
 import { BUILTIN_COMMANDS, CommandRegistry } from '../commands/slash-commands.js';
 import type { HostTerminal } from '../terminal/host-terminal.js';
 import { InlineOverlay, type OverlayOpenOptions } from './inline-overlay.js';
@@ -19,11 +19,12 @@ const open = async (cols: number, trigger: string, input = '', options: OverlayO
     onCancel: () => events.push('cancel'),
   });
   overlay.open({ row: 1, col: PROMPT.length + 1 }, trigger, input, options);
-  const screen = async (): Promise<string[]> => {
-    await sleep(60);
-    return (await term.screen()).filter((line) => line !== '');
-  };
-  return { term, overlay, events, screen };
+  const read = async (): Promise<string[]> => (await term.screen()).filter((line) => line !== '');
+  /** The screen once it matches `check` (or the last one read, to assert on). Frames land when they land. */
+  const screen = (check: (lines: string[]) => boolean): Promise<string[]> => eventually(read, check);
+  /** The screen once it equals `expected`. */
+  const screenIs = (expected: string[]): Promise<string[]> => eventually(read, sameAs(expected));
+  return { term, overlay, events, screen, screenIs };
 };
 
 describe('PromptView', { timeout: 20_000 }, () => {
@@ -34,42 +35,46 @@ describe('PromptView', { timeout: 20_000 }, () => {
 
   it('opens fast mode with its own placeholder, and a rewriting row for a captured command', async () => {
     const fast = await open(80, '__');
-    assert.deepEqual(await fast.screen(), [`${PROMPT}__ Describe a command · enter to insert`]);
+    const fastExpected = [`${PROMPT}__ Describe a command · enter to insert`];
+    assert.deepEqual(await fast.screenIs(fastExpected), fastExpected);
     overlay?.destroy();
     const rewrite = await open(80, '__', '', { rewriting: 'git log --oneline' });
-    assert.deepEqual(await rewrite.screen(), [`${PROMPT}__ How should it change?`, '                rewriting: git log --oneline']);
+    const rewriteExpected = [`${PROMPT}__ How should it change?`, '                rewriting: git log --oneline'];
+    assert.deepEqual(await rewrite.screenIs(rewriteExpected), rewriteExpected);
   });
 
   it('shows the hint right-aligned, shortens the placeholder for it, and hides it when there is no room', async () => {
     const wide = await open(80, '::', '', { hint: '● claude is working · enter to watch' });
-    const [row] = await wide.screen();
+    const [row] = await wide.screen((lines) => lines[0]?.endsWith('enter to watch') ?? false);
     assert.ok(row!.startsWith(`${PROMPT}:: Ask anything`) && row!.endsWith('● claude is working · enter to watch') && row!.length === 80, row ?? '');
     overlay?.destroy();
     const narrow = await open(44, '::', 'why did the build fail', { hint: 'claude · new thread' });
-    assert.deepEqual(await narrow.screen(), [`${PROMPT}:: why did the build fail`]);
+    const narrowExpected = [`${PROMPT}:: why did the build fail`];
+    assert.deepEqual(await narrow.screenIs(narrowExpected), narrowExpected);
   });
 
   it('keeps the request, spins and streams the reply while busy, then shows an error and lets you retry', async () => {
     const view = await open(80, '__', 'find files over 100MB');
     view.overlay.setBusy(true);
     view.overlay.setPreview('find . -type f -size +100M');
-    const [busy] = await view.screen();
+    const [busy] = await view.screen((lines) => lines[0]?.endsWith('+100M') ?? false);
     assert.match(busy!, /^~\/acme-web \$ __ find files over 100MB [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] find \. -type f -size \+100M$/);
 
     view.overlay.feed('x');
     view.overlay.setError('Fast mode is unavailable');
-    const lines = await view.screen();
-    assert.deepEqual(lines, [`${PROMPT}__ find files over 100MB`, '                ✗ Fast mode is unavailable'], 'typing while busy is ignored');
+    const errorExpected = [`${PROMPT}__ find files over 100MB`, '                ✗ Fast mode is unavailable'];
+    assert.deepEqual(await view.screenIs(errorExpected), errorExpected, 'typing while busy is ignored');
 
     view.overlay.feed('!');
-    assert.deepEqual(await view.screen(), [`${PROMPT}__ find files over 100MB!`], 'the error clears once you edit');
+    const editedExpected = [`${PROMPT}__ find files over 100MB!`];
+    assert.deepEqual(await view.screenIs(editedExpected), editedExpected, 'the error clears once you edit');
   });
 
   it('moves a long preview to its own row on a narrow terminal', async () => {
     const view = await open(44, '__', 'find files over 100MB');
     view.overlay.setBusy(true);
     view.overlay.setPreview('find . -type f -size +100M -exec ls -lh {} +');
-    const lines = await view.screen();
+    const lines = await view.screen((rows) => rows.length === 2);
     assert.equal(lines.length, 2);
     assert.equal(lines[1], '                …ize +100M -exec ls -lh {} +');
   });
@@ -78,8 +83,7 @@ describe('PromptView', { timeout: 20_000 }, () => {
     const view = await open(80, '__', 'x');
     view.overlay.setBusy(true);
     view.overlay.feed('\u001b');
-    await sleep(30);
-    assert.deepEqual(view.events, ['cancel']);
+    assert.deepEqual(await eventually(() => view.events, sameAs(['cancel'])), ['cancel']);
   });
 
   it('picks from a list: type to filter, arrows to move, enter to pick, escape to close', async () => {
@@ -91,22 +95,22 @@ describe('PromptView', { timeout: 20_000 }, () => {
       { id: 'c', label: 'refresh tokens', columns: ['claude', 'yesterday'] },
     ];
     view.overlay.openPicker({ items, placeholder: 'Pick a thread · type to filter', onPick: (item) => picked.push(item.id), onClose: () => picked.push('closed') });
-    assert.deepEqual(await view.screen(), [
+    const listExpected = [
       `${PROMPT}:: Pick a thread · type to filter`,
       '              › fix the build    claude    2m ago',
       '                rename payments  opencode  1h ago',
       '                refresh tokens   claude    yesterday',
-    ]);
+    ];
+    assert.deepEqual(await view.screenIs(listExpected), listExpected);
     view.overlay.feed('re');
-    await sleep(30);
+    await view.screen((lines) => lines[0]?.endsWith(':: re') ?? false);
     view.overlay.feed('\u001b[B');
-    await sleep(30);
+    await view.screen((lines) => lines.some((line) => line.includes('› refresh tokens')));
     view.overlay.feed('\r');
-    await sleep(30);
-    assert.deepEqual(picked, ['c']);
+    assert.deepEqual(await eventually(() => picked, sameAs(['c'])), ['c']);
     view.overlay.feed('\u001b');
-    await sleep(30);
-    assert.deepEqual(picked, ['c', 'closed']);
-    assert.deepEqual(await view.screen(), [`${PROMPT}:: Ask Shelly anything · / for commands`]);
+    assert.deepEqual(await eventually(() => picked, sameAs(['c', 'closed'])), ['c', 'closed']);
+    const closedExpected = [`${PROMPT}:: Ask Shelly anything · / for commands`];
+    assert.deepEqual(await view.screenIs(closedExpected), closedExpected);
   });
 });
