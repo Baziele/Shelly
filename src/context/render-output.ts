@@ -13,8 +13,11 @@ import type { OutputSnapshot } from './captured-output.js';
 
 // zsh's PROMPT_SP: after a command, it prints a marker (normally a reverse-video
 // `%`), pads to the line's end and returns, so output without a trailing
-// newline is not overwritten by the prompt. It belongs to the shell, not the command.
-const ZSH_PROMPT_SP = /(?:(?:\u001b\[[0-9;]*m)*[^\s\u001b](?:\u001b\[[0-9;]*m)*)? {8,}\r \r$/u;
+// newline is not overwritten by the prompt. It belongs to the shell, not the
+// command. A precmd() function may print a title after it.
+const ZSH_PROMPT_SP = /(?:(?:\u001b\[[0-9;]*m)*[^\s\u001b](?:\u001b\[[0-9;]*m)*)? {8,}\r \r(?:\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\))*$/u;
+/** The padding is one line wide, so the artifact is always near the end. */
+const PROMPT_SP_WINDOW = 1024;
 
 /** Moves the cursor to another line, scrolls, or erases the screen. */
 const MOVES_BETWEEN_LINES = /\u001b\[[0-9;]*[ABEFHJSTdfrsu]|\u001b[78DEM]/u;
@@ -30,8 +33,8 @@ const ESCAPE_SEQUENCES = new RegExp(
   ].join('|'),
   'gu',
 );
-// C0 controls other than tab and newline, plus DEL.
-const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u001f\u007f]/gu;
+// C0 controls other than tab and newline, DEL, and C1 controls.
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu;
 const LINE_TOKENS = new RegExp(
   [
     '[^\\u0000-\\u001f\\u007f]+', // printable text
@@ -45,18 +48,27 @@ const LINE_TOKENS = new RegExp(
 );
 
 export const renderOutput = async (snapshot: OutputSnapshot, columns: number): Promise<string> => {
-  if (!snapshot.tail) {
-    return renderTerminalText(stripShellArtifacts(snapshot.head), columns);
+  if (snapshot.omittedChars === 0) {
+    return renderTerminalText(stripShellArtifacts(snapshot.head + snapshot.tail), columns);
   }
 
+  // Each side of the cut loses its partial line, which could hold half an
+  // escape sequence or half a character.
+  const headEnd = snapshot.head.lastIndexOf('\n');
+  const tailStart = snapshot.tail.indexOf('\n');
   const [head, tail] = await Promise.all([
-    renderTerminalText(snapshot.head, columns),
-    renderTerminalText(stripShellArtifacts(snapshot.tail), columns),
+    renderTerminalText(headEnd === -1 ? snapshot.head : snapshot.head.slice(0, headEnd + 1), columns),
+    renderTerminalText(stripShellArtifacts(tailStart === -1 ? snapshot.tail : snapshot.tail.slice(tailStart + 1)), columns),
   ]);
   return `${head}\n[… ${snapshot.omittedChars.toLocaleString('en-US')} characters of output omitted …]\n${tail}`;
 };
 
-const stripShellArtifacts = (raw: string): string => raw.replace(ZSH_PROMPT_SP, '');
+const stripShellArtifacts = (raw: string): string => {
+  const cut = Math.max(0, raw.length - PROMPT_SP_WINDOW);
+  const end = raw.slice(cut);
+  const stripped = end.replace(ZSH_PROMPT_SP, '');
+  return stripped === end ? raw : raw.slice(0, cut) + stripped;
+};
 
 export const renderTerminalText = async (raw: string, columns: number): Promise<string> => {
   const width = Math.max(columns, 20);

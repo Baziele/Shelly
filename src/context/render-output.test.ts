@@ -45,8 +45,20 @@ describe('renderOutput', () => {
     assert.equal(await renderOutput(plain(`done\r\n${ZSH_NO_NEWLINE_MARK}`), 80), 'done');
   });
 
-  it('marks where long output was cut', async () => {
-    const text = await renderOutput({ head: 'first\r\n', tail: 'last\r\n', omittedChars: 12_345, usedFullScreen: false }, 80);
-    assert.equal(text, 'first\n[… 12,345 characters of output omitted …]\nlast');
+  it('marks where long output was cut, dropping the partial line on each side', async () => {
+    const snapshot = { head: 'first\r\nhalf a li', tail: 'ne\r\nlast\r\n', omittedChars: 12_345, usedFullScreen: false };
+    assert.equal(await renderOutput(snapshot, 80), 'first\n[… 12,345 characters of output omitted …]\nlast');
+  });
+
+  it('finds the zsh marker after a title set by precmd()', async () => {
+    assert.equal(await renderOutput(plain(`partial${ZSH_NO_NEWLINE_MARK}\u001b]0;~/repo\u0007`), 80), 'partial');
+  });
+
+  it('stays fast on long runs that could make a pattern backtrack', async () => {
+    const started = performance.now();
+    for (const run of [' '.repeat(64_000), 'a.'.repeat(32_000), '1.2.3.'.repeat(10_000)]) {
+      await renderOutput(plain(run), 80);
+    }
+    assert.ok(performance.now() - started < 500, `took ${Math.round(performance.now() - started)}ms`);
   });
 });

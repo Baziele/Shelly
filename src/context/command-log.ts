@@ -77,11 +77,6 @@ export class CommandLog {
     return this.currentCwd;
   }
 
-  /** True while a command the user ran has not finished yet. */
-  get isCommandRunning(): boolean {
-    return this.running !== undefined;
-  }
-
   handle(event: ShellEvent): void {
     switch (event.type) {
       case 'exec':
@@ -103,7 +98,7 @@ export class CommandLog {
 
   /** Finished commands, oldest first, once their output is cleaned up. */
   async recent(limit = this.options.maxCommands): Promise<CommandRecord[]> {
-    const entries = this.entries.slice(-limit);
+    const entries = limit > 0 ? this.entries.slice(-limit) : [];
     await Promise.all(entries.map((entry) => entry.rendering));
     return entries.map((entry) => ({ ...entry.record, output: entry.output ?? '' }));
   }
@@ -144,6 +139,7 @@ export class CommandLog {
     }
 
     running.output.finish();
+    const raw = running.output.snapshot();
     const entry: Entry = {
       record: {
         id: running.id,
@@ -152,14 +148,16 @@ export class CommandLog {
         startedAt: running.startedAt,
         finishedAt: this.options.now(),
         exitCode,
-        usedFullScreen: running.output.snapshot().usedFullScreen,
+        usedFullScreen: raw.usedFullScreen,
       },
-      raw: running.output.snapshot(),
+      raw,
       columns: running.columns,
       output: undefined,
       rendering: undefined,
     };
-    // Off the output path: the terminal should never wait for this.
+    // After the current output has gone to the terminal. The work is bounded
+    // (128K characters at most, and patterns that cannot backtrack badly), so
+    // even the worst case takes milliseconds.
     entry.rendering = new Promise<void>((resolve) => setImmediate(resolve)).then(() => this.render(entry));
 
     this.entries.push(entry);

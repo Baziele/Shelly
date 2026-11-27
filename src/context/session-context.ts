@@ -144,12 +144,20 @@ const describe = (record: CommandRecord): ContextCommand => ({
 
 const countLines = (text: string): number => (text ? text.split('\n').length : 0);
 
-/** The last whole lines of `text` that fit in `maxChars`. */
+/**
+ * The last whole lines of `text` that fit in `maxChars`, or, when even the
+ * last line is too long (one big JSON response, say), the end of that line.
+ */
 const tailLines = (text: string, maxChars: number): { text: string; omittedLines: number } => {
   if (text.length <= maxChars) {
     return { text, omittedLines: 0 };
   }
   const lines = text.split('\n');
+  const last = lines.at(-1) ?? '';
+  if (last.length + 1 > maxChars) {
+    const kept = maxChars > 1 ? `…${last.slice(last.length - (maxChars - 1))}` : '';
+    return { text: kept, omittedLines: lines.length - 1 };
+  }
   const kept: string[] = [];
   let size = 0;
   for (let index = lines.length - 1; index >= 0; index--) {

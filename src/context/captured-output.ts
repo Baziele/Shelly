@@ -8,7 +8,7 @@ export const CAPTURE_TAIL_CHARS = 64 * 1024;
 
 export interface OutputSnapshot {
   readonly head: string;
-  /** Output after the omitted middle; empty unless something was dropped. */
+  /** Output after the omitted middle; empty when nothing was dropped. */
   readonly tail: string;
   readonly omittedChars: number;
   /** The command switched to the alternate screen (vim, less, htop…), whose contents are not kept. */
@@ -71,15 +71,31 @@ export class CapturedOutput {
   }
 
   snapshot(): OutputSnapshot {
-    const tail = this.tailLength < CAPTURE_TAIL_CHARS
-      ? decode(this.tail.subarray(0, this.tailLength))
-      : decode(this.tail.subarray(this.tailNext)) + decode(this.tail.subarray(0, this.tailNext));
+    const tail = this.orderedTail();
+    if (this.omitted === 0) {
+      // Nothing was dropped: one piece, so no character is split at the seam.
+      const whole = new Uint16Array(this.headLength + tail.length);
+      whole.set(this.head.subarray(0, this.headLength));
+      whole.set(tail, this.headLength);
+      return { head: decode(whole), tail: '', omittedChars: 0, usedFullScreen: this.usedFullScreen };
+    }
     return {
       head: decode(this.head.subarray(0, this.headLength)),
-      tail,
+      tail: decode(tail),
       omittedChars: this.omitted,
       usedFullScreen: this.usedFullScreen,
     };
+  }
+
+  /** The ring's contents, oldest first. */
+  private orderedTail(): Uint16Array {
+    if (this.tailLength < CAPTURE_TAIL_CHARS) {
+      return this.tail.subarray(0, this.tailLength);
+    }
+    const ordered = new Uint16Array(CAPTURE_TAIL_CHARS);
+    ordered.set(this.tail.subarray(this.tailNext));
+    ordered.set(this.tail.subarray(0, this.tailNext), CAPTURE_TAIL_CHARS - this.tailNext);
+    return ordered;
   }
 
   private store(text: string, start: number, end: number): void {

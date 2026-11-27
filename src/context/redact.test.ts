@@ -19,6 +19,14 @@ describe('redactSecrets', () => {
     it(`masks ${input.split('\n')[0]}`, () => assert.equal(redactSecrets(input), expected));
   }
 
+  it('stays fast on long runs of word characters', () => {
+    const started = performance.now();
+    for (const run of ['a.'.repeat(32_000), '1.2.3.'.repeat(10_000), '0123abcd-'.repeat(7000), 'x'.repeat(64_000)]) {
+      redactSecrets(run);
+    }
+    assert.ok(performance.now() - started < 500, `took ${Math.round(performance.now() - started)}ms`);
+  });
+
   it('leaves ordinary text alone', () => {
     const text = 'max_tokens=1000 PWD=/Users/me/project tokens: 12 ls -la ~/.ssh git push origin main';
     assert.equal(redactSecrets(text), text);

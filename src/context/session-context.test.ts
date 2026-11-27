@@ -50,6 +50,17 @@ describe('buildAskContext', () => {
   });
 });
 
+describe('buildAskContext with one long line', () => {
+  it('keeps the end of a line too long to fit whole', async () => {
+    const log = createLog();
+    run(log, 'curl api', `{"items":[${'1,'.repeat(5000)}"end"]}`);
+    const [command] = (await buildAskContext(log, ENVIRONMENT, { maxOutputChars: 100 })).commands;
+    assert.equal(command?.output.length, 100);
+    assert.ok(command?.output.startsWith('…'));
+    assert.ok(command?.output.endsWith('"end"]}'));
+  });
+});
+
 describe('formatAskContext', () => {
   it('renders the environment and each command', async () => {
     const log = createLog();
