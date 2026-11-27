@@ -510,3 +510,33 @@ describe('ThreadService while a turn is starting', () => {
       }), { fake });
   });
 });
+
+/** What a client shows for one message: chunks append, unless one says it is the whole text so far. */
+const showMessage = (seen: string, events: readonly ThreadEvent[]): string =>
+  events.reduce((text, event) => (event.type !== 'message.chunk' ? text : event.replace ? event.text : text + event.text), seen);
+
+describe('ThreadService under races and shutdown', () => {
+  it('marks a compacted message as the whole text, so a watcher resuming inside it does not repeat it', async () => {
+    const fake = new FakeAgents();
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const collecting = yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'greet'))).pipe(Effect.forkChild);
+        yield* eventually(() => fake.turns.length === 1);
+        fake.lastTurn!.push(
+          { type: 'chunk', kind: 'text', text: 'Hel' },
+          { type: 'chunk', kind: 'text', text: 'lo' },
+          { type: 'end', stopReason: 'end_turn', error: null },
+        );
+        const live = Array.from(yield* Fiber.join(collecting));
+        const first = live.find((event) => event.type === 'message.chunk')!;
+        // A client saw "Hel", lost the connection, and catches up after the turn was compacted.
+        const seen = showMessage('', [first]);
+        const caughtUp = Array.from(yield* Stream.runCollect(threads.watch(thread.id, first.seq)));
+        assert.deepEqual(shape(caughtUp), ['chunk:text:Hello', 'ended:end_turn']);
+        assert.equal(showMessage(seen, caughtUp), 'Hello');
+        // Live chunks are increments.
+        assert.ok(live.every((event) => event.type !== 'message.chunk' || event.replace === undefined));
+      }), { fake });
+  });
+});

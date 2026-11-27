@@ -172,7 +172,8 @@ export const TurnStarted = Schema.Struct({
 
 /**
  * Streamed text. Chunks with the same `messageId` belong to one message;
- * a new id starts a new message (for example after a tool call).
+ * a new id starts a new message (for example after a tool call). A chunk
+ * adds to the message's text, unless it carries `replace`.
  */
 export const MessageChunk = Schema.Struct({
   ...eventFields,
@@ -182,6 +183,15 @@ export const MessageChunk = Schema.Struct({
   /** `thought`: the agent's visible reasoning. */
   kind: Schema.Literals(['text', 'thought']),
   text: Schema.String,
+  /**
+   * true: `text` is the message's whole text so far; replace whatever the
+   * client has for this `messageId` instead of adding to it. Set on stored
+   * chunks merged after their turn ended (replayed by `thread.watch` and in
+   * history), which can reach a client that already saw some of the
+   * message. Absent on live chunks. Added without a protocol version bump:
+   * a client that ignores it only repeats text in that one case.
+   */
+  replace: Schema.optionalKey(Schema.Boolean),
 });
 
 export const ToolUpdated = Schema.Struct({
