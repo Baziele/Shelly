@@ -120,7 +120,9 @@ export class ThreadService extends Context.Service<
 >()('shelly/daemon/ThreadService') {}
 
 const DEFAULT_LIST_LIMIT = 50;
-const CANCEL_ON_SHUTDOWN_TIMEOUT = '2 seconds';
+/** How long an agent gets to acknowledge a cancel. */
+const CANCEL_TIMEOUT = '2 seconds';
+const CANCEL_ON_SHUTDOWN_TIMEOUT = CANCEL_TIMEOUT;
 
 const make = Effect.gen(function* () {
   const store = yield* ThreadStore;
@@ -583,7 +585,8 @@ const make = Effect.gen(function* () {
         const turn = thread.turn;
         if (turn && !turn.ended) {
           turn.cancelRequested = true;
-          yield* turn.session.cancel;
+          // An agent that never answers must not hold the thread's lock.
+          yield* turn.session.cancel.pipe(Effect.timeout(CANCEL_TIMEOUT), Effect.ignore);
         } else if (thread.starting) {
           // The agent is still starting: the turn ends as soon as it is set up.
           thread.cancelRequested = true;

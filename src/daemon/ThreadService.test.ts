@@ -557,4 +557,20 @@ describe('ThreadService under races and shutdown', () => {
         assert.ok(live.every((event) => event.type !== 'message.chunk' || event.replace === undefined));
       }), { fake });
   });
+
+  it('gives up waiting on an agent that ignores cancel, and frees the thread', async () => {
+    const fake = new FakeAgents({ ignoresCancel: () => true });
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        yield* threads.prompt(promptInput(thread.id, 'stuck')).pipe(Stream.take(1), Stream.runDrain);
+        yield* eventually(() => fake.turns.length === 1);
+        const startedAt = Date.now();
+        const exit = yield* threads.cancel(thread.id, CLIENT).pipe(Effect.timeout('5 seconds'), Effect.exit);
+        assert.equal(exit._tag, 'Success', 'cancel returns');
+        assert.ok(Date.now() - startedAt < 4000);
+        // The thread's lock is free again.
+        yield* threads.rename(thread.id, CLIENT, 'Still here').pipe(Effect.timeout('1 second'));
+      }), { fake });
+  });
 });
