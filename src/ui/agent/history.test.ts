@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { fixtureEvents, loadFixture } from '../../../test/fixtures/thread-events/load.js';
 import { EmulatedTerminal } from '../../../test/support/emulated-terminal.js';
+import type { ThreadEvent } from '../../protocol/schema.js';
 import { renderHistory, type HistoryOptions } from './history.js';
 
 const fixture = loadFixture('history');
@@ -51,6 +52,18 @@ describe('renderHistory', () => {
     const text = await renderHistory(fixtureEvents(fixture, now), options(80));
     assert.ok(text.endsWith('\r\n'));
     assert.ok(!/[^\r]\n/.test(text));
+  });
+
+  it('replaces the answer with a `replace` chunk instead of adding to it', async () => {
+    const events: ThreadEvent[] = [
+      { seq: 1, type: 'turn.started', turnId: 't', text: 'greet me', at: now - 5000 },
+      { seq: 2, type: 'message.chunk', turnId: 't', messageId: 'm', kind: 'text', text: 'Hel' },
+      { seq: 3, type: 'message.chunk', turnId: 't', messageId: 'm', kind: 'text', text: 'Hello', replace: true },
+      { seq: 4, type: 'turn.ended', turnId: 't', stopReason: 'end_turn', error: null, durationMs: 1000 },
+    ];
+    const lines = await shown(await renderHistory(events, options(60)), 60);
+    assert.ok(lines.includes('Hello'), lines.join('\n'));
+    assert.ok(!lines.some((line) => line.includes('HelHello')));
   });
 
   it('says so when a thread has no exchange yet', async () => {

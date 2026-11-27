@@ -11,6 +11,9 @@ const ev = <T extends ThreadEvent['type']>(event: Omit<Extract<ThreadEvent, { ty
   ({ ...event, seq: ++seq }) as unknown as ThreadEvent;
 const text = (messageId: string, chunk: string, kind: 'text' | 'thought' = 'text') =>
   ev<'message.chunk'>({ type: 'message.chunk', turnId: 't', messageId, kind, text: chunk });
+/** A chunk merged after its turn ended: the message's whole text. */
+const whole = (messageId: string, chunk: string, kind: 'text' | 'thought' = 'text') =>
+  ev<'message.chunk'>({ type: 'message.chunk', turnId: 't', messageId, kind, text: chunk, replace: true });
 const tool = (id: string, status: ToolCall['status'], title = `tool ${id}`) =>
   ev<'tool.updated'>({ type: 'tool.updated', turnId: 't', tool: { id, title, kind: 'execute', status, locations: [], content: [] } });
 const options = [
@@ -131,6 +134,30 @@ describe('TurnModel', () => {
     assert.equal(toolBlock?.kind === 'tool' && toolBlock.stopped, true);
     assert.equal(phaseOf(model).type, 'ended');
     assert.equal(model.plan, undefined);
+  });
+
+  it('replaces what it has of a message with a `replace` chunk, as a watch resumed after compaction sends', () => {
+    const model = new TurnModel();
+    model.apply(text('m1', 'Hel'));
+    model.apply(whole('m1', 'Hello'));
+    model.apply(text('m1', ' there'));
+    assert.equal(model.blocks.length, 1);
+    const [message] = model.blocks;
+    assert.equal(message?.kind === 'message' && message.text, 'Hello there');
+
+    model.apply(text('m2', 'Hmm', 'thought'));
+    model.apply(whole('m2', 'Hmm, right', 'thought'));
+    assert.equal(model.thought, 'Hmm, right');
+  });
+
+  it('shows only the rest of a replaced message whose start is already in scrollback', () => {
+    const model = new TurnModel();
+    model.apply(text('m1', 'Hel'));
+    model.apply(tool('a', 'completed'));
+    model.markCommitted(2);
+    model.apply(whole('m1', 'Hello'));
+    const shown = model.blocks.flatMap((block) => (block.kind === 'message' ? [block.text] : []));
+    assert.deepEqual(shown, ['Hel', 'lo']);
   });
 
   it('counts each tool once', () => {
