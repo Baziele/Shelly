@@ -126,8 +126,10 @@ export class AgentSession {
           this.agents = await client.listAgents();
         }
         const thread = this.next.newThread ? undefined : this.thread;
-        // TODO: pass the shell's cwd once thread.prewarm takes one, so a `cd` does not cost a resume.
-        void client.prewarmThread(thread ? { threadId: thread.id } : this.nextAgentId() ? { agentId: this.nextAgentId()! } : {})
+        // With the shell's directory, so the session is ready for where the prompt comes from (no resume after a `cd`).
+        const cwd = this.host.cwd();
+        const agentId = this.nextAgentId();
+        void client.prewarmThread(thread ? { threadId: thread.id, cwd } : agentId ? { agentId, cwd } : { cwd })
           .catch(() => undefined);
         if (generation === this.inputGeneration && this.host.overlay.mode === 'agent') {
           this.host.overlay.setHint(this.hint(), this.canWatch());
