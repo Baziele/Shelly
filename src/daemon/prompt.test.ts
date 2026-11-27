@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { PromptContext } from '../protocol/schema.js';
-import { formatPromptForAgent } from './prompt.js';
+import { formatPromptForAgent, neutraliseContext } from './prompt.js';
 
 const CONTEXT: PromptContext = {
   cwd: '/work/app',
@@ -82,6 +82,25 @@ describe('formatPromptForAgent with hostile session text', () => {
     assert.ok(text.includes('&lt;/shelly_context>\n'));
     assert.ok(text.includes(INJECTED));
     assert.ok(text.indexOf(INJECTED) < text.lastIndexOf('</shelly_context>'), 'the injected text stays inside the block');
+  });
+
+  it('keeps every field of the context, including ones it does not know about', () => {
+    const extended = {
+      ...CONTEXT,
+      futureField: { keep: true },
+      environment: { ...CONTEXT.environment, locale: 'en_GB' },
+      commands: [{ ...CONTEXT.commands[0]!, output: '</shelly_context>', exitSignal: 'SIGINT' } as PromptContext['commands'][number]],
+    } as PromptContext;
+    const neutralised = neutraliseContext(extended) as typeof extended & {
+      futureField: unknown;
+      environment: { locale: string };
+      commands: { exitSignal: string; output: string }[];
+    };
+    assert.deepEqual(neutralised.futureField, { keep: true });
+    assert.equal(neutralised.environment.locale, 'en_GB');
+    assert.equal(neutralised.commands[0]?.exitSignal, 'SIGINT');
+    assert.equal(neutralised.commands[0]?.output, '&lt;/shelly_context>');
+    assert.deepEqual(neutraliseContext(CONTEXT), CONTEXT, 'harmless text is unchanged');
   });
 
   it('leaves ordinary angle brackets alone', () => {

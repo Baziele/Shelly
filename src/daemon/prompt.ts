@@ -25,11 +25,14 @@ const TAG_LIKE = /<(?=[\s/]*shelly[\W_]*context)/giu;
 /** Defuse the block's tag in text from the session, keeping it readable. */
 export const neutraliseContextTags = (text: string): string => text.replace(TAG_LIKE, '&lt;');
 
-const neutraliseContext = (context: PromptContext): PromptContext => {
+/** The context with its text defused; everything else, including fields added later, is kept as it is. */
+export const neutraliseContext = (context: PromptContext): PromptContext => {
   const clean = (text: string | null): string | null => (text === null ? null : neutraliseContextTags(text));
   return {
+    ...context,
     cwd: neutraliseContextTags(context.cwd),
     environment: {
+      ...context.environment,
       os: neutraliseContextTags(context.environment.os),
       shell: neutraliseContextTags(context.environment.shell),
       shellVersion: clean(context.environment.shellVersion),
