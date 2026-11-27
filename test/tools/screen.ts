@@ -43,8 +43,9 @@ export interface ScreenOptions {
   /** Include the scrollback above the visible screen. */
   readonly scrollback?: boolean;
   /**
-   * Show the cursor. `true` always, `false` never; by default it is shown
-   * unless the application hid it (DECTCEM). In text it is a marker string.
+   * Show the cursor. `true` always, `false` never. By default images show it
+   * unless the application hid it (DECTCEM); text shows it only when `true`,
+   * as a marker string.
    */
   readonly cursor?: boolean;
 }
@@ -123,7 +124,8 @@ const visibleRange = (terminal: Terminal, options: ScreenOptions) => {
 /** The screen as lines of text, wide characters once, trailing spaces trimmed. */
 export const screenLines = (terminal: Terminal, options: TextOptions = {}): string[] => {
   const buffer = terminal.buffer.active;
-  const { first, last, cursor } = visibleRange(terminal, options);
+  // Text shows the cursor only when asked.
+  const { first, last, cursor } = visibleRange(terminal, { ...options, cursor: options.cursor ?? false });
   const marker = options.cursorMarker ?? '▮';
   const cell = buffer.getNullCell();
   const lines: string[] = [];
