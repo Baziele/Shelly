@@ -465,7 +465,7 @@ export class DaemonClient {
     return this.call((client) => client['daemon.status']());
   }
 
-  /** Ask the daemon to exit; with `ifIdle`, only when no turn is running. Resolves with whether it will. */
+  /** Ask the daemon to exit; with `ifIdle`, only when no turn runs and no client has a stream open. Resolves with whether it will. */
   shutdown(ifIdle: boolean): Promise<boolean> {
     return this.call((client) => client['daemon.shutdown']({ ifIdle }));
   }

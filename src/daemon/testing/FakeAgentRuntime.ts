@@ -151,7 +151,10 @@ export class FakeAgents {
           { type: 'delta', text: '-la' },
           { type: 'done', text: 'ls -la', kind: 'command', durationMs: 1 },
         ];
-        return Stream.fromIterable(events);
+        // "slow": the first delta, then nothing until the caller lets go (a request in flight).
+        return input.instruction.includes('slow')
+          ? Stream.concat(Stream.fromIterable(events.slice(0, 1)), Stream.never)
+          : Stream.fromIterable(events);
       }),
     prewarm: () => Effect.void,
     end: () => Effect.void,

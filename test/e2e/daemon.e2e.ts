@@ -456,6 +456,49 @@ describe('daemon upgrades', () => {
     assert.equal((await upgraded.status()).runningTurns, 1, 'the turn carries on');
   });
 
+  it('keeps an older daemon while another terminal has a fast request in flight', async () => {
+    const home = newHome();
+    const other = newClient(home);
+    const old = await connect(other);
+    const request = other.fastRequest({
+      sessionKey: 's1',
+      input: { instruction: 'slow one', buffer: '', cwd: '/', environment: CONTEXT.environment, recentCommands: [] },
+    })[Symbol.asyncIterator]();
+    assert.equal((await request.next()).value?.type, 'delta', 'the request is in flight');
+
+    const upgraded = newClient(home, { version: '99.0.0' });
+    assert.equal((await upgraded.listThreads()).length, 0);
+    assert.equal((await connect(upgraded)).pid, old.pid, 'the old daemon was kept');
+    assert.ok(isProcessAlive(old.pid));
+    await request.return?.();
+
+    // Once the request is over the daemon is idle, and the next client that connects replaces it.
+    const later = newClient(home, { version: '99.0.0' });
+    await waitFor(async () => {
+      const hello = await later.connect();
+      daemonPids.add(hello.pid);
+      if (hello.pid === old.pid) {
+        await later.close();
+        return false;
+      }
+      return true;
+    }, 'the idle daemon to be replaced', 5000);
+  });
+
+  it('replaces an older daemon another terminal is merely connected to, and that terminal carries on', async () => {
+    const home = newHome();
+    const other = newClient(home);
+    const old = await connect(other);
+    const thread = await other.createThread({ location: 'home', cwd: '/work' });
+    const upgraded = newClient(home, { version: '99.0.0' });
+    const fresh = await connect(upgraded);
+    assert.notEqual(fresh.pid, old.pid);
+    // The other terminal's next call reconnects, to the new daemon.
+    await waitFor(() => !isProcessAlive(old.pid), 'the old daemon to exit');
+    assert.deepEqual((await other.listThreads()).map((summary) => summary.id), [thread.id]);
+    assert.equal((await other.status()).pid, fresh.pid);
+  });
+
   it('never replaces a daemon newer than the client', async () => {
     const home = newHome();
     const current = await connect(newClient(home));

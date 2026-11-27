@@ -224,7 +224,11 @@ export const DaemonStatus = Rpc.make('daemon.status', {
   }),
 });
 
-/** Ask the daemon to exit. With `ifIdle`, only when no turn is running; the result says whether it will. */
+/**
+ * Ask the daemon to exit. With `ifIdle`, only when it is idle: no turn
+ * running and no prompt, watch or fast stream open from any client. The
+ * result says whether it will.
+ */
 export const Shutdown = Rpc.make('daemon.shutdown', {
   payload: { ifIdle: Schema.Boolean },
   success: Schema.Boolean,
