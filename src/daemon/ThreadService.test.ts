@@ -558,6 +558,43 @@ describe('ThreadService under races and shutdown', () => {
       }), { fake });
   });
 
+  it('fails setMode with ThreadNotFound when the thread is deleted while the agent starts, and releases the session', async () => {
+    const home = newHome();
+    const fake = new FakeAgents();
+    let threadId = '';
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        threadId = thread.id;
+        const open = gateSessions(fake);
+        const setting = yield* threads.setMode(thread.id, CLIENT, 'plan').pipe(Effect.flip, Effect.forkChild);
+        yield* eventually(() => fake.sessionRequests.length === 1);
+        yield* threads.remove(thread.id, CLIENT);
+        open();
+        const failure = yield* Fiber.join(setting);
+        assert.equal(failure._tag, 'ThreadNotFound');
+        assert.deepEqual(fake.modes, [], 'the agent was not switched');
+        assert.equal(fake.released.filter((id) => id === thread.id).length, 2, 'the new session is released too');
+      }), { fake, home });
+    assert.equal(storedEventCount(home, threadId), 0);
+  });
+
+  it('releases a session prewarmed for a thread deleted meanwhile', async () => {
+    const fake = new FakeAgents();
+    await withThreads((threads) =>
+      Effect.gen(function* () {
+        const thread = yield* createAttached(threads);
+        const open = gateSessions(fake);
+        yield* threads.prewarm({ threadId: thread.id });
+        yield* Effect.sleep('20 millis');
+        yield* threads.remove(thread.id, CLIENT);
+        assert.equal(fake.released.filter((id) => id === thread.id).length, 1);
+        open();
+        yield* eventually(() => fake.released.filter((id) => id === thread.id).length === 2);
+        assert.deepEqual(yield* threads.list(), []);
+      }), { fake });
+  });
+
   it('gives up waiting on an agent that ignores cancel, and frees the thread', async () => {
     const fake = new FakeAgents({ ignoresCancel: () => true });
     await withThreads((threads) =>

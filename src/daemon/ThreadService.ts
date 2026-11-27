@@ -619,14 +619,28 @@ const make = Effect.gen(function* () {
     yield* requireDriver(threadId, thread, clientId);
     const session = thread.turn?.session ?? (yield* runtime.session(sessionRequest(row, row.lastShellCwd)).pipe(
       Effect.catchTags({ AgentUnavailable: (error) => Effect.fail(new AgentFailed({ agentId: error.agentId, reason: error.reason })) }),
-      Effect.tap((session) =>
-        session.nativeSessionId === row.nativeSessionId
-          ? Effect.void
-          : store.updateThread(threadId, { nativeSessionId: session.nativeSessionId })
-      ),
     ));
+    // The thread may have been deleted while the agent started: write nothing, and let go of the session.
+    const gone = Effect.gen(function* () {
+      yield* runtime.release(threadId);
+      return yield* new ThreadNotFound({ threadId });
+    });
+    if (thread.deleted) {
+      return yield* gone;
+    }
     yield* session.setMode(modeId);
-    yield* emitMode(threadId, thread, { currentModeId: modeId, availableModes: session.modes?.availableModes ?? [] });
+    yield* Semaphore.withPermit(
+      thread.lock,
+      Effect.gen(function* () {
+        if (thread.deleted || !(yield* store.getThread(threadId))) {
+          return yield* gone;
+        }
+        if (session.nativeSessionId !== row.nativeSessionId) {
+          yield* store.updateThread(threadId, { nativeSessionId: session.nativeSessionId });
+        }
+        yield* emitMode(threadId, thread, { currentModeId: modeId, availableModes: session.modes?.availableModes ?? [] });
+      }),
+    );
   });
 
   const rename = Effect.fn('ThreadService.rename')(function* (threadId: string, clientId: string, title: string) {
@@ -638,24 +652,26 @@ const make = Effect.gen(function* () {
 
   const remove = Effect.fn('ThreadService.remove')(function* (threadId: string, clientId: string) {
     yield* requireThread(threadId);
-    const thread = live.get(threadId);
+    // Always through the thread's lock, so work that started an agent session
+    // for it meanwhile (a prompt, setMode, prewarm) sees the delete.
+    const thread = yield* liveThread(threadId);
     yield* requireDriverOrNobody(threadId, thread, clientId);
-    const removeAll = Effect.gen(function* () {
-      if (thread) {
+    yield* Semaphore.withPermit(
+      thread.lock,
+      Effect.gen(function* () {
         // A prompt still waiting for its session sees this and stops without writing.
         thread.deleted = true;
         if (thread.turn?.fiber) {
           yield* Fiber.interrupt(thread.turn.fiber);
         }
-      }
-      yield* runtime.release(threadId);
-      yield* store.deleteThread(threadId);
-      live.delete(threadId);
-      if (thread) {
+        yield* runtime.release(threadId);
+        yield* store.deleteThread(threadId);
+        if (live.get(threadId) === thread) {
+          live.delete(threadId);
+        }
         yield* PubSub.shutdown(thread.events);
-      }
-    });
-    yield* thread ? Semaphore.withPermit(thread.lock, removeAll) : removeAll;
+      }),
+    );
   });
 
   const prewarm = Effect.fn('ThreadService.prewarm')(function* (input: {
@@ -665,7 +681,20 @@ const make = Effect.gen(function* () {
     const work = Effect.gen(function* () {
       const row = input.threadId ? yield* store.getThread(input.threadId) : undefined;
       if (row) {
+        const thread = yield* liveThread(row.id);
         yield* runtime.prewarm({ agentId: row.agentId, session: sessionRequest(row, row.lastShellCwd) });
+        // Deleted while the agent started: let go of the session it opened.
+        yield* Semaphore.withPermit(
+          thread.lock,
+          Effect.gen(function* () {
+            if (thread.deleted || !(yield* store.getThread(row.id))) {
+              yield* runtime.release(row.id);
+              if (live.get(row.id) === thread) {
+                live.delete(row.id);
+              }
+            }
+          }),
+        );
         return;
       }
       yield* runtime.prewarm({ agentId: yield* agents.resolve(input.agentId), session: null });

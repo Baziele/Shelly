@@ -37,7 +37,7 @@ export class FakeAgents {
   script: ((prompt: string) => readonly AgentUpdate[]) | undefined;
   /** When set, `session` fails with it. */
   sessionError: AgentUnavailable | undefined;
-  /** When set, `session` waits for it before answering (a cold agent starting). */
+  /** When set, `session` and `prewarm` wait for it before answering (a cold agent starting). */
   sessionGate: Promise<void> | undefined;
   /** When it returns true for a turn's prompt, `cancel` never returns and the turn never ends (a stuck agent). */
   ignoresCancel: ((prompt: string) => boolean) | undefined;
@@ -121,9 +121,13 @@ export class FakeAgents {
           }),
         });
       })),
-    prewarm: ({ agentId, session }) => Effect.sync(() => {
-      this.prewarmed.push({ agentId, threadId: session?.threadId ?? null });
-    }),
+    prewarm: ({ agentId, session }) =>
+      Effect.suspend(() => {
+        const gate = this.sessionGate;
+        return gate ? Effect.promise(() => gate) : Effect.void;
+      }).pipe(Effect.andThen(Effect.sync(() => {
+        this.prewarmed.push({ agentId, threadId: session?.threadId ?? null });
+      }))),
     release: (threadId) => Effect.sync(() => {
       this.released.push(threadId);
     }),
