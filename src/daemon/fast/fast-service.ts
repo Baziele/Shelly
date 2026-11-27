@@ -10,6 +10,8 @@ import { shellyPaths } from '../../protocol/paths.js';
 import type { FastEvent } from '../../protocol/schema.js';
 import { type ConfigFile, FastService, ShellyConfig } from '../services.js';
 import { makeClaudeBackend } from './claude-worker.js';
+import { CONNECTION_GRACE_MS, discoverService, OpenCodeService, OpenCodeServiceError } from './opencode-server.js';
+import { findOpenCodeExecutable, makeOpenCodeBackend, NOT_INSTALLED as OPENCODE_NOT_INSTALLED, sweepSessions } from './opencode-worker.js';
 import { FastPool } from './pool.js';
 import { buildFastMessage, FAST_SYSTEM_PROMPT } from './prompt.js';
 import { classifyReply } from './reply.js';
@@ -17,8 +19,8 @@ import type { FastBackend, WorkerFailure } from './worker.js';
 
 /*
  * FastService: fast mode's requests, run on warm workers from FastPool.
- * Each agent with a fast mode has a backend module; adding one (OpenCode)
- * is a new module and a case in `backendFor`.
+ * Each agent with a fast mode has a backend module and a case in
+ * `backendFor`: Claude Code (claude-worker.ts) and OpenCode (opencode-*.ts).
  */
 
 export interface FastSettingsValue {
@@ -32,6 +34,10 @@ export interface FastSettingsValue {
   readonly noOutputTimeoutMs: number;
   /** The claude executable, a path or a name on PATH; null finds `claude`. */
   readonly claudeExecutable: string | null;
+  /** The opencode executable, a path or a name on PATH; null finds `opencode`. */
+  readonly opencodeExecutable: string | null;
+  /** How long the connection to OpenCode's service stays open after its last session ends. */
+  readonly opencodeConnectionGraceMs: number;
   /** The environment workers start from, before each backend cleans it. */
   readonly env: NodeJS.ProcessEnv;
 }
@@ -41,6 +47,11 @@ export const SESSION_IDLE_MS = 2 * 60_000;
 export const MAX_SESSIONS = 2;
 export const NO_OUTPUT_TIMEOUT_MS = 20_000;
 const DEFAULT_CLAUDE_MODEL = 'haiku';
+/**
+ * Measured warm: first token in 0.75 s. The free models were 1.5 to 5 s,
+ * and OpenCode's anonymous free tier runs out ("Free usage limit reached").
+ */
+export const DEFAULT_OPENCODE_MODEL = 'opencode-go/claude-haiku-5-5';
 
 const millis = (value: string | undefined, fallback: number): number => {
   const parsed = value === undefined ? Number.NaN : Number(value);
@@ -55,6 +66,8 @@ export const fastSettingsFromEnv = (env: NodeJS.ProcessEnv): FastSettingsValue =
   maxSessions: MAX_SESSIONS,
   noOutputTimeoutMs: millis(env.SHELLY_FAST_TIMEOUT_MS, NO_OUTPUT_TIMEOUT_MS),
   claudeExecutable: null,
+  opencodeExecutable: null,
+  opencodeConnectionGraceMs: CONNECTION_GRACE_MS,
   env,
 });
 
@@ -64,10 +77,18 @@ export const FastSettings = Context.Reference<FastSettingsValue>('shelly/daemon/
 
 const AGENT_NAMES: Record<string, string> = { claude: 'Claude Code', opencode: 'OpenCode' };
 
+/** What backends share for the daemon's lifetime. */
+interface Shared {
+  readonly opencode: OpenCodeService;
+  /** Every live OpenCode fast session, so a sweep for leftovers spares them. */
+  readonly opencodeSessions: Set<string>;
+}
+
 const backendFor = (
   agentId: string,
   config: ConfigFile,
   settings: FastSettingsValue,
+  shared: Shared,
 ): FastBackend | AgentUnavailable => {
   const agent = config.agents?.[agentId];
   const name = agent?.name ?? AGENT_NAMES[agentId] ?? agentId;
@@ -84,10 +105,23 @@ const backendFor = (
         systemPrompt: FAST_SYSTEM_PROMPT,
         noOutputTimeoutMs: settings.noOutputTimeoutMs,
       });
+    case 'opencode':
+      return makeOpenCodeBackend({
+        executable: settings.opencodeExecutable,
+        model: agent?.fastModel ?? DEFAULT_OPENCODE_MODEL,
+        cwd: opencodeHome(settings),
+        env: settings.env,
+        systemPrompt: FAST_SYSTEM_PROMPT,
+        noOutputTimeoutMs: settings.noOutputTimeoutMs,
+        service: shared.opencode,
+        sessions: shared.opencodeSessions,
+      });
     default:
       return new AgentUnavailable({ agentId, reason: `Fast mode isn't available for ${name} yet.` });
   }
 };
+
+const opencodeHome = (settings: FastSettingsValue): string => join(settings.fastHome, 'opencode');
 
 const toError = (agentId: string, failure: WorkerFailure): AgentUnavailable | AgentFailed =>
   failure.kind === 'unavailable'
@@ -102,10 +136,22 @@ const make = Effect.gen(function* () {
     sessionIdleMs: settings.sessionIdleMs,
     maxSessions: settings.maxSessions,
   });
-  yield* Effect.addFinalizer(() => Effect.promise(() => pool.close()));
+  const opencodeSessions = new Set<string>();
+  const opencode = new OpenCodeService(
+    () => {
+      const executable = findOpenCodeExecutable(settings.opencodeExecutable, settings.env);
+      if (executable === null) return Promise.reject(new OpenCodeServiceError({ kind: 'unavailable', reason: OPENCODE_NOT_INSTALLED }));
+      return discoverService(executable, settings.env);
+    },
+    (connection) => void sweepSessions(connection, opencodeHome(settings), () => opencodeSessions),
+    settings.opencodeConnectionGraceMs,
+  );
+  const shared: Shared = { opencode, opencodeSessions };
+  // The pool first: its workers delete their sessions over the connection.
+  yield* Effect.addFinalizer(() => Effect.promise(() => pool.close()).pipe(Effect.andThen(Effect.sync(() => opencode.close()))));
 
   const resolve = Effect.fnUntraced(function* (agentId: string) {
-    const backend = backendFor(agentId, yield* config.get, settings);
+    const backend = backendFor(agentId, yield* config.get, settings, shared);
     return backend instanceof AgentUnavailable ? yield* backend : backend;
   });
 
@@ -139,7 +185,7 @@ const make = Effect.gen(function* () {
     ).pipe(Stream.withSpan('FastService.request', { attributes: { agentId } }));
 
   const prewarm: FastService['Service']['prewarm'] = Effect.fn('FastService.prewarm')(function* (agentId: string) {
-    const backend = backendFor(agentId, yield* config.get, settings);
+    const backend = backendFor(agentId, yield* config.get, settings, shared);
     if (!(backend instanceof AgentUnavailable)) pool.prewarm(agentId, backend);
   });
 

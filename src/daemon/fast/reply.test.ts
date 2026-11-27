@@ -18,6 +18,18 @@ describe('classifyReply', () => {
     ['# Line one.\n# Line two.', 'answer', 'Line one.\nLine two.'],
     ['#No space after the marker.', 'answer', 'No space after the marker.'],
     ['```\n# A fenced answer.\n```', 'answer', 'A fenced answer.'],
+    // A comment line above a command is not an answer: the command is kept, the comment dropped.
+    ['# free port 3000\nlsof -ti tcp:3000 | xargs kill', 'command', 'lsof -ti tcp:3000 | xargs kill'],
+    ['```bash\n# free port 3000\nlsof -ti tcp:3000 | xargs kill\n```', 'command', 'lsof -ti tcp:3000 | xargs kill'],
+    ['```bash\nlsof -ti tcp:3000 | xargs kill\n```\n# kills whatever listens on 3000', 'command', 'lsof -ti tcp:3000 | xargs kill'],
+    ['# go to the app\n$ cd app\n$ npm test', 'command', 'cd app\nnpm test'],
+    ['ls -la # long listing', 'command', 'ls -la # long listing'],
+    ['# One.\n\n# Two.', 'answer', 'One.\n\nTwo.'],
+    // Only comments around the command go; `#` lines inside it are content (heredocs, crontabs, strings).
+    ["cat > run.sh <<'EOF'\n#!/bin/sh\n# Build it\nmake\nEOF", 'command', "cat > run.sh <<'EOF'\n#!/bin/sh\n# Build it\nmake\nEOF"],
+    ["# write the script\ncat > run.sh <<'EOF'\n#!/bin/sh\nmake\nEOF\n# then chmod +x it", 'command', "cat > run.sh <<'EOF'\n#!/bin/sh\nmake\nEOF"],
+    ["```sh\n(crontab -l; cat <<'EOF'\n# nightly backup\n0 3 * * * ~/backup.sh\nEOF\n) | crontab -\n```", 'command', "(crontab -l; cat <<'EOF'\n# nightly backup\n0 3 * * * ~/backup.sh\nEOF\n) | crontab -"],
+    ['git commit -m "Title\n\n# not a comment"', 'command', 'git commit -m "Title\n\n# not a comment"'],
   ];
 
   for (const [raw, kind, text] of cases) {

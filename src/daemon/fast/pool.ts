@@ -13,6 +13,10 @@ import { type FastBackend, type FastWorker, isWorkerFailure, type Turn, type Tur
  *   session's idle time, or when the session ends.
  * - At most `maxSessions` conversations keep a worker; a new one ends the
  *   least recently used idle one.
+ * - A turn that does not finish (cancelled, or replaced by a newer request
+ *   on the same key) ends its conversation: the worker would keep the half
+ *   turn in its context and answer the next request about it. The next
+ *   request takes the warm worker, so this costs no latency.
  */
 
 export interface PoolTimings {
@@ -22,6 +26,8 @@ export interface PoolTimings {
   readonly sessionIdleMs: number;
   /** How many conversations may keep a worker at once. */
   readonly maxSessions: number;
+  /** A monotonic clock in ms; tests pass their own. */
+  readonly now?: () => number;
 }
 
 interface AgentPool {
@@ -47,7 +53,11 @@ export class FastPool {
   private readonly live = new Set<FastWorker>();
   private closed = false;
 
-  constructor(private readonly timings: PoolTimings) {}
+  private readonly now: () => number;
+
+  constructor(private readonly timings: PoolTimings) {
+    this.now = timings.now ?? (() => performance.now());
+  }
 
   get workerCount(): number {
     return this.live.size;
@@ -74,7 +84,8 @@ export class FastPool {
     this.touch(pool);
 
     let session = this.sessions.get(sessionKey);
-    if (session && (!session.worker.alive || session.agentId !== agentId || session.backendKey !== backend.key)) {
+    // A running turn is replaced: its conversation goes with it, and its request fails.
+    if (session && (session.turn !== null || !session.worker.alive || session.agentId !== agentId || session.backendKey !== backend.key)) {
       this.end(sessionKey);
       session = undefined;
     }
@@ -123,8 +134,11 @@ export class FastPool {
     owner.turn = turn;
     return {
       cancel: () => {
+        if (owner.turn !== turn) return;
         turn.cancel();
         settle();
+        if (this.sessions.get(sessionKey) === owner) this.end(sessionKey);
+        else owner.worker.kill();
       },
     };
   }
@@ -166,20 +180,29 @@ export class FastPool {
   }
 
   private touch(pool: AgentPool): void {
-    pool.lastUsedAt = Date.now();
+    pool.lastUsedAt = this.now();
+    this.armExpiry(pool, this.timings.keepWarmMs);
+  }
+
+  private armExpiry(pool: AgentPool, delayMs: number): void {
     clearTimeout(pool.expiry);
-    pool.expiry = setTimeout(() => this.expire(pool), this.timings.keepWarmMs);
+    pool.expiry = setTimeout(() => this.expire(pool), delayMs);
     pool.expiry.unref();
   }
 
   private expire(pool: AgentPool): void {
-    if (Date.now() - pool.lastUsedAt < this.timings.keepWarmMs) return;
+    const remaining = this.timings.keepWarmMs - (this.now() - pool.lastUsedAt);
+    // A timer can fire a little before the clock says the window is over: wait out the rest.
+    if (remaining > 0) {
+      this.armExpiry(pool, remaining);
+      return;
+    }
     this.dropWarm(pool);
   }
 
   private ensureWarm(pool: AgentPool): void {
     if (this.closed || pool.warm?.alive) return;
-    if (Date.now() - pool.lastUsedAt >= this.timings.keepWarmMs) return;
+    if (this.now() - pool.lastUsedAt >= this.timings.keepWarmMs) return;
     const spawned = this.spawn(pool);
     pool.warm = isWorkerFailure(spawned) ? null : spawned;
   }
