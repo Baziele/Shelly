@@ -24,6 +24,12 @@ export interface AgentDefinition {
     | { readonly ok: false; readonly reason: string };
   /** Overrides on top of the cleaned daemon env. */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * Set on every session this agent opens: ACP `_meta` on session/new and
+   * resume, and config options set once the session is open. Carries the
+   * configured `model`.
+   */
+  readonly sessionSetup: SessionSetup;
   readonly supportsFast: boolean;
   /** An agent process with no sessions exits after this long. */
   readonly processIdleMs: number;
@@ -45,6 +51,15 @@ export interface AgentDefinition {
     readonly resumeReplacesLiveSession: boolean;
   };
 }
+
+export interface SessionSetup {
+  readonly meta?: Readonly<Record<string, unknown>>;
+  readonly configOptions?: Readonly<Record<string, string>>;
+}
+
+/** The model as an ACP config option, which agents that list models (OpenCode, the fake agent) accept. */
+const modelSetup = (model: string | undefined): SessionSetup =>
+  model === undefined || model.trim() === '' ? {} : { configOptions: { model: model.trim() } };
 
 const MINUTE = 60_000;
 
@@ -166,6 +181,11 @@ const claude = (settings: AgentSettings, env: NodeJS.ProcessEnv): AgentDefinitio
     enabled: settings.enabled ?? true,
     launch,
     env: { ...(ownClaude ? { CLAUDE_CODE_EXECUTABLE: ownClaude } : {}), ...settings.env },
+    // claude-agent-acp hands `_meta.claudeCode.options` to the Agent SDK, so the
+    // session starts on the model; the config option keeps what it reports in step.
+    sessionSetup: settings.model?.trim()
+      ? { meta: { claudeCode: { options: { model: settings.model.trim() } } }, ...modelSetup(settings.model) }
+      : {},
     supportsFast: true,
     ...idleTimes(env, 'claude', 5 * MINUTE, 3 * MINUTE),
     signInMessage: `${name} isn't signed in. Run \`claude\` once to sign in.`,
@@ -184,6 +204,7 @@ const opencode = (settings: AgentSettings, env: NodeJS.ProcessEnv): AgentDefinit
       ? launch
       : { ok: false, reason: `${name} isn't installed. Install it from opencode.ai, then try again.` },
     env: { ...settings.env },
+    sessionSetup: modelSetup(settings.model),
     supportsFast: true,
     ...idleTimes(env, 'opencode', 2 * MINUTE, 2 * MINUTE),
     signInMessage: `${name} isn't signed in. Run \`opencode auth login\` to sign in.`,
@@ -201,7 +222,9 @@ const custom = (id: string, settings: AgentSettings, env: NodeJS.ProcessEnv): Ag
       ? { ok: false, reason: `${name} has no \`command\` in Shelly's config.json.` }
       : launchFrom(name, settings.command, settings.args ?? [], env),
     env: { ...settings.env },
-    supportsFast: settings.fastModel !== undefined,
+    sessionSetup: modelSetup(settings.model),
+    // Fast mode has backends for Claude Code and OpenCode only (src/daemon/fast/).
+    supportsFast: false,
     ...idleTimes(env, id, 2 * MINUTE, 2 * MINUTE),
     signInMessage: `${name} isn't signed in. Sign in to it, then try again.`,
     quirks: { rejectEndsTurnCancelled: false, resumeReplacesLiveSession: false },

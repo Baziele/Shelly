@@ -21,7 +21,7 @@ import {
   type AgentUpdate,
   ShellyConfig,
 } from '../services.js';
-import { type AgentDefinition, agentDefinitions, agentInfos } from './definitions.js';
+import { type AgentDefinition, agentDefinitions, agentInfos, type SessionSetup } from './definitions.js';
 import {
   mapPermissionOptions,
   mapSessionUpdate,
@@ -503,6 +503,15 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
               : `${definition.name} couldn't ${action}.`,
       });
 
+  /** The agent's own setup (its configured model), with the runtime's options on top. */
+  const sessionSetupFor = (definition: AgentDefinition): SessionSetup => {
+    const extra = options.sessionDefaults?.[definition.id];
+    const own = definition.sessionSetup;
+    const meta = own.meta || extra?.meta ? { ...own.meta, ...extra?.meta } : undefined;
+    const configOptions = own.configOptions || extra?.configOptions ? { ...own.configOptions, ...extra?.configOptions } : undefined;
+    return { ...(meta ? { meta } : {}), ...(configOptions ? { configOptions } : {}) };
+  };
+
   /** Resumes the requested session (or loads it), else starts a new one. */
   const openSession = Effect.fn('AgentRuntime.openSession')(function* (
     agentProcess: AgentProcess,
@@ -512,7 +521,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({ agentId: definition.id, threadId: request.threadId });
     const capabilities = agentProcess.initialize.agentCapabilities ?? {};
     const sessionCapabilities = capabilities.sessionCapabilities ?? {};
-    const defaults = options.sessionDefaults?.[definition.id];
+    const defaults = sessionSetupFor(definition);
     const base = {
       cwd: request.cwd,
       mcpServers: [],
@@ -607,7 +616,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
     if (!live.definition.quirks.resumeReplacesLiveSession || !supported(sessionCapabilities.resume)) {
       return false;
     }
-    const defaults = options.sessionDefaults?.[live.definition.id];
+    const defaults = sessionSetupFor(live.definition);
     const response = yield* live.process.acp.agent.resumeSession({
       sessionId: live.nativeSessionId,
       cwd: live.cwd,

@@ -93,6 +93,16 @@ describe('AgentRuntime processes and sessions', () => {
     await waitUntilAsync(() => !isRunning(pids[0]!));
   });
 
+  it("opens sessions on the agent's configured model", TIMEOUT, async () => {
+    const fake = logged();
+    await run({ agents: { fake: { ...fake.agent, model: 'small' } } }, Effect.gen(function* () {
+      const runtime = yield* AgentRuntime;
+      yield* runtime.session(request({ agentId: 'fake' }));
+    }));
+    const set = fake.requests().find((entry) => entry.method === 'session/set_config_option');
+    assert.deepEqual(set?.params, { sessionId: 'fake-session-1', configId: 'model', value: 'small' });
+  });
+
   it('resumes a session with the same cwd and directories', TIMEOUT, async () => {
     const fake = logged();
     const session = await run({ agents: { fake: fake.agent } }, Effect.gen(function* () {

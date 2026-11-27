@@ -6,6 +6,7 @@ import { after, describe, it } from 'node:test';
 import { HOST_SESSION_VARIABLES } from '../claude-env.js';
 import { claudeEnvironment } from '../fast/claude-worker.js';
 import { agentDefinitions, agentEnvironment, agentInfos, defaultAgentId } from './definitions.js';
+import type { ConfigFile } from '../services.js';
 
 const bin = mkdtempSync(join(tmpdir(), 'shelly-bin-'));
 after(() => rmSync(bin, { recursive: true, force: true }));
@@ -28,7 +29,7 @@ describe('agent definitions', () => {
     const infos = agentInfos(config, agentDefinitions(config, withTools));
     assert.deepEqual(infos.map((info) => info.id), ['claude', 'mine', 'broken']);
     const mine = infos.find((info) => info.id === 'mine');
-    assert.deepEqual(mine, { id: 'mine', name: 'Mine', available: true, unavailableReason: null, supportsFast: true, isDefault: false });
+    assert.deepEqual(mine, { id: 'mine', name: 'Mine', available: true, unavailableReason: null, supportsFast: false, isDefault: false });
     const broken = infos.find((info) => info.id === 'broken');
     assert.equal(broken?.available, false);
     assert.equal(broken?.supportsFast, false);
@@ -124,5 +125,20 @@ describe('agent definitions', () => {
     assert.deepEqual([opencode?.sessionIdleMs, opencode?.processIdleMs], [120_000, 20]);
     const [defaults] = agentDefinitions({}, withTools);
     assert.deepEqual([defaults?.sessionIdleMs, defaults?.processIdleMs], [180_000, 300_000]);
+  });
+  it('turns a configured model into session setup', () => {
+    const config: ConfigFile = {
+      agents: {
+        claude: { model: 'haiku' },
+        opencode: { model: 'opencode-go/hy4-flash-free' },
+        mine: { command: 'my-agent', model: ' small ' },
+        plain: { command: 'my-agent' },
+      },
+    };
+    const setup = Object.fromEntries(agentDefinitions(config, withTools).map((definition) => [definition.id, definition.sessionSetup]));
+    assert.deepEqual(setup.claude, { meta: { claudeCode: { options: { model: 'haiku' } } }, configOptions: { model: 'haiku' } });
+    assert.deepEqual(setup.opencode, { configOptions: { model: 'opencode-go/hy4-flash-free' } });
+    assert.deepEqual(setup.mine, { configOptions: { model: 'small' } });
+    assert.deepEqual(setup.plain, {});
   });
 });
