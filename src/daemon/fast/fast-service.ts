@@ -26,6 +26,8 @@ export interface FastSettingsValue {
   readonly fastHome: string;
   readonly keepWarmMs: number;
   readonly sessionIdleMs: number;
+  /** How many fast conversations keep their worker at once; each costs about 200 MB. */
+  readonly maxSessions: number;
   /** A request with no output from its worker for this long fails. */
   readonly noOutputTimeoutMs: number;
   /** The claude executable, a path or a name on PATH; null finds `claude`. */
@@ -36,6 +38,7 @@ export interface FastSettingsValue {
 
 export const KEEP_WARM_MS = 5 * 60_000;
 export const SESSION_IDLE_MS = 2 * 60_000;
+export const MAX_SESSIONS = 2;
 export const NO_OUTPUT_TIMEOUT_MS = 20_000;
 const DEFAULT_CLAUDE_MODEL = 'haiku';
 
@@ -49,6 +52,7 @@ export const fastSettingsFromEnv = (env: NodeJS.ProcessEnv): FastSettingsValue =
   fastHome: shellyPaths(env).fastHome,
   keepWarmMs: millis(env.SHELLY_FAST_KEEP_WARM_MS, KEEP_WARM_MS),
   sessionIdleMs: millis(env.SHELLY_FAST_SESSION_IDLE_MS, SESSION_IDLE_MS),
+  maxSessions: MAX_SESSIONS,
   noOutputTimeoutMs: millis(env.SHELLY_FAST_TIMEOUT_MS, NO_OUTPUT_TIMEOUT_MS),
   claudeExecutable: null,
   env,
@@ -93,7 +97,11 @@ const toError = (agentId: string, failure: WorkerFailure): AgentUnavailable | Ag
 const make = Effect.gen(function* () {
   const config = yield* ShellyConfig;
   const settings = yield* FastSettings;
-  const pool = new FastPool({ keepWarmMs: settings.keepWarmMs, sessionIdleMs: settings.sessionIdleMs });
+  const pool = new FastPool({
+    keepWarmMs: settings.keepWarmMs,
+    sessionIdleMs: settings.sessionIdleMs,
+    maxSessions: settings.maxSessions,
+  });
   yield* Effect.addFinalizer(() => Effect.promise(() => pool.close()));
 
   const resolve = Effect.fnUntraced(function* (agentId: string) {

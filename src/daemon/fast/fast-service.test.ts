@@ -43,6 +43,7 @@ const harness = (options: {
     fastHome: join(dir, 'fast'),
     keepWarmMs: 60_000,
     sessionIdleMs: 60_000,
+    maxSessions: 10,
     noOutputTimeoutMs: 5_000,
     claudeExecutable: FAKE_CLAUDE,
     env: { ...process.env, FAKE_CLAUDE_LOG: logFile, ...options.env },
@@ -222,7 +223,8 @@ describe('FastService on Claude', () => {
   });
 
   it('a request with nothing warm starts a worker cold', async () => {
-    const fast = harness();
+    // No keep-warm window, so the request's worker is the only one started.
+    const fast = harness({ settings: { keepWarmMs: 0 } });
     try {
       const last = done(await fast.ask('hello'));
       assert.equal(pidOf(last.text), fast.starts()[0]!.pid);
@@ -277,6 +279,22 @@ describe('FastService on Claude', () => {
       await until(() => !isRunning(pid));
       assert.equal(await fast.workerCount(), 0);
       assert.match(done(await fast.ask('hello', 'a')).text, /turn=1$/);
+    } finally {
+      await fast.dispose();
+    }
+  });
+
+  it('keeps at most maxSessions conversations, ending the least recently used', async () => {
+    const fast = harness({ settings: { keepWarmMs: 0, maxSessions: 2 } });
+    try {
+      const a = pidOf(done(await fast.ask('hello', 'a')).text);
+      const b = pidOf(done(await fast.ask('hello', 'b')).text);
+      assert.match(done(await fast.ask('hello', 'a')).text, /turn=2$/);
+      await fast.ask('hello', 'c');
+      await until(() => !isRunning(b));
+      assert.ok(isRunning(a), 'the recently used conversation stays');
+      assert.equal(await fast.workerCount(), 2);
+      assert.match(done(await fast.ask('hello', 'b')).text, /turn=1$/, 'an ended conversation starts over');
     } finally {
       await fast.dispose();
     }

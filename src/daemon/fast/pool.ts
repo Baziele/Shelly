@@ -11,6 +11,8 @@ import { type FastBackend, type FastWorker, isWorkerFailure, type Turn, type Tur
  * - The worker a request took belongs to that request's session key from
  *   then on, so follow-ups keep their context. It is killed after the
  *   session's idle time, or when the session ends.
+ * - At most `maxSessions` conversations keep a worker; a new one ends the
+ *   least recently used idle one.
  */
 
 export interface PoolTimings {
@@ -18,6 +20,8 @@ export interface PoolTimings {
   readonly keepWarmMs: number;
   /** How long a conversation's worker lives after its last request. */
   readonly sessionIdleMs: number;
+  /** How many conversations may keep a worker at once. */
+  readonly maxSessions: number;
 }
 
 interface AgentPool {
@@ -87,6 +91,7 @@ export class FastPool {
         worker = spawned;
       }
       session = { agentId, backendKey: backend.key, worker, turn: null, idle: undefined };
+      this.evictIdleSessions(this.timings.maxSessions - 1);
       this.sessions.set(sessionKey, session);
     }
     // The replacement starts while this request runs, so the next new conversation is warm too.
@@ -94,6 +99,9 @@ export class FastPool {
 
     const owner = session;
     clearTimeout(owner.idle);
+    // Most recently used last, for eviction.
+    this.sessions.delete(sessionKey);
+    this.sessions.set(sessionKey, owner);
     const settle = () => {
       if (owner.turn !== turn) return;
       owner.turn = null;
@@ -190,6 +198,14 @@ export class FastPool {
       if (pool.warm === spawned) pool.warm = null;
     });
     return spawned;
+  }
+
+  /** End the least recently used idle conversations until at most `keep` remain. */
+  private evictIdleSessions(keep: number): void {
+    for (const [key, session] of this.sessions) {
+      if (this.sessions.size <= keep) return;
+      if (session.turn === null) this.end(key);
+    }
   }
 
   private armSessionIdle(sessionKey: string, session: Session): void {
