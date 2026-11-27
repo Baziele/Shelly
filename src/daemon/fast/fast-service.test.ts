@@ -46,6 +46,8 @@ const harness = (options: {
     maxSessions: 10,
     noOutputTimeoutMs: 5_000,
     claudeExecutable: FAKE_CLAUDE,
+    // Never the real OpenCode: its tests have their own fake.
+    opencodeExecutable: '/nonexistent/opencode',
     env: { ...process.env, FAKE_CLAUDE_LOG: logFile, ...options.env },
     ...options.settings,
   };
@@ -407,12 +409,11 @@ describe('FastService on Claude', () => {
     }
   });
 
-  it('has no fast mode for other agents yet', async () => {
+  it('has no fast mode for custom agents yet', async () => {
     const fast = harness({ config: { agents: { mine: { name: 'My Agent', command: 'mine' } } } });
     try {
-      assert.equal(failure(await fast.askExit('hello', 'a', 'opencode')).reason, "Fast mode isn't available for OpenCode yet.");
       assert.equal(failure(await fast.askExit('hello', 'a', 'mine')).reason, "Fast mode isn't available for My Agent yet.");
-      await fast.prewarm('opencode');
+      await fast.prewarm('mine');
       assert.equal(await fast.workerCount(), 0);
     } finally {
       await fast.dispose();
