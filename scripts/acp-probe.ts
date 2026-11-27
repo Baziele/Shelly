@@ -19,8 +19,10 @@
  *   --lean                 Claude: tools, MCP and settings off, short system
  *                          prompt, haiku. OpenCode: the `shelly-fast` agent from
  *                          an opencode.json in the probe dir.
- *   --caps fs|none         Client capabilities to offer (default fs). The probe
- *                          never offers terminals: neither agent uses them.
+ *   --caps fs|none|shelly  Client capabilities to offer (default fs). `shelly`
+ *                          offers what the daemon does: no fs, no client
+ *                          terminals, and `_meta.terminal_output_delta`, so
+ *                          Claude Code reports command output in tool calls.
  *   --model <id>           Model (claude default "haiku", opencode default
  *                          "opencode-go/hy4-flash-free").
  *   --runs <n>             Runs for `latency` (default 3).
@@ -31,8 +33,8 @@
  *   --verbose              Print every message to stderr as it passes.
  *   --resanitize           Re-run the sanitizer over the recorded fixtures.
  *
- * Scenarios: init, simple, tool, permission-allow, permission-reject, external,
- * cancel, resume, latency, rss.
+ * Scenarios: init, simple, tool, bash, permission-allow, permission-reject,
+ * external, cancel, resume, latency, rss.
  *
  * Real prompts cost money: every scenario but `init` sends one to three tiny
  * prompts to a small model.
@@ -53,12 +55,13 @@ import {
   type ClientConnection,
   type Stream,
 } from "@agentclientprotocol/sdk/unstable";
+import { withoutHostSession } from "../src/daemon/claude-env.js";
 
 // ---------------------------------------------------------------------------
 // CLI
 
 type AgentName = "claude" | "opencode";
-type Caps = "fs" | "none";
+type Caps = "fs" | "none" | "shelly";
 
 const { values: argv } = parseArgs({
   options: {
@@ -154,7 +157,8 @@ type Spawned = {
 };
 
 function agentCommand(): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  // Like the daemon: a Claude Code session running the probe must not leak into the agent.
+  const env: NodeJS.ProcessEnv = withoutHostSession(process.env);
   if (agentName === "claude") {
     const require = createRequire(import.meta.url);
     const pkg = require.resolve("@agentclientprotocol/claude-agent-acp/package.json");
@@ -367,6 +371,9 @@ function errInfo(error: unknown): unknown {
 
 function clientCapabilities(): Record<string, unknown> {
   if (caps === "none") return {};
+  if (caps === "shelly") {
+    return { fs: { readTextFile: false, writeTextFile: false }, terminal: false, _meta: { terminal_output_delta: true } };
+  }
   const fs = { readTextFile: true, writeTextFile: true };
   return { fs };
 }
@@ -700,6 +707,18 @@ const scenarios: Record<string, (p: Probe) => Promise<void>> = {
     Object.assign(report, { turn, updates: updateKinds(p.rec.records), clientFsRequests: p.rec.records.filter((r) => r.dir === "in" && /^(fs|terminal)\//.test((r.msg as { method?: string }).method ?? "")).length });
   },
 
+  async bash(p) {
+    // A shell command with output on stdout and stderr and a failing exit.
+    p.permissionPolicy = "allow_once";
+    const { session } = await setup(p);
+    const turn = await prompt(
+      p,
+      session.sessionId,
+      "Run exactly this shell command once with your shell tool, then reply with its exit code only: printf 'one\\ntwo\\nthree\\n'; echo oops >&2; exit 3",
+    );
+    Object.assign(report, { turn, permissionRequests: permissionRequests(p), updates: updateKinds(p.rec.records) });
+  },
+
   async "permission-allow"(p) {
     p.permissionPolicy = "allow_once";
     const { session } = await setup(p, { mode: agentName === "claude" ? "default" : undefined });
@@ -899,7 +918,7 @@ async function main(): Promise<void> {
   if (agentName !== "claude" && agentName !== "opencode") throw new Error("--agent must be claude or opencode");
   const run = scenarios[scenarioName];
   if (!run) throw new Error(`--scenario must be one of: ${Object.keys(scenarios).join(", ")}`);
-  if (!["fs", "none"].includes(caps)) throw new Error("--caps must be fs or none");
+  if (!["fs", "none", "shelly"].includes(caps)) throw new Error("--caps must be fs, none or shelly");
   const dir = makeProbeDir();
   const p = new Probe(dir);
   let failed: unknown;

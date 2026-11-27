@@ -48,6 +48,8 @@ tool-call ids and message ids are random and kept.
 | `simple` | A one-word answer: `agent_message_chunk`, `usage_update`, then `stopReason: "end_turn"`. Claude often also sends a generated title as `session_info_update`, at any point in the turn (see `tool`); this recording has none. |
 | `simple-lean` | The same turn through the lean setup. |
 | `tool` | A read tool call: `tool_call` (pending), `tool_call_update` (in_progress, then completed with content). Neither agent calls the client's `fs/*` methods. |
+| `bash-caps-shelly` | A shell command (`printf` three lines, `echo` to stderr, `exit 3`), with the client capabilities the daemon sends (`--caps shelly`: `_meta.terminal_output_delta`). Claude reports the output in the tool call's `_meta` (`terminal_info`, `terminal_output_delta`, `terminal_exit` with the exit code) and leaves only a `terminal` placeholder in its content. OpenCode ignores the capability and sends the output and "Exit code: 3" as text content. Claude's run uses the user's own `claude` (`--claude-exe`), as Shelly does. |
+| `claude/bash-caps-none` | The same command without the capability: Claude sends the command's description as text, then the output as a fenced code block in the final update only. |
 | `permission-allow` | `session/request_permission`, answered with the `allow_once` option. Claude's session runs in the `default` (Manual) mode, and OpenCode's probe config sets `edit: "ask"`. |
 | `permission-reject` | The same, answered with `reject_once`. Claude ends the turn with `end_turn` and says why. OpenCode ends it at once with `stopReason: "cancelled"`. |
 | `external` | `additionalDirectories` on `session/new`: a read in the added directory needs no permission; a read outside the workspace asks. OpenCode's probe config sets `external_directory: "ask"` for this, since its default allows everything. |
@@ -64,9 +66,10 @@ node --import tsx scripts/acp-probe.ts --agent claude --scenario simple
 node --import tsx scripts/acp-probe.ts --agent opencode --scenario permission-reject
 node --import tsx scripts/acp-probe.ts --agent claude --scenario simple --lean
 node --import tsx scripts/acp-probe.ts --agent claude --scenario init --caps none
+node --import tsx scripts/acp-probe.ts --agent claude --scenario bash --caps shelly --claude-exe "$(command -v claude)"
 ```
 
-The scenarios are `init`, `simple`, `tool`, `permission-allow`,
+The scenarios are `init`, `simple`, `tool`, `bash`, `permission-allow`,
 `permission-reject`, `external`, `cancel` and `resume`. `latency` and `rss`
 print measurements without writing a fixture. Each run prints a JSON report
 on stdout and writes `test/fixtures/acp/<agent>/<scenario>[-lean][-caps-<caps>].ndjson`.
