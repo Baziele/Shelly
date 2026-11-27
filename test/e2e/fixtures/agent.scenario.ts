@@ -13,13 +13,15 @@ import { defineScenario, type Step } from '../../fixtures/fake-agent/types.js';
 /** 120 numbered lines, quickly: taller than any test terminal. */
 const longLines = Array.from({ length: 120 }, (_, i) => `- line ${String(i + 1).padStart(3, '0')} of the long answer`).join('\n');
 
-const slowWork: Step[] = [
+const work = (ms: number): Step[] => [
   { type: 'message', text: 'Starting on it.\n\n' },
   { type: 'tool_call', id: 'build', title: 'make build', kind: 'execute', status: 'in_progress' },
-  { type: 'wait', ms: 2500 },
+  { type: 'wait', ms },
   { type: 'tool_update', id: 'build', status: 'completed', content: [{ type: 'text', text: 'build ok' }] },
   { type: 'message', text: 'The build **passed**.' },
 ];
+
+const slowWork = work(2500);
 
 export default defineScenario({
   ...base,
@@ -30,6 +32,7 @@ export default defineScenario({
     { match: 'permission', script: permission },
     { match: 'long', script: [{ type: 'message', text: `Here it is:\n\n${longLines}\n\nThat was all of it.`, charsPerTick: 400, tickMs: 20 }] },
     { match: 'slow', script: slowWork },
+    { match: 'marathon', script: work(7000) },
     // Ends the turn having said nothing, as an agent that cannot work may.
     { match: 'say nothing', script: [{ type: 'end', stopReason: 'end_turn' }] },
     {

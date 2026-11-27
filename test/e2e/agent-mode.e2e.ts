@@ -129,7 +129,7 @@ for (const shell of E2E_SHELLS) {
       let lines = await waitForTurnEnd(driver, 'slow build', '◼ Stopped');
       promptRightAfter(lines, /◼ Stopped/);
 
-      await driver.type('::slow again\r');
+      await driver.type('::marathon build\r');
       await driver.waitForText('Running make build', { timeoutMs: TURN_MS });
       await driver.press('esc');
       lines = await driver.waitFor(
@@ -142,11 +142,18 @@ for (const shell of E2E_SHELLS) {
       await driver.type('echo meanwhile\r');
       await driver.waitForText(/^meanwhile$/m);
 
+      // A second request while it runs is refused, keeping what was typed, and says how to watch.
       await driver.type('::');
-      await driver.waitForText(/(working|finished) · enter to (watch|see)/);
+      await driver.waitForText(/● fake is working · enter to watch/);
+      await driver.type('another question\r');
+      await driver.waitForText(/still working on your last request · empty the line and press enter to watch/);
+      lines = await driver.lines();
+      assert.match(lines[lastPromptRow(lines)] ?? '', /^\$ :: another question/, 'the input stays, with the text');
+      await driver.press('backspace', 'another question'.length);
+      await driver.waitForText(/● fake is working · enter to watch/);
       await driver.press('enter');
       lines = await driver.waitFor(
-        (rows) => rows.some((row) => row.includes(':: slow again · watching')) && rows.some((row) => row.includes('The build passed'))
+        (rows) => rows.some((row) => row.includes(':: marathon build · watching')) && rows.some((row) => row.includes('The build passed'))
           && atPrompt(rows),
         'the turn, watched to its end',
         { timeoutMs: TURN_MS },

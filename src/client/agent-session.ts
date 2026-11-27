@@ -232,7 +232,13 @@ export class AgentSession {
   // ─── Prompts ──────────────────────────────────────────────────────────────
 
   private async prompt(open: OpenInput, text: string): Promise<void> {
-    if (this.live?.view) {
+    const running = this.live;
+    if (running && running.status !== 'ended') {
+      // One turn at a time per terminal: a second would be refused by the daemon (same thread)
+      // or lose track of this one. The input stays open, with what the user typed.
+      if (!running.view) {
+        this.host.overlay.setError(`${running.agentId} is still working on your last request · empty the line and press enter to watch`);
+      }
       return;
     }
     const view = this.beginOutput(open, text);
@@ -255,11 +261,16 @@ export class AgentSession {
     }
 
     const live: LiveTurn = { ...newTracker(text, 0), threadId, agentId: this.thread?.agentId ?? 'agent', view };
-    this.live = live;
-    this.unseen = undefined;
     const stop = this.handleActions(view, client, live);
     try {
       const outcome = await this.follow(client.prompt(threadId, text, context), live, live, view, () => {
+        // The daemon took the turn: from here this terminal tracks it (not before, so a refused
+        // prompt never replaces a turn that is still running).
+        this.live = live;
+        this.unseen = undefined;
+        if (this.thread?.id === threadId) {
+          this.thread.status = 'running';
+        }
         this.sentUpTo.set(threadId, newestCommandId(context, this.sentUpTo.get(threadId)));
       });
       if (outcome === 'lost') {
