@@ -215,7 +215,8 @@ export class AgentView {
    * Keys typed while the turn runs. Returns whether the view used them; the
    * caller passes on whatever it did not use (to the shell, after the turn).
    *
-   * - Ctrl-C anywhere in a read stops the turn, whatever else is going on.
+   * - Ctrl-C typed anywhere in a read stops the turn, prompt open or not (a
+   *   0x03 inside a bracketed paste is pasted text, not a keystroke).
    * - Pasted text (bracketed paste, followed across reads) is never a key:
    *   it is handed back, so a paste meant for the shell is not lost.
    * - Only a read that is exactly one key is a keystroke for the view. A
@@ -228,19 +229,17 @@ export class AgentView {
     if (this.state !== 'running' || this.model.ended) {
       return false;
     }
-    if (data.includes('\u0003')) {
-      this.timers.clearTimeout(this.pendingEscape);
-      this.pendingEscape = undefined;
-      this.pastes.reset();
-      this.stop();
-      return true;
-    }
     if (this.pendingEscape) {
       this.timers.clearTimeout(this.pendingEscape);
       this.pendingEscape = undefined;
       data = `\u001b${data}`;
     }
     const { text, pasted } = this.pastes.filter(data);
+    // A Ctrl-C typed outside a paste (a 0x03 inside one is pasted text, not a keystroke).
+    if (text.includes('\u0003')) {
+      this.stop();
+      return true;
+    }
     if (pasted) {
       return false;
     }
@@ -315,6 +314,10 @@ export class AgentView {
     if (this.awaitingRelayout()) {
       // A resize nobody relaid out for: do it now, or the last output would never be painted.
       await this.relayout();
+      // destroy() (or another finish()) may have run while the terminal answered.
+      if ((this.state as State) !== 'running') {
+        return;
+      }
     }
     this.state = 'finishing';
     this.timers.clearInterval(this.spinnerTimer);
@@ -327,6 +330,10 @@ export class AgentView {
       this.whenIdle(),
       new Promise<void>((resolve) => setTimeout(resolve, FINISH_TIMEOUT_MS).unref()),
     ]);
+    // destroy() during the wait has already given the terminal back.
+    if ((this.state as State) !== 'finishing') {
+      return;
+    }
     this.close();
   }
 

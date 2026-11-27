@@ -182,19 +182,19 @@ describe('a permission prompt takes only deliberate keys', () => {
     assert.deepEqual(actions, [{ type: 'answer', requestId: 'p1', optionId: 'no' }]);
   });
 
-  for (const [label, read] of [['alone', '\u0003'], ['amid other keys', 'ab\u0003c'], ['inside a paste', '\u001b[200~x\u0003y\u001b[201~']] as const) {
-    it(`always stops on Ctrl-C ${label}, prompt open or not`, async () => {
+  for (const [label, read] of [['alone', '\u0003'], ['amid other keys', 'ab\u0003c'], ['right after a paste in the same read', '\u001b[200~pasted\u001b[201~\u0003']] as const) {
+    it(`always stops on a typed Ctrl-C ${label}, prompt open or not`, async () => {
       const { view, actions } = await armedPrompt();
       assert.equal(view.handleInput(read), true);
       assert.deepEqual(actions, [{ type: 'cancel' }]);
     });
   }
 
-  it('stops on Ctrl-C even while an unterminated paste is open', async () => {
+  it('does not stop on a 0x03 byte inside a paste, and keeps following the paste', async () => {
     const { view, actions } = await armedPrompt();
-    view.handleInput('\u001b[200~still pasting');
-    view.handleInput('\u0003');
-    assert.deepEqual(actions, [{ type: 'cancel' }]);
+    assert.equal(view.handleInput('\u001b[200~binary \u0003 log'), false);
+    assert.equal(view.handleInput('y and more \u0003\u001b[201~'), false, 'the rest of the paste is still pasted text');
+    assert.deepEqual(actions, []);
   });
 });
 
@@ -374,6 +374,34 @@ describe('cost after big output', { timeout: 60_000 }, () => {
 });
 
 describe('teardown and early finish', () => {
+  it('finish() stops cleanly when destroy() runs while its relayout waits for the cursor', async () => {
+    let answer: (position: { row: number; col: number }) => void = () => {};
+    const { term, view } = await setup(90, 16, { query: () => new Promise((resolve) => { answer = resolve; }) });
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'streaming' }));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('esc background')));
+    await settle(term);
+    term.resize(60, 16);
+    const finishing = view.finish();
+    view.destroy();
+    const writtenAtDestroy = term.output().length;
+    answer({ row: 3, col: 1 });
+    const outcome = await Promise.race([finishing.then(() => 'done'), sleep(1500).then(() => 'stalled')]);
+    assert.equal(outcome, 'done', 'finish() waited out its timeout on a destroyed view');
+    assert.equal(term.output().length, writtenAtDestroy, 'wrote to the terminal after destroy()');
+  });
+
+  it('finish() writes nothing more when destroy() runs while it waits for the last frames', async () => {
+    const { term, view } = await setup(80, 12);
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'streaming' }));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('esc background')));
+    const finishing = view.finish();
+    view.destroy();
+    const writtenAtDestroy = term.output().length;
+    await finishing;
+    await settle(term);
+    assert.equal(term.output().length, writtenAtDestroy);
+  });
+
   const cursorHidden = (output: string): boolean => output.lastIndexOf('\u001b[?25l') > output.lastIndexOf('\u001b[?25h');
 
   it('destroy() mid-turn leaves no live rows and a visible cursor', async () => {
