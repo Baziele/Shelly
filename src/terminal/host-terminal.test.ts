@@ -112,7 +112,87 @@ describe('HostTerminal cursor queries', () => {
   });
 });
 
+describe('HostTerminal with replies split across reads', () => {
+  const answerSplit = async (answer: (data: string) => Promise<void>, report: string, at: number) => {
+    await answer(report.slice(0, at));
+    await answer(report.slice(at));
+  };
+
+  it('recognises an answer split at any byte while the query waits', async () => {
+    const report = '\u001b[?17;5R';
+    for (let at = 1; at < report.length; at++) {
+      const { host, typed, answer } = fakeTerminal();
+      const query = host.queryCursorPosition();
+      await answerSplit(answer, report, at);
+      assert.deepEqual(await query, { row: 17, col: 5 }, `split at ${at}`);
+      host.stop();
+      assert.deepEqual(typed, [], `split at ${at}`);
+    }
+  });
+
+  it('swallows the plain echo of a DEC answer split at any byte, and passes on what follows', async () => {
+    const echo = '\u001b[17;5R';
+    for (let at = 1; at < echo.length; at++) {
+      const { host, typed, answer } = fakeTerminal();
+      const query = host.queryCursorPosition();
+      await answer('\u001b[?17;5R');
+      await query;
+      await answerSplit(answer, `${echo}ls`, at);
+      host.stop();
+      assert.equal(typed.join(''), 'ls', `split at ${at}`);
+    }
+  });
+
+  it('swallows a late reply split at any byte after a timeout', async () => {
+    const late = '\u001b[12;30R';
+    for (let at = 1; at < late.length; at++) {
+      const { host, typed, answer } = fakeTerminal();
+      await assert.rejects(host.queryCursorPosition(20));
+      await answerSplit(answer, late, at);
+      await sleep(80);
+      host.stop();
+      assert.deepEqual(typed, [], `split at ${at}`);
+    }
+  });
+
+  it('passes on a lone Esc after a short wait when no reply follows', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const query = host.queryCursorPosition();
+    await answer('\u001b[?3;3R');
+    await query;
+    await answer('\u001b');
+    await sleep(80);
+    host.stop();
+    assert.deepEqual(typed, ['\u001b']);
+  });
+});
+
 describe('HostTerminal.stop', () => {
+  it('fails the query in flight and leaves nothing running that could deliver later', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const query = host.queryCursorPosition();
+    // An ambiguous report is held on a timer, and a partial one would be too.
+    await answer('\u001b[1;2R');
+    host.stop();
+    await assert.rejects(query, /stopped/);
+    await sleep(120);
+    assert.deepEqual(typed, []);
+  });
+
+  it('forgets owed replies, so a later start passes input on untouched', async () => {
+    const { host, answer } = fakeTerminal();
+    const query = host.queryCursorPosition();
+    await answer('\u001b[?4;4R');
+    await query;
+    host.stop();
+    const typed: string[] = [];
+    host.start((data) => typed.push(data));
+    await answer('\u001b[4;4R');
+    host.stop();
+    assert.deepEqual(typed, ['\u001b[4;4R']);
+  });
+
+
   it('leaves the screen usable after a crash mid-frame: synchronized output ended, style reset, cursor shown', async () => {
     const { host, written } = fakeTerminal();
     host.write('\u001b[?2026h\u001b[?25l\u001b[1;35mpartial');

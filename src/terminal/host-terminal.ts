@@ -20,6 +20,10 @@ interface PendingCursorQuery {
 const AMBIGUOUS_REPORT_WAIT_MS = 60;
 /** Replies that arrive this long after a query was settled are still taken out of the input. */
 const LATE_REPLY_WINDOW_MS = 3000;
+/** While replies are owed, input ending in what may be the start of one waits this long for the rest. */
+const PARTIAL_REPORT_WAIT_MS = 50;
+/** The start of a cursor position report, cut off: ESC, ESC [, ESC [ ?, then digits and semicolons. */
+const PARTIAL_REPORT = /\u001b(?:\[\??(?:\d+(?:;\d*(?:;\d*)?)?)?)?$/;
 
 /**
  * The real terminal Shelly runs in. Owns raw mode on stdin and is the only
@@ -36,6 +40,8 @@ export class HostTerminal {
    */
   private expectedLateReplies: { count: number; until: number; position: CursorPosition | undefined } = { count: 0, until: 0, position: undefined };
   private started = false;
+  /** Input that may be the first part of an owed reply split across reads (over SSH, say). */
+  private partialReport: { text: string; timer: NodeJS.Timeout } | undefined;
 
   constructor(
     private readonly input: NodeJS.ReadStream = process.stdin,
@@ -75,8 +81,22 @@ export class HostTerminal {
       this.input.setRawMode(false);
     }
     this.input.pause();
+    // Nothing is delivered or settled after this: the query in flight fails, and every timer goes.
     this.inputListener = undefined;
-    this.failPendingQuery(new Error('Terminal stopped.'));
+    const query = this.pendingCursorQuery;
+    if (query) {
+      this.pendingCursorQuery = undefined;
+      clearTimeout(query.timer);
+      if (query.held) {
+        clearTimeout(query.held.timer);
+      }
+      query.reject(new Error('Terminal stopped.'));
+    }
+    if (this.partialReport) {
+      clearTimeout(this.partialReport.timer);
+      this.partialReport = undefined;
+    }
+    this.expectedLateReplies = { count: 0, until: 0, position: undefined };
   }
 
   onResize(listener: (size: TerminalSize) => void): () => void {
@@ -121,7 +141,7 @@ export class HostTerminal {
     const query = this.pendingCursorQuery;
 
     if (!query) {
-      this.deliver(this.dropLateReplies(text));
+      this.passOn(text);
       return;
     }
 
@@ -165,7 +185,7 @@ export class HostTerminal {
     }
     this.pendingCursorQuery = undefined;
     query.resolve(position);
-    this.deliver(this.dropLateReplies(query.buffered));
+    this.passOn(query.buffered);
   }
 
   private expectLateReplies(count: number, position?: CursorPosition): void {
@@ -206,6 +226,40 @@ export class HostTerminal {
     return kept + rest;
   }
 
+  private lateRepliesOwed(): boolean {
+    return this.expectedLateReplies.count > 0 && Date.now() <= this.expectedLateReplies.until;
+  }
+
+  /**
+   * Pass input on to the listener, without the replies still owed. While
+   * replies are owed, input that ends in what may be the start of one is
+   * held back briefly, so a reply split across two reads is recognised
+   * whole instead of reaching the shell in pieces.
+   */
+  private passOn(input: string): void {
+    let text = input;
+    if (this.partialReport) {
+      clearTimeout(this.partialReport.timer);
+      text = this.partialReport.text + text;
+      this.partialReport = undefined;
+    }
+    text = this.dropLateReplies(text);
+    const partial = this.lateRepliesOwed() ? PARTIAL_REPORT.exec(text) : null;
+    if (partial) {
+      const held = text.slice(partial.index);
+      text = text.slice(0, partial.index);
+      this.partialReport = {
+        text: held,
+        timer: setTimeout(() => {
+          // Nothing followed: it was input after all.
+          this.partialReport = undefined;
+          this.deliver(held);
+        }, PARTIAL_REPORT_WAIT_MS),
+      };
+    }
+    this.deliver(text);
+  }
+
   private deliver(text: string): void {
     if (text) {
       this.inputListener?.(text);
@@ -228,6 +282,6 @@ export class HostTerminal {
     query.reject(error);
     // A slow terminal (over SSH, say) may still answer: both replies are swallowed if they come soon.
     this.expectLateReplies(2);
-    this.deliver(query.buffered);
+    this.passOn(query.buffered);
   }
 }
