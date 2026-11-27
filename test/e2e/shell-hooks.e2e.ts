@@ -137,6 +137,14 @@ for (const shell of ofKind('zsh')) {
       assert.ok(!/parameter not set|created globally/.test(session.output()), session.output());
     });
 
+    it('survives a .zshrc that replaces precmd_functions wholesale', async () => {
+      session = await startHooks(shell, { '.zshrc': "mytitle() { print -n ''; }\nprecmd_functions=(mytitle)\nPS1='$ '\n" });
+      await session.run('echo hi');
+      await session.run('print -l -- $precmd_functions');
+      assert.deepEqual(commands(session.events), ['echo hi', 'print -l -- $precmd_functions']);
+      assert.match(session.output(), /__shelly_precmd\r\nmytitle\r\n/);
+    });
+
     it('reports exit status, directory and awkward command lines', async () => {
       session = await startHooks(shell, { '.zshrc': "PS1='$ '\n" });
       await session.run('false');
@@ -188,6 +196,20 @@ for (const shell of ofKind('bash')) {
     });
 
     // bash 3.2 has bind -x but no READLINE_LINE, so a widget cannot edit the line there.
+    it('never names a hidden command after the one it resembles', async () => {
+      session = await startHooks(shell, { '.bashrc': "PS1='$ '\nHISTCONTROL=ignoreboth\n" });
+      await session.run('ls -d /usr');
+      await session.run(' ls');
+      assert.deepEqual(commands(session.events), ['ls -d /usr', '']);
+    });
+
+    it('works with promptvars turned off', async () => {
+      session = await startHooks(shell, { '.bashrc': "PS1='$ '\nshopt -u promptvars\n" });
+      await session.run('echo hi');
+      assert.deepEqual(commands(session.events), ['echo hi']);
+      assert.ok(!session.output().includes('__shelly'), session.output());
+    });
+
     it('does not mistake a key binding for a command', { skip: bashVersion(shell) < 4 }, async () => {
       session = await startHooks(shell, { '.bashrc': "PS1='$ '\nwidget() { READLINE_LINE='echo picked'; READLINE_POINT=11; }\nbind -x '\"\\C-t\": widget'\n" });
       await session.run('ls /');

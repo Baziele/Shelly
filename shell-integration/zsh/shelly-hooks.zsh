@@ -43,11 +43,17 @@ __shelly_precmd() {
 # precmd first (so $? is still the command's status) and its preexec last.
 __shelly_install() {
   'builtin' 'emulate' -L zsh
-  precmd_functions=(__shelly_precmd ${precmd_functions:#__shelly_install})
+  (( ${+functions[__shelly_install]} )) || return 0
+  precmd_functions=(__shelly_precmd ${precmd_functions:#(__shelly_install|__shelly_precmd)})
   preexec_functions=(${preexec_functions:#__shelly_preexec} __shelly_preexec)
   'builtin' 'unfunction' __shelly_install
   __shelly_precmd
 }
 
+# Two ways to reach the first prompt, in case a .zshrc replaces
+# precmd_functions wholesale: whichever runs first installs the hooks.
 'builtin' 'typeset' -ga precmd_functions
 precmd_functions+=(__shelly_install)
+if 'builtin' 'zmodload' zsh/sched 2>/dev/null; then
+  'builtin' 'sched' +0 '(( ${+functions[__shelly_install]} )) && __shelly_install'
+fi

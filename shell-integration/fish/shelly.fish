@@ -10,8 +10,9 @@ if test -n "$__shelly_nonce"
     end
 
     function __shelly_preexec --on-event fish_preexec
-        # Long command lines (a pasted script, say) are kept to a sensible size.
-        set -l command (string sub --length 8192 -- $argv[1] | string collect)
+        # Long command lines (a pasted script, say) are kept to a sensible
+        # size; URL encoding can make each character up to 12 long.
+        set -l command (string sub --length 4096 -- $argv[1] | string collect)
         set -l encoded (string escape --style=url -- "$command")
         __shelly_emit "exec;$encoded"
     end

@@ -63,8 +63,9 @@ if [[ -n "$__shelly_nonce" ]]; then
   __shelly_prompt_history=''
   __shelly_at_prompt=0
 
+  # PS0 needs prompt expansion (promptvars), or it would print itself.
   if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) \
-    && [[ -z "${bash_preexec_imported:-${__bp_imported:-}}" ]]; then
+    && [[ -z "${bash_preexec_imported:-${__bp_imported:-}}" ]] && shopt -q promptvars; then
     # bash 4.4+: PS0 is expanded right before a command line runs. HISTCMD
     # there is one past the number seen at the prompt only if the line was
     # added to history; otherwise it was kept out, and stays unnamed.
@@ -85,16 +86,16 @@ if [[ -n "$__shelly_nonce" ]]; then
     }
     PS0='$(__shelly_ps0)'"${PS0-}"
   else
-    # bash 3.2, or bash-preexec owns the DEBUG trap: the first command the
-    # trap sees after a prompt is the one the user entered.
+    # bash 3.2 (or promptvars off), or bash-preexec owns the DEBUG trap: the
+    # first command the trap sees after a prompt is the one the user entered.
     __shelly_preexec() {
       local previous=$__shelly_prompt_history
       __shelly_read_history
-      # Not added to history: a repeat that ignoredups dropped (same text as
-      # the last entry) can be named; anything else was kept out on purpose.
-      if [[ "$__shelly_history_number" == "$previous" \
-        && "$__shelly_history_command" != "$BASH_COMMAND" \
-        && "$__shelly_history_command" != "$BASH_COMMAND"[[:space:]\;\|\&]* ]]; then
+      # Not added to history: a repeat that ignoredups dropped can be named
+      # when it is exactly the last entry; anything else was kept out on
+      # purpose. (BASH_COMMAND is only the first simple command, so a
+      # repeated pipeline goes unnamed.)
+      if [[ "$__shelly_history_number" == "$previous" && "$__shelly_history_command" != "$BASH_COMMAND" ]]; then
         __shelly_emit "exec;"
         return
       fi
