@@ -37,23 +37,27 @@ describe('stripCellControls', () => {
 });
 
 describe('sanitizeTerminalText on hostile input', () => {
-  // Each unterminated introducer used to scan to the end of the text: 80 KB took about 6 s.
+  // Each unterminated introducer used to scan to the end of the text: 80 KB took about 6 s. The bound
+  // is generous so a loaded CI machine never trips it; scripts/ui-perf-check.ts holds the tight one.
   for (const [label, introducer] of [['C1 DCS', '\u0090'], ['C1 OSC', '\u009d'], ['C1 APC', '\u009f'], ['ESC ]', '\u001b]'], ['ESC P', '\u001bP']] as const) {
     it(`stays linear on 40,000 unterminated ${label} introducers`, () => {
       const hostile = `${introducer}x`.repeat(40_000);
       const started = performance.now();
       const clean = sanitizeTerminalText(hostile);
       const elapsed = performance.now() - started;
-      assert.ok(elapsed < 150, `${elapsed.toFixed(0)} ms`);
+      assert.ok(elapsed < 2000, `${elapsed.toFixed(0)} ms`);
       assert.ok(!/[\u001b\u0080-\u009f]/.test(clean));
     });
   }
 
-  it('still removes a long but terminated payload whole, up to 4096 characters', () => {
-    assert.equal(sanitizeTerminalText(`a\u001b]52;c;${'Q'.repeat(4000)}\u0007b`), 'ab');
+  it('removes a 100 KB OSC 52 clipboard write whole, however long its payload', () => {
+    const blob = 'QUJD'.repeat(25_000);
+    assert.equal(sanitizeTerminalText(`a\u001b]52;c;${blob}\u0007b`), 'ab');
+    assert.equal(sanitizeTerminalText(`a\u001b]52;c;${blob}\u001b\\b`), 'ab');
+    assert.equal(sanitizeTerminalText(`a\u001bP${blob}\u001b\\b`), 'ab');
   });
 
   it('removes bidi marks (LRM, RLM, ALM) too', () => {
-    assert.equal(sanitizeTerminalText('a‎b‏c؜d'), 'abcd');
+    assert.equal(sanitizeTerminalText('a\u200eb\u200fc\u061cd'), 'abcd');
   });
 });

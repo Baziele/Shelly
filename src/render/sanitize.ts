@@ -8,12 +8,13 @@
  */
 
 /*
- * A string payload stops at any ESC or C1 byte (and an OSC at BEL), and at
- * 4096 characters: each attempt then scans only up to the next introducer,
- * so hostile text full of unterminated introducers stays linear.
+ * A string payload runs to its terminator but never past an ESC or C1 byte:
+ * each attempt then scans only up to the next introducer, so hostile text
+ * full of unterminated introducers stays linear, while a long terminated
+ * payload (a 100 KB OSC 52 clipboard blob) is still removed whole.
  */
-const PAYLOAD = '[^\\u001b\\u0080-\\u009f]{0,4096}';
-const OSC_PAYLOAD = '[^\\u0007\\u001b\\u0080-\\u009f]{0,4096}';
+const PAYLOAD = '[^\\u001b\\u0080-\\u009f]*';
+const OSC_PAYLOAD = '[^\\u0007\\u001b\\u0080-\\u009f]*';
 
 // Whole sequences, so their payload does not stay behind as visible junk.
 const ESCAPE_SEQUENCE = new RegExp([
