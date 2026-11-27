@@ -125,7 +125,8 @@ for (const shell of shells) {
       }
       writeFakeClaude(join(home, 'test-bin'));
       const env = { TMPDIR: temp, PATH: `${join(home, 'test-bin')}:${process.env.PATH ?? '/usr/bin:/bin'}` };
-      shelly = await startShelly({ cols: 100, rows: 20, shell, home, env });
+      // Claude Code on for fast mode: `claude` is the fake one in test-bin.
+      shelly = await startShelly({ cols: 100, rows: 20, shell, home, env, config: { agents: { opencode: { enabled: false } } } });
       // fish asks the terminal a few things before it reads keys.
       await sleep(300);
       return shelly;
