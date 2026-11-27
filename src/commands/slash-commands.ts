@@ -5,13 +5,15 @@ export interface SlashCommand {
 }
 
 /**
- * Commands offered in the slash popup. These are placeholders until the agent
- * layer exists; skills discovered at runtime will be registered alongside them.
+ * Commands offered in the slash popup. Apart from /context, these are
+ * placeholders until the agent layer exists; skills discovered at runtime
+ * will be registered alongside them.
  */
 export const BUILTIN_COMMANDS: readonly SlashCommand[] = [
   { name: 'ask', description: 'Ask a one-off question' },
   { name: 'run', description: 'Start a full agent run' },
   { name: 'skills', description: 'Browse skills Shelly can load' },
+  { name: 'context', description: 'Show what Shelly knows about this session' },
   { name: 'help', description: 'Show what Shelly can do' },
 ];
 
