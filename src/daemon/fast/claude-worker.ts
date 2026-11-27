@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { accessSync, constants, mkdirSync, statSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
+import { findExecutable } from './executable.js';
 import type { FastBackend, FastWorker, Turn, TurnHandlers, WorkerFailure } from './worker.js';
 
 /*
@@ -71,31 +72,13 @@ export const claudeArgs = (model: string, systemPrompt: string): string[] => [
   '--system-prompt', systemPrompt,
 ];
 
-const isExecutableFile = (path: string): boolean => {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 /**
  * The claude executable to run: `explicit` when it is a path, else the
  * first match on PATH, else the installer's usual places. Null when none.
  */
 export const findClaudeExecutable = (explicit: string | null, env: NodeJS.ProcessEnv): string | null => {
-  const name = explicit ?? 'claude';
-  if (name.includes('/')) return isExecutableFile(name) ? name : null;
-  for (const dir of (env.PATH ?? '').split(delimiter)) {
-    if (dir === '') continue;
-    const candidate = join(dir, name);
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  if (explicit !== null) return null;
   const home = env.HOME || homedir();
-  return [join(home, '.local', 'bin', 'claude'), join(home, '.claude', 'local', 'claude')].find(isExecutableFile) ?? null;
+  return findExecutable('claude', explicit, env, [join(home, '.local', 'bin', 'claude'), join(home, '.claude', 'local', 'claude')]);
 };
 
 export interface ClaudeBackendOptions {
