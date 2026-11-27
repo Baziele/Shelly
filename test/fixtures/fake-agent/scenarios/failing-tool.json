@@ -1,0 +1,14 @@
+{
+  "name": "failing-tool",
+  "defaultScript": [
+    { "type": "message", "text": "Let me build the project.\n\n" },
+    { "type": "tool_call", "id": "build", "title": "Run `make build`", "kind": "execute", "rawInput": { "command": "make build" }, "delayMs": 200 },
+    { "type": "tool_update", "id": "build", "status": "in_progress", "delayMs": 100 },
+    {
+      "type": "tool_update", "id": "build", "status": "failed", "delayMs": 600,
+      "content": [{ "type": "text", "text": "cc -o build/app src/main.c\nsrc/main.c:12:5: error: use of undeclared identifier 'conifg'\n    conifg.port = 8080;\n    ^\n1 error generated.\nmake: *** [build] Error 1" }],
+      "rawOutput": { "exitCode": 2 }
+    },
+    { "type": "message", "text": "The build failed: `conifg` on line 12 of `src/main.c` is a typo for `config`.", "charsPerTick": 12, "tickMs": 40 }
+  ]
+}
