@@ -20,9 +20,12 @@ const agents = AgentRuntimeAcp.layer;
 ## Behaviour
 
 - **One process per agent**, shared by its sessions. It starts in its own process group, with the
-  daemon's env minus a host Claude Code session's variables (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, …).
-  Claude Code runs the bundled `claude-agent-acp` with `CLAUDE_CODE_EXECUTABLE` set to the user's own
-  `claude` when it's on PATH. stderr is always drained into an 8 KB tail that is logged only at debug level.
+  daemon's env minus a host Claude Code session's variables (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, …;
+  the list in `../claude-env.ts`, shared with fast mode). Claude Code runs the bundled `claude-agent-acp`
+  with `CLAUDE_CODE_EXECUTABLE` set to the user's own `claude`: an inherited value if it names a real
+  executable, else the first on PATH, else `~/.local/bin` or `~/.claude/local`. stderr is always
+  drained into an 8 KB tail that is logged only at debug level. Stopping a process sends its group
+  SIGTERM, then SIGKILL after 3 s, outside the agent's lock, so a hung agent never blocks the next one.
 - **Sessions.** `session()` returns the thread's live session when the agent, cwd and session id match.
   Otherwise it resumes `nativeSessionId` with `session/resume` (or `session/load` for agents without
   resume), and starts a new session if the agent doesn't know it (`startedFresh: true`). Changed
@@ -32,7 +35,8 @@ const agents = AgentRuntimeAcp.layer;
   and a process exits `processIdleMs` after its last session (Claude Code 5 min, others 2).
   `SHELLY_AGENT_SESSION_IDLE_MS` / `SHELLY_AGENT_PROCESS_IDLE_MS`, or the per-agent
   `SHELLY_<ID>_SESSION_IDLE_MS` / `SHELLY_<ID>_PROCESS_IDLE_MS`, override them. A dead process marks
-  its sessions lost; the next `session()` respawns and resumes.
+  its sessions lost; the next `session()` respawns and resumes. A prewarm restarts the countdown of
+  the session (or the session-less process) it targets.
 - **Session handles stay usable.** An `AgentSession` keeps working after its session was released or
   its process died: `prompt` and `setMode` reopen it first. `nativeSessionId` and `modes` are getters
   that always show the current values. If the reopen had to start fresh, the turn begins with a
