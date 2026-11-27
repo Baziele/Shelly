@@ -65,7 +65,10 @@ export const layer: Layer.Layer<AgentDirectory, never, AgentRuntime | ShellyConf
       const agents = yield* runtime.agents;
       const agent = agents.find((candidate) => candidate.id === agentId);
       if (!agent) {
-        return yield* new AgentUnavailable({ agentId, reason: `Shelly does not know an agent called "${agentId}".` });
+        const reason = agents.length === 0
+          ? "No agent is set up. Install Claude Code or OpenCode, or add an agent to Shelly's config.json."
+          : `Shelly does not know an agent called "${agentId}".`;
+        return yield* new AgentUnavailable({ agentId, reason });
       }
       return agent;
     });
