@@ -16,8 +16,8 @@ else
   'builtin' 'unset' 'ZDOTDIR'
 fi
 # Kept out of the environment before any of the user's startup commands run.
-'builtin' 'typeset' -g __shelly_nonce="${SHELLY_NONCE-}"
-'builtin' 'unset' 'SHELLY_USER_ZDOTDIR' 'SHELLY_NONCE'
+'builtin' 'typeset' -g __shelly_nonce="${SHELLY_NONCE-}" __shelly_line_file="${SHELLY_LINE_FILE-}"
+'builtin' 'unset' 'SHELLY_USER_ZDOTDIR' 'SHELLY_NONCE' 'SHELLY_LINE_FILE'
 
 {
   'builtin' 'typeset' __shelly_file="${ZDOTDIR-$HOME}/.zshenv"
@@ -27,7 +27,7 @@ fi
     # This file's directory, whatever ZDOTDIR is now.
     'builtin' 'source' '--' "${${(%):-%x}:A:h}/shelly-hooks.zsh"
   else
-    'builtin' 'unset' '__shelly_nonce'
+    'builtin' 'unset' '__shelly_nonce' '__shelly_line_file'
   fi
   'builtin' 'unset' '__shelly_file'
 }

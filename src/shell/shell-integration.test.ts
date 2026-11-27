@@ -28,6 +28,14 @@ describe('prepareShellIntegration', () => {
     assert.deepEqual(fish?.env, {}, 'the nonce stays out of the environment');
   });
 
+  it('tells the hooks where the line file is, outside the environment for fish', () => {
+    assert.equal(prepareShellIntegration('/bin/zsh', {}, '/opt/shelly', '/tmp/x/line')?.env.SHELLY_LINE_FILE, '/tmp/x/line');
+    assert.equal(prepareShellIntegration('/bin/bash', {}, '/opt/shelly', '/tmp/x/line')?.env.SHELLY_LINE_FILE, '/tmp/x/line');
+    const fish = prepareShellIntegration('fish', {}, '/opt/shelly', "/tmp/it's/line");
+    assert.deepEqual(fish?.env, {});
+    assert.match(fish?.args[1] ?? '', /; set -g __shelly_line_file '\/tmp\/it\\'s\/line'; source /);
+  });
+
   it('gives every session its own nonce', () => {
     const first = prepareShellIntegration('/bin/bash', {}, '/opt/shelly');
     const second = prepareShellIntegration('/bin/bash', {}, '/opt/shelly');

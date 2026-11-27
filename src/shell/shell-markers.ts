@@ -6,7 +6,16 @@
  *
  *   exec;<command>  a command line is about to run (empty: run, but unnamed)
  *   done;<status>   the shell is back at a prompt; the last command exited
- *   cwd;<path>      the shell's working directory
+ *   cwd;<path>      the shell's working directory; sent at every prompt
+ *   line-editor;<features>  what the hooks can do with the input line, as a
+ *                   comma-separated list: capture, set (read and replace it),
+ *                   clear, redraw (bash 3.2, which can do neither)
+ *   line;<buffer>;<cursor>  the input line and its cursor (in characters),
+ *                   which the shell has just cleared; a cursor of -1 means
+ *                   the line could not be reported and was left alone
+ *   line-set;       the shell has replaced its input line
+ *
+ * The line markers answer keys Shelly sends; see line-editor.ts.
  *
  * Payloads are percent-encoded. The nonce is chosen per session and taken
  * out of the environment before the user's startup files run, so programs
@@ -20,7 +29,18 @@ export const MARKER_OSC = 6973;
 export type ShellEvent =
   | { readonly type: 'exec'; readonly command: string }
   | { readonly type: 'done'; readonly exitCode: number | undefined }
-  | { readonly type: 'cwd'; readonly path: string };
+  | { readonly type: 'cwd'; readonly path: string }
+  | { readonly type: 'line-editor'; readonly features: readonly string[] }
+  /** `line` is absent when the shell could not report it (it was too long, say). */
+  | { readonly type: 'line'; readonly line: ShellInputLine | undefined }
+  | { readonly type: 'line-set' };
+
+/** The shell's input line as the hooks report it. */
+export interface ShellInputLine {
+  readonly buffer: string;
+  /** In characters (code points), as the shell counts them. */
+  readonly cursor: number;
+}
 
 export type ShellOutputSegment =
   | { readonly type: 'output'; readonly data: string }
@@ -141,7 +161,11 @@ export class ShellMarkerParser {
       return 'foreign';
     }
 
-    const payload = decodePayload(rest.join(';'));
+    const raw = rest.join(';');
+    if (kind === 'line') {
+      return { type: 'line', line: parseLine(raw) };
+    }
+    const payload = decodePayload(raw);
     switch (kind) {
       case 'exec':
         return { type: 'exec', command: payload };
@@ -151,12 +175,26 @@ export class ShellMarkerParser {
       }
       case 'cwd':
         return { type: 'cwd', path: payload };
+      case 'line-editor':
+        return { type: 'line-editor', features: payload.split(',').filter(Boolean) };
+      case 'line-set':
+        return { type: 'line-set' };
       default:
         // From a newer hook script; nothing to do with it.
         return 'ignored';
     }
   }
 }
+
+/** `<buffer>;<cursor>`: the buffer may hold `;` itself, the cursor never does. */
+const parseLine = (raw: string): ShellInputLine | undefined => {
+  const split = raw.lastIndexOf(';');
+  const cursor = raw.slice(split + 1);
+  if (split === -1 || !/^\d+$/.test(cursor)) {
+    return undefined;
+  }
+  return { buffer: decodePayload(raw.slice(0, split)), cursor: Number(cursor) };
+};
 
 /** How many characters at the end of `input` could be the beginning of a marker. */
 const partialPrefixLength = (input: string, from: number): number => {

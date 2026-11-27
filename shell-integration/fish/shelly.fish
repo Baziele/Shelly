@@ -25,4 +25,62 @@ if test -n "$__shelly_nonce"
         set -l cwd (string escape --style=url -- $PWD)
         __shelly_emit "cwd;$cwd"
     end
+
+    # The input line. Shelly reads and sets it by sending keys no terminal
+    # sends (F12 and F11 with every modifier held; see src/shell/line-editor.ts).
+
+    # Report the line and the cursor (in characters), then clear the line so
+    # Shelly can draw there. A line too long to report is left as it is.
+    function __shelly_line_capture
+        # `commandline` prints the line and a newline; the newline is dropped
+        # again once encoded.
+        set -l line (commandline | string collect -N)
+        set -l encoded (string escape --style=url -- "$line")
+        set encoded (string replace -r -- '%0A$' '' "$encoded")
+        if test (string length -- "$encoded") -gt 60000
+            __shelly_emit 'line;;-1'
+            return
+        end
+        set -l cursor (commandline -C)
+        commandline -r ''
+        commandline -f repaint
+        __shelly_emit "line;$encoded;$cursor"
+    end
+
+    # Replace the line with the file Shelly wrote: the cursor (in characters)
+    # on the first line, the text after it. The file is removed once read.
+    function __shelly_line_set
+        set -l file $__shelly_line_file
+        test -n "$file" -a -f "$file" -a ! -L "$file"; or return
+        set -l cursor
+        set -l text
+        begin
+            read cursor
+            # Up to a NUL, which never comes: everything else, newlines included.
+            read -z text
+        end < $file
+        command rm -f -- $file
+        set -l length (string length -- "$text")
+        commandline -r -- "$text"
+        if string match -qr -- '^[0-9]+$' "$cursor"; and test "$cursor" -lt $length
+            commandline -C $cursor
+        else
+            commandline -C $length
+        end
+        commandline -f repaint
+        __shelly_emit 'line-set;'
+    end
+
+    # In every mode: default (emacs-like) and vi's insert and visual modes.
+    for __shelly_mode in default insert visual
+        if string match -qr '^[0-3]\.' -- $version
+            # fish 3 matches raw sequences.
+            bind -M $__shelly_mode \e\[24\;16~ __shelly_line_capture
+            bind -M $__shelly_mode \e\[23\;16~ __shelly_line_set
+        else
+            bind -M $__shelly_mode ctrl-alt-shift-super-f12 __shelly_line_capture
+            bind -M $__shelly_mode ctrl-alt-shift-super-f11 __shelly_line_set
+        end
+    end
+    __shelly_emit 'line-editor;capture,set'
 end
