@@ -132,6 +132,19 @@ with nothing else in the foreground). The rewrite hotkey, Ctrl+], works the
 same way: at the prompt, Shelly takes it and captures the line; anywhere
 else, it reaches the program untouched.
 
+### Giving the prompt back
+
+After Shelly prints below the prompt (a turn, an answer), the cursor sits
+at the start of an empty line, while the shell's line editor still thinks
+it is at the end of its prompt further up. Enter on the empty line makes
+every shell move down one line from where it thinks it is and draw a new
+prompt, so Shelly first moves the cursor up onto its last line: the new
+prompt lands right under the output, with no blank line. Keys typed
+meanwhile and a line to put back wait until the shell has drawn that
+prompt (its `cwd` marker, then output): sent sooner, the terminal driver
+would echo them. Output the idle shell made meanwhile (a prompt redrawn on
+a resize) is dropped, since the new prompt replaces it.
+
 ## Rendering
 
 Agent output is drawn inline on the main screen, never on the alternate
@@ -156,7 +169,10 @@ recorded event sequences from `test/fixtures/thread-events/` through them.
 - Nothing slows the shell: no extra work before the prompt, none per keystroke
   or per byte of output beyond what the hooks need.
 - Heavy modules (Effect, OpenTUI, the daemon connection) load after the shell
-  starts.
+  starts. The daemon is started at the first prompt; its connection (Effect)
+  loads once the terminal has been quiet for a moment, so module loading
+  never lands on a keystroke. Without a daemon, Shelly is a plain shell and
+  `::` says why.
 - The daemon starts in the background when a client first runs, warms the
   agent while the user is still typing, and keeps one lean fast-mode process
   warm only for a few minutes after use (each costs about 200 MB).
