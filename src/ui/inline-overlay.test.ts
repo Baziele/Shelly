@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, it } from 'node:test';
 import { EmulatedTerminal } from '../../test/support/emulated-terminal.js';
+import { eventually } from '../../test/support/eventually.js';
 import { BUILTIN_COMMANDS, CommandRegistry } from '../commands/slash-commands.js';
 import type { HostTerminal } from '../terminal/host-terminal.js';
 import { InlineOverlay } from './inline-overlay.js';
@@ -11,7 +12,7 @@ const open = async (cols: number, rows: number) => {
   term.write('older output line\r\n~/acme-web $ ');
   const overlay = new InlineOverlay(term as unknown as HostTerminal, new CommandRegistry(BUILTIN_COMMANDS), 'ansi256', { onSubmit: () => {}, onCancel: () => {} });
   overlay.open(await term.cursor(), '__', 'find every file over one hundred megabytes');
-  await sleep(50);
+  await eventually(() => term.screen(), (lines) => lines.some((line) => line.includes('__ find every file')));
   return { term, overlay };
 };
 
@@ -20,16 +21,17 @@ describe('InlineOverlay', { timeout: 20_000 }, () => {
     const { term, overlay } = await open(90, 10);
     overlay.setBusy(true);
     overlay.setPreview('find . -type f -size +100M -print0 | xargs -0 ls -lh | sort -k5 -h');
-    await sleep(120);
+    await eventually(() => term.screen(), (lines) => lines.some((line) => line.includes('xargs')));
     await term.flush();
     term.resize(50, 10);
     const writtenAtResize = term.output().length;
-    // The spinner keeps drawing frames meanwhile; none may reach the reflowed screen.
+    // The spinner keeps drawing frames meanwhile; none may reach the reflowed screen. (A slow machine
+    // can only draw fewer frames in this window, so the check cannot fail spuriously.)
     await sleep(200);
     assert.equal(term.output().length, writtenAtResize, 'painted at the old anchor after a resize');
     overlay.relayout(await term.cursor());
-    await sleep(120);
-    assert.ok(term.output().length > writtenAtResize, 'did not repaint after relayout');
+    const written = await eventually(() => term.output().length, (length) => length > writtenAtResize);
+    assert.ok(written > writtenAtResize, 'did not repaint after relayout');
     overlay.close();
     const screen = await term.screen();
     assert.ok(screen.includes('older output line'), screen.join('\n'));
