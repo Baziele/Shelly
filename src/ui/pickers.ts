@@ -6,7 +6,12 @@ import type { PickerItem } from './list-picker.js';
 /** `/threads`: title · agent · when · where, the current thread marked; running ones say so. */
 export const threadPickerItems = (
   threads: readonly ThreadSummary[],
-  options: PathContext & { readonly currentThreadId?: string; readonly now?: number },
+  options: PathContext & {
+    readonly currentThreadId?: string;
+    readonly now?: number;
+    /** The name the user reads for an agent id (`Claude Code` for `claude`). */
+    readonly agentName?: (agentId: string) => string;
+  },
 ): PickerItem[] => {
   const now = options.now ?? Date.now();
   return [...threads]
@@ -15,7 +20,7 @@ export const threadPickerItems = (
       id: thread.id,
       label: oneLine(thread.title) || 'Untitled thread',
       columns: [
-        thread.agentId,
+        options.agentName?.(thread.agentId) ?? thread.agentId,
         thread.status === 'running' ? '● working' : thread.status === 'waiting' ? '◆ waiting for you' : relativeTime(thread.updatedAt, now),
         thread.location === 'home' ? 'shelly home' : shortenPath(thread.cwd, options),
       ],

@@ -12,10 +12,12 @@ import type {
   ThreadSummary,
 } from '../protocol/schema.js';
 import { AgentView, type AgentAction } from '../ui/agent/agent-view.js';
+import { UNKNOWN_AGENT } from '../ui/agent/format.js';
 import { renderHistory } from '../ui/agent/history.js';
 import { oneLine, seg, type Line } from '../ui/agent/lines.js';
 import type { PickerItem } from '../ui/list-picker.js';
 import { agentPickerItems, modePickerItems, threadPickerItems } from '../ui/pickers.js';
+import { fallbackAgentName } from '../protocol/agent-names.js';
 import { truncateEnd } from '../render/text-width.js';
 import type { DaemonClient } from './daemon-client.js';
 import type { Claim, FlowHost, OpenInput } from './flow-host.js';
@@ -117,6 +119,14 @@ interface NextThread {
 }
 
 const TITLE_IN_HINT = 32;
+
+/*
+ * One phrasing for getting back to a turn: in the input (`::` is already
+ * typed) "enter to see"; anywhere else ":: then enter to see".
+ */
+const SEE = 'enter to see';
+const SEE_FROM_SHELL = ':: then enter to see';
+const ANSWER_FROM_SHELL = ':: then enter to answer';
 /** How stale the agent list may get before opening :: refreshes it (in the background). */
 const AGENTS_REFRESH_MS = 30_000;
 const LIST_LIMIT = 50;
@@ -234,6 +244,11 @@ export class AgentSession {
 
   // ─── Hints ────────────────────────────────────────────────────────────────
 
+  /** The name the user reads for an agent: the daemon's (a configured `name` wins), else the built-in's, else the id. */
+  private nameOf(agentId: string): string {
+    return this.agents.find((agent) => agent.id === agentId)?.name ?? fallbackAgentName(agentId);
+  }
+
   private defaultAgentId(): string | undefined {
     return this.agents.find((agent) => agent.isDefault)?.id ?? this.agents.find((agent) => agent.available)?.id;
   }
@@ -252,21 +267,21 @@ export class AgentSession {
     const live = this.live;
     if (live && !live.view && live.status !== 'ended') {
       return live.status === 'waiting'
-        ? `◆ ${live.agentId} is waiting for you · enter to answer`
-        : `● ${live.agentId} is working · enter to watch`;
+        ? `◆ ${this.nameOf(live.agentId)} is waiting for you · enter to answer`
+        : `● ${this.nameOf(live.agentId)} is working · ${SEE}`;
     }
     if (this.unseen) {
-      return `✓ ${this.unseen.agentId} finished · enter to see`;
+      return `✓ ${this.nameOf(this.unseen.agentId)} finished · ${SEE}`;
     }
     const thread = this.thread;
     if (thread && !this.next.newThread) {
       if (thread.status !== 'idle' && !live) {
-        return `● ${thread.agentId} is working · enter to watch`;
+        return `● ${this.nameOf(thread.agentId)} is working · ${SEE}`;
       }
       const mode = this.modeLabel(thread.id);
       // A thread with no message yet (started by /mode, say) is still a new thread to the user.
       const title = thread.title ? `“${truncateEnd(oneLine(thread.title), TITLE_IN_HINT)}”` : 'new thread';
-      return `${thread.agentId}${mode ? ` · ${mode}` : ''} · ${title}`;
+      return `${this.nameOf(thread.agentId)}${mode ? ` · ${mode}` : ''} · ${title}`;
     }
     const agent = this.nextAgentId();
     if (!agent) {
@@ -274,7 +289,7 @@ export class AgentSession {
     }
     const known = this.agentModes.get(agent);
     const mode = this.next.modeId && known ? labelOf({ ...known, currentModeId: this.next.modeId }) : undefined;
-    return `${agent}${mode ? ` · ${mode}` : ''} · new thread${this.next.here ? ' here' : ''}`;
+    return `${this.nameOf(agent)}${mode ? ` · ${mode}` : ''} · new thread${this.next.here ? ' here' : ''}`;
   }
 
   /** The thread's mode, when it is not the agent's first (usual) one. */
@@ -302,7 +317,7 @@ export class AgentSession {
       // One turn at a time per terminal: a second would be refused by the daemon (same thread)
       // or lose track of this one. The input stays open, with what the user typed.
       if (!running.view) {
-        this.host.overlay.setError(`${running.agentId} is still working on your last request · empty the line and press enter to watch`);
+        this.host.overlay.setError(`${this.nameOf(running.agentId)} is still working on your last request · empty the line, then ${SEE}`);
       }
       return;
     }
@@ -338,7 +353,7 @@ export class AgentSession {
         await this.refreshAgents(client);
       }
       const thread = await this.ensureThread(client);
-      view.setAgentName(thread.agentId);
+      view.setAgentName(this.nameOf(thread.agentId));
       threadId = thread.id;
       context = await this.contextFor(threadId);
     } catch (error) {
@@ -418,7 +433,7 @@ export class AgentSession {
     const { overlay, terminal, colorDepth } = this.host;
     overlay.close();
     terminal.write(echoText(open.trigger, text, 'agent', colorDepth, note));
-    return this.showView(hold, agentId ?? (this.thread && !this.next.newThread ? this.thread.agentId : this.nextAgentId()) ?? 'agent');
+    return this.showView(hold, this.nameOrUnknown(agentId ?? (this.thread && !this.next.newThread ? this.thread.agentId : this.nextAgentId())));
   }
 
   /** Claim the terminal from `open`, if it is still the input on screen. */
@@ -513,7 +528,7 @@ export class AgentSession {
               type: 'notice',
               turnId: event.turnId,
               level: 'warning',
-              text: `${live.agentId} ended the turn without a reply. If it keeps happening, check that ${live.agentId} works on its own.`,
+              text: `${this.nameOf(live.agentId)} ended the turn without a reply. If it keeps happening, check that ${this.nameOf(live.agentId)} works on its own.`,
             }));
           }
           view.apply(event);
@@ -562,7 +577,7 @@ export class AgentSession {
         tracker.answered = true;
         tracker.status = 'waiting';
         if (tracker === live) {
-          this.noticeIfHidden(live, `${live.agentId} is waiting for you · type :: and press enter to answer`);
+          this.noticeIfHidden(live, `${this.nameOf(live.agentId)} is waiting for you · ${ANSWER_FROM_SHELL}`);
           this.refreshHint();
         }
         return;
@@ -632,7 +647,7 @@ export class AgentSession {
         stopReason: 'interrupted' satisfies StopReason,
         error: unsent || tracker.turnId === undefined
           // One line: say the part that matters first.
-          ? `connection lost before ${live.agentId} started · it may not have your request`
+          ? `connection lost before ${this.nameOf(live.agentId)} started · it may not have your request`
           : `lost the connection to Shelly's background service${reason ? ` (${reason})` : ''}`,
         durationMs: 0,
       }));
@@ -662,7 +677,7 @@ export class AgentSession {
       // It finished in the background.
       if (tracker.startSeq !== undefined) {
         this.unseen = { threadId: live.threadId, agentId: live.agentId, text: tracker.text, startSeq: tracker.startSeq };
-        this.noticeIfHidden(live, `${live.agentId} finished · type :: and press enter to see`);
+        this.noticeIfHidden(live, `${this.nameOf(live.agentId)} finished · ${SEE_FROM_SHELL}`);
       }
       this.settled(live);
     }
@@ -798,7 +813,7 @@ export class AgentSession {
   private async watch(from: OpenInput | Hold, live: LiveTurn, afterSeq: number): Promise<void> {
     const output = 'trigger' in from
       ? this.beginOutput(from, live.text, live.agentId, 'watching')
-      : this.showView(from, live.agentId);
+      : this.showView(from, this.nameOf(live.agentId));
     if (!output) {
       return;
     }
@@ -849,6 +864,11 @@ export class AgentSession {
       live.status = 'ended';
     }
     await this.settle(tracker, live, output);
+  }
+
+  /** The view's name for an agent; none known means no agent ran (none is set up, say). */
+  private nameOrUnknown(agentId: string | undefined): string {
+    return agentId ? this.nameOf(agentId) : UNKNOWN_AGENT;
   }
 
   // ─── Threads ──────────────────────────────────────────────────────────────
@@ -976,7 +996,12 @@ export class AgentSession {
       return;
     }
     overlay.openPicker({
-      items: threadPickerItems(threads, { cwd: this.host.cwd(), home: this.host.home, ...(this.thread ? { currentThreadId: this.thread.id } : {}) }),
+      items: threadPickerItems(threads, {
+        cwd: this.host.cwd(),
+        home: this.host.home,
+        agentName: (agentId) => this.nameOf(agentId),
+        ...(this.thread ? { currentThreadId: this.thread.id } : {}),
+      }),
       placeholder: 'Pick a thread · type to filter',
       emptyText: 'No thread matches',
       onPick: (item) => {
@@ -1065,7 +1090,7 @@ export class AgentSession {
     const renderBefore = async (): Promise<string> =>
       !isRunning || before.some((event) => event.type === 'turn.started')
         ? renderHistory(before, {
-          agentName: thread.agentId,
+          agentName: this.nameOf(thread.agentId),
           title: thread.title || 'Untitled thread',
           updatedAt: attached.thread.updatedAt,
           cwd: this.host.cwd(),
@@ -1200,13 +1225,13 @@ export class AgentSession {
     this.refreshHint();
     if (!modes || modes.availableModes.length === 0) {
       overlay.clearInput();
-      overlay.setError(`${agentId} has no modes to choose from.`);
+      overlay.setError(`${this.nameOf(agentId)} has no modes to choose from.`);
       return;
     }
     const current = thread ? modes.currentModeId : this.next.modeId ?? modes.currentModeId;
     overlay.openPicker({
       items: modePickerItems(modes.availableModes, current),
-      placeholder: `Pick a mode for ${agentId} · type to filter`,
+      placeholder: `Pick a mode for ${this.nameOf(agentId)} · type to filter`,
       onPick: (item) => {
         overlay.closePicker();
         if (!thread) {
@@ -1306,7 +1331,8 @@ export class AgentSession {
       }
       const thread = this.next.newThread ? undefined : this.thread;
       const context = await this.contextFor(thread?.id ?? '');
-      const target = thread ? `${thread.agentId} · “${oneLine(thread.title) || 'this thread'}”` : `${this.nextAgentId() ?? 'the agent'} · new thread`;
+      const next = this.nextAgentId();
+      const target = thread ? `${this.nameOf(thread.agentId)} · “${oneLine(thread.title) || 'this thread'}”` : `${next ? this.nameOf(next) : 'the agent'} · new thread`;
       const lines = [
         `With your next message (${target}):`,
         '',
@@ -1334,8 +1360,10 @@ export class AgentSession {
         [],
         ...BUILTIN_COMMANDS.map((command) => key(`/${command.name}`, command.description)),
         [],
-        [seg('  While the agent works: ', 'muted'), seg('esc', 'accent'), seg(' background · ', 'muted'), seg('ctrl+c', 'accent'),
-          seg(' stop · ', 'muted'), seg('y n 1-9', 'accent'), seg(' answer a permission', 'muted')],
+        // The same keys, in the same words, as the agent's own status line.
+        [seg('  While the agent works: ', 'muted'), seg('esc', 'accent'), seg(' background · ', 'muted'), seg('^c', 'accent'), seg(' stop', 'muted')],
+        [seg('  When it asks:          ', 'muted'), seg('←→', 'accent'), seg(' select · ', 'muted'), seg('enter', 'accent'), seg(' confirm · ', 'muted'),
+          seg('y/n', 'accent'), seg(' · ', 'muted'), seg('esc', 'accent'), seg(' reject', 'muted')],
       ];
       return linesText(lines, colorDepth);
     });
@@ -1351,7 +1379,7 @@ export class AgentSession {
         this.thread = undefined;
         return 'That thread no longer exists · your next message starts a new one';
       case 'TurnInProgress':
-        return `${this.thread?.agentId ?? 'The agent'} is still working on the last request · enter on an empty :: to watch`;
+        return `${this.thread ? this.nameOf(this.thread.agentId) : 'The agent'} is still working on the last request · empty the line, then ${SEE}`;
       case 'DaemonDisconnected':
         return "Lost the connection to Shelly's background service · try again";
       default:

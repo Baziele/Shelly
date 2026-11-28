@@ -48,7 +48,7 @@ export interface PromptViewPlacement {
   readonly mode?: PromptMode;
   /** Fast mode, opened from a half-typed command: the command being rewritten. */
   readonly rewriting?: string;
-  /** Right-aligned, muted: where `::` will go (`claude · new thread`). */
+  /** Right-aligned, muted: where `::` will go (`Claude Code · new thread`). */
   readonly hint?: string;
   /** Enter on an empty input submits `''` (to watch a running turn) instead of closing. */
   readonly submitEmpty?: boolean;

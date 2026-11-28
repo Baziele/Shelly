@@ -123,7 +123,7 @@ describe('UI demo in a real terminal', { timeout: 120_000 }, () => {
     const failed = contentLines(await runDemo('error-turn', { cols: 80, rows: 24 }));
     const end = failed.findLastIndex((line) => line.startsWith('✗ '));
     assert.match(failed[end] ?? '', /^✗ claude-agent-acp exited unexpectedly \(code 1\): API connection lost · \d+s$/, failed.join('\n'));
-    assert.match(failed[end + 1] ?? '', /^ {2}Try again, or check `\S+` on its own\.$/);
+    assert.match(failed[end + 1] ?? '', /^ {2}Try again, or check that .+ works on its own\.$/);
     assert.deepEqual(failed.slice(end + 2).filter((line) => line.trim() !== ''), [], 'nothing after the hint but the blank row');
     const stopped = contentLines(await runDemo('cancelled-turn', { cols: 80, rows: 24 }));
     assert.match(stopped.at(-1)!, /^◼ Stopped · \d+s$/);

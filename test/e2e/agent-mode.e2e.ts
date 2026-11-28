@@ -28,7 +28,7 @@ const failureBeforePrompt = (lines: string[], pattern: RegExp): void => {
   const last = lastPromptRow(lines);
   const screen = `screen:\n${lines.join('\n')}`;
   assert.equal(lines[last - 1]?.trim(), '', `a blank row above the prompt; ${screen}`);
-  assert.match(lines[last - 2] ?? '', /Try again, or check `\w+` on its own\./, `the hint above it; ${screen}`);
+  assert.match(lines[last - 2] ?? '', /Try again, or check that .+ works on its own\./, `the hint above it; ${screen}`);
   assert.ok(lines.slice(Math.max(0, last - 6), last - 2).some((line) => pattern.test(line)), `the failure above that; ${screen}`);
 };
 
@@ -86,7 +86,7 @@ for (const shell of E2E_SHELLS) {
       await driver.waitForText(/^first-command$/m);
 
       await driver.type('::');
-      await driver.waitForText(/fake · new thread/, { timeoutMs: 15_000 });
+      await driver.waitForText(/Fake Agent · new thread/, { timeoutMs: 15_000 });
       await driver.press('esc');
       await driver.waitFor(atPrompt, 'the prompt back');
 
@@ -102,7 +102,7 @@ for (const shell of E2E_SHELLS) {
       await driver.type('echo second-command\r');
       await driver.waitForText(/^second-command$/m);
       await driver.type('::');
-      await driver.waitForText(/fake · “show me markdown”/);
+      await driver.waitForText(/Fake Agent · “show me markdown”/);
       await driver.type('echo it back');
       await driver.press('enter');
       await waitForTurnEnd(driver, 'echo it back', '✓');
@@ -124,7 +124,7 @@ for (const shell of E2E_SHELLS) {
         await driver.waitForText(':: Ask Shelly', { timeoutMs: 10_000 });
         await driver.type(text);
         await driver.press('enter');
-        await driver.waitForText('fake wants to: Edit .env.example', { timeoutMs: TURN_MS });
+        await driver.waitForText('Fake Agent wants to: Edit .env.example', { timeoutMs: TURN_MS });
         await driver.waitForText(/Waiting for you/);
         // A prompt ignores keys for its first 300 ms on screen, so a key typed ahead cannot answer it.
         await sleep(500);
@@ -151,10 +151,10 @@ for (const shell of E2E_SHELLS) {
       await driver.waitForText('Running make', { timeoutMs: TURN_MS });
       await driver.press('esc');
       lines = await driver.waitFor(
-        (rows) => rows.some((row) => row.includes('fake is still working')) && atPrompt(rows),
+        (rows) => rows.some((row) => row.includes('Fake Agent is still working')) && atPrompt(rows),
         'the note and the prompt back at once',
       );
-      promptRightAfter(lines, /fake is still working/);
+      promptRightAfter(lines, /Fake Agent is still working/);
 
       // The shell is the user's again while the agent works.
       await driver.type('echo meanwhile\r');
@@ -162,13 +162,13 @@ for (const shell of E2E_SHELLS) {
 
       // A second request while it runs is refused, keeping what was typed, and says how to watch.
       await driver.type('::');
-      await driver.waitForText(/● fake is working · enter to watch/);
+      await driver.waitForText(/● Fake Agent is working · enter to see/);
       await driver.type('another question\r');
-      await driver.waitForText(/still working on your last request · empty the line and press enter to watch/);
+      await driver.waitForText(/still working on your last request · empty the line, then enter to see/);
       lines = await driver.lines();
       assert.match(lines[lastPromptRow(lines)] ?? '', /^\$ :: another question/, 'the input stays, with the text');
       await driver.press('backspace', 'another question'.length);
-      await driver.waitForText(/● fake is working · enter to watch/);
+      await driver.waitForText(/● Fake Agent is working · enter to see/);
       await driver.press('enter');
       lines = await driver.waitFor(
         (rows) => rows.some((row) => row.includes(':: marathon build · watching')) && rows.some((row) => row.includes('The build passed'))
@@ -212,7 +212,7 @@ for (const shell of E2E_SHELLS) {
       promptRightAfter(await driver.lines(), /✓ /);
 
       // A turn that ends with nothing said says so, rather than a bare ✓, and the prompt follows right after.
-      const lines = await ask(driver, 'say nothing', 'fake ended the turn without a reply');
+      const lines = await ask(driver, 'say nothing', 'Fake Agent ended the turn without a reply');
       assert.ok(!lines.slice(lines.findLastIndex((line) => line.includes(':: say nothing'))).some((line) => /^[✓◼] /.test(line)), lines.join('\n'));
       promptRightAfter(lines, /\S/);
     });

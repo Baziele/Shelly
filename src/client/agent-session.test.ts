@@ -85,10 +85,16 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
   } as unknown as FlowHost;
   const session = new AgentSession(host);
   const open: OpenInput = { trigger: '::', mode: 'agent', rewrite: undefined };
-  return { session, open, calls, released, written: () => written, picker: () => picker, claimed: () => claimed, live, keys: (data: string) => keys?.(data) };
+  return { session, open, calls, released, written: () => written, picker: () => picker, claimed: () => claimed, live, keys: (data: string) => keys?.(data), client: () => Promise.resolve(client) };
 };
 
 describe('AgentSession', () => {
+  it('names the agent as the user knows it, not by its id', async () => {
+    const t = setup();
+    await t.session.connected(await t.client());
+    assert.equal(t.session.openOptions().hint, 'Fake · new thread');
+  });
+
   it('gives the terminal back, with the error inline, when printing fails after it took it', async () => {
     const t = setup({ environment: () => Promise.reject(new Error('the environment is gone')) });
     t.session.submit(t.open, '/context');

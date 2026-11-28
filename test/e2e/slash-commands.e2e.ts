@@ -51,21 +51,21 @@ for (const shell of E2E_SHELLS) {
 
       // The agent names the thread itself.
       await ask(driver, 'please name yourself');
-      await open(driver, /fake · “Agent picked title”/);
+      await open(driver, /Fake Agent · “Agent picked title”/);
 
       // A rename sticks, even when the agent names it again.
       await driver.type('/rename Fixing the build\r');
-      await driver.waitForText(/fake · “Fixing the build”/);
+      await driver.waitForText(/Fake Agent · “Fixing the build”/);
       await close(driver);
       await ask(driver, 'name yourself again');
-      await open(driver, /fake · “Fixing the build”/);
+      await open(driver, /Fake Agent · “Fixing the build”/);
 
       // /new: the next message starts another thread.
       await driver.type('/new\r');
-      await driver.waitForText(/fake · new thread/);
+      await driver.waitForText(/Fake Agent · new thread/);
       await close(driver);
       await ask(driver, 'show me markdown');
-      await open(driver, /fake · “show me markdown”/);
+      await open(driver, /Fake Agent · “show me markdown”/);
 
       // /threads: both, most recent first; pick the first one back.
       await driver.type('/threads\r');
@@ -78,7 +78,7 @@ for (const shell of E2E_SHELLS) {
       await driver.waitFor((rows) => !rows.some((row) => row.includes('show me markdown ')) || rows.filter((row) => /Fixing the build|show me markdown/.test(row)).length === 1, 'the filter');
       await driver.press('enter');
       lines = await driver.waitFor(
-        (rows) => rows.some((row) => /── “Fixing the build” · fake ·/.test(row)) && atPrompt(rows),
+        (rows) => rows.some((row) => /── “Fixing the build” · Fake Agent ·/.test(row)) && atPrompt(rows),
         'the thread history',
         { timeoutMs: TURN_MS },
       );
@@ -86,7 +86,7 @@ for (const shell of E2E_SHELLS) {
       assert.ok(lines.slice(header).some((row) => row.startsWith(':: name yourself again')), 'the last request');
       assert.ok(lines.slice(header).some((row) => row === 'Named.'), 'and its answer');
       assert.equal(lines[lastPromptRow(lines) - 1]?.startsWith('✓'), true, `the prompt right below:\n${lines.join('\n')}`);
-      await open(driver, /fake · “Fixing the build”/);
+      await open(driver, /Fake Agent · “Fixing the build”/);
       await close(driver);
     });
 
@@ -95,9 +95,9 @@ for (const shell of E2E_SHELLS) {
       const driver = stack.driver;
 
       // /mode before any message: the agent's modes, and only looking leaves no thread behind.
-      await open(driver, /fake · new thread/);
+      await open(driver, /Fake Agent · new thread/);
       await driver.type('/mode\r');
-      await driver.waitForText('Pick a mode for fake', { timeoutMs: TURN_MS });
+      await driver.waitForText('Pick a mode for Fake Agent', { timeoutMs: TURN_MS });
       let lines = await driver.lines();
       for (const mode of ['Default', 'Accept edits', 'Plan']) {
         assert.ok(lines.some((line) => line.includes(mode)), `${mode} is offered:\n${lines.join('\n')}`);
@@ -109,9 +109,9 @@ for (const shell of E2E_SHELLS) {
 
       // Picked now (the input is still open), the mode is set on the thread the next message starts.
       await driver.type('/mode\r');
-      await driver.waitForText('Pick a mode for fake', { timeoutMs: TURN_MS });
+      await driver.waitForText('Pick a mode for Fake Agent', { timeoutMs: TURN_MS });
       await driver.type('plan\r');
-      await driver.waitForText(/fake · Plan · new thread/);
+      await driver.waitForText(/Fake Agent · Plan · new thread/);
 
       // /agent: the agents, the default marked, and why the others can't be used.
       await driver.type('/agent\r');
@@ -125,12 +125,12 @@ for (const shell of E2E_SHELLS) {
       // /here: the next thread lives in the shell's folder.
       await open(driver);
       await driver.type('/here\r');
-      await driver.waitForText(/fake · Plan · new thread here/);
+      await driver.waitForText(/Fake Agent · Plan · new thread here/);
       await close(driver);
       await driver.type('echo early-command\r');
       await driver.waitForText(/^early-command$/m);
       await ask(driver, 'echo where am i');
-      await open(driver, /fake · Plan · “echo where am i”/);
+      await open(driver, /Fake Agent · Plan · “echo where am i”/);
       await driver.type('/threads\r');
       await driver.waitForText('Pick a thread');
       lines = await driver.lines();

@@ -33,7 +33,7 @@ import { hasGapBefore, TurnModel, type Block, type LineBlock, type Phase, type P
 export type AgentViewHost = LiveRegionScreen;
 
 export interface AgentViewOptions {
-  /** Shown in the status line and prompts: `claude`. */
+  /** Shown in the status line and prompts: `Claude Code`. */
   readonly agentName: string;
   /** The shell's working directory; paths are shown relative to it. */
   readonly cwd: string;
@@ -960,6 +960,7 @@ export class AgentView {
           ? [
             { text: '←→ select', priority: 3 },
             { text: 'enter confirm', short: 'enter', priority: 1 },
+            { text: 'y/n', priority: 4 },
             { text: 'esc reject', short: 'esc', priority: 2 },
           ]
           : phase.type === 'stopping'

@@ -65,7 +65,7 @@ describe('Shelly with the real agents', { skip: !enabled && 'set SHELLY_REAL_AGE
 
     // Agent mode on Claude Code.
     await driver.type('::');
-    await driver.waitForText(/claude · new thread/, { timeoutMs: 30_000 });
+    await driver.waitForText(/Claude Code · new thread/, { timeoutMs: 30_000 });
     await driver.type('Reply with exactly the word PONG and nothing else.\r');
     let lines = await driver.waitFor(
       (rows) => rows.some((row) => /^[✓✗◼] /.test(row)) && promptRow(rows) === '$',
