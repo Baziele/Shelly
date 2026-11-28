@@ -252,8 +252,75 @@ describe('LiveRegion with an update that reaches the terminal after a resize', (
     return (await term.lines()).filter((line) => line !== '');
   };
 
+  it('takes a confirmation of an update that wrote nothing as news of the resize, not of a late update', async () => {
+    const term = emulate(80, 20);
+    let known = { cols: 80, rows: 20 };
+    const screen = { get size() { return known; }, write: term.screen.write };
+    const region = new LiveRegion(screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 1, col: 1 });
+    const long = `First ${'lorem ipsum '.repeat(5).trim()}`;
+    region.update(rows('committed'), rows('First', 'status', 'hint'));
+    region.acknowledge(80);
+    // The first row grows past 40 columns; the terminal draws it at 80.
+    region.update([], rows(long, 'status', 'hint'));
+    region.acknowledge(80);
+    // Nothing changed: nothing is written, but the view still asks, and the answer comes after the resize.
+    region.update([], rows(long, 'status', 'hint'));
+    await term.flush();
+    term.terminal.resize(40, 20);
+    region.acknowledge(40);
+
+    known = { cols: 40, rows: 20 };
+    region.relayout(await term.cursor());
+    region.update([], rows('First', 'status', 'hint'));
+    region.update(rows('First', 'status', 'hint'), []);
+    region.finish();
+    assert.deepEqual((await term.lines()).filter((line) => line !== ''), ['committed', 'First', 'status', 'hint']);
+  });
+
   it('leaves nothing stale above the live region and keeps committed text', async () => {
     assert.deepEqual(await lateUpdate('First'), ['committed one', 'committed two', 'First', 'Second', 'hint']);
+  });
+});
+
+describe('LiveRegion when the cursor report cannot tell whether the terminal reflowed', () => {
+  /*
+   * A reflowing terminal with scrollback, the live region ending above the
+   * bottom row: xterm.js scrolls the rewrapped rows up instead of moving the
+   * cursor, so the report looks like a terminal that did not reflow.
+   */
+  const scrolledReflow = async (reflows: boolean | undefined, report: boolean) => {
+    const term = emulate(60, 10);
+    for (let line = 1; line <= 30; line++) {
+      term.screen.write(`history ${line}\r\n`);
+    }
+    const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1, reflows });
+    region.start(await term.cursor());
+    const long = `Streaming ${'words that wrap '.repeat(3).trim()}`;
+    region.update(rows('committed'), rows(long, 'second row', 'status', 'hint'));
+    // The region shrinks: blank rows below it now, the cursor above the bottom row.
+    region.update([], rows(long, 'status'));
+    await term.flush();
+    term.terminal.resize(30, 10);
+    region.relayout(report ? await term.cursor() : undefined);
+    region.update([], rows('Streaming', 'status'));
+    region.update(rows('Streaming', 'status'), []);
+    region.finish();
+    return (await term.lines()).filter((line) => line !== '');
+  };
+
+  for (const report of [true, false]) {
+    it(`clears from the live region's true top in a terminal known to reflow, ${report ? 'whatever the report says' : 'without a report'}`, async () => {
+      const lines = await scrolledReflow(true, report);
+      assert.deepEqual(lines.slice(-3), ['committed', 'Streaming', 'status'], lines.join('\n'));
+      assert.equal(lines.filter((line) => line.startsWith('Streaming')).length, 1, lines.join('\n'));
+    });
+  }
+
+  it('in a terminal it does not know, never erases committed text (stale live rows may stay: the safe side)', async () => {
+    const lines = await scrolledReflow(undefined, true);
+    assert.ok(lines.includes('committed'), lines.join('\n'));
+    assert.equal(lines.filter((line) => line === 'history 30').length, 1, lines.join('\n'));
   });
 });
 

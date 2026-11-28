@@ -15,6 +15,13 @@ export interface LiveRegionScreen {
 export interface LiveRegionOptions {
   /** Rows kept free above the live region so the user always sees some context. */
   readonly marginRows?: number;
+  /**
+   * Whether the terminal rewraps rows when it is resized, when that is known
+   * (see terminalReflows). Known, relayout() needs no guess about whether
+   * the rows above the cursor grew; unknown, it guesses from the cursor
+   * report, on the side that never reaches committed text.
+   */
+  readonly reflows?: boolean;
 }
 
 /**
@@ -45,11 +52,14 @@ export class LiveRegion {
   private writtenCols = 0;
   /** The terminal reached the last update only after it was resized (see acknowledge()). */
   private lastArrivedLate = false;
+  /** The last update was written and not acknowledged yet. */
+  private unacknowledged = false;
   /** The screen row the cursor was parked on. */
   private parkedRow = 1;
   private painted: string[] = [];
   private started = false;
   private readonly marginRows: number;
+  private readonly reflows: boolean | undefined;
 
   constructor(
     private readonly screen: LiveRegionScreen,
@@ -57,6 +67,7 @@ export class LiveRegion {
     options: LiveRegionOptions = {},
   ) {
     this.marginRows = options.marginRows ?? 2;
+    this.reflows = options.reflows;
   }
 
   /** The screen row the live region starts on. */
@@ -101,12 +112,11 @@ export class LiveRegion {
   /**
    * Commit `commit` to scrollback, then show `live` below it, in one
    * synchronized update. `live` taller than `maxLiveRows` keeps its tail.
-   * `hold` leaves the synchronized update open, for the next update to
-   * finish: the terminal shows neither half on its own.
+   * Returns whether anything was written: nothing is when nothing changed.
    */
-  update(commit: readonly PaintRow[], live: readonly PaintRow[], { hold = false }: { readonly hold?: boolean } = {}): void {
+  update(commit: readonly PaintRow[], live: readonly PaintRow[]): boolean {
     if (!this.started) {
-      return;
+      return false;
     }
     const { rows } = this.screen.size;
     const shown = live.length > this.maxLiveRows ? live.slice(live.length - this.maxLiveRows) : live;
@@ -121,7 +131,7 @@ export class LiveRegion {
         first++;
       }
       if (first === encoded.length && encoded.length === this.painted.length) {
-        return;
+        return false;
       }
       first = Math.min(first, Math.max(0, encoded.length - 1));
     }
@@ -147,7 +157,7 @@ export class LiveRegion {
       output += content + ansi.resetStyle + (index < written.length - 1 ? '\r\n' : '');
     });
     // Parked in column 1 of the last live row (or on the fresh line after the committed rows).
-    output += '\r' + ansi.autowrapOn + (hold ? '' : ansi.endSynchronizedUpdate);
+    output += '\r' + ansi.autowrapOn + ansi.endSynchronizedUpdate;
     this.screen.write(output);
 
     // Where that left things on screen, for re-anchoring after a resize. Writing past the bottom row
@@ -162,19 +172,50 @@ export class LiveRegion {
     this.parkedRow = this.anchorRow + last;
     this.writtenCols = this.screen.size.cols;
     this.lastArrivedLate = false;
+    this.unacknowledged = true;
+    return true;
+  }
+
+  /** The last update written has been acknowledged (see acknowledge()), so a resize now meets nothing on its way. */
+  get acknowledged(): boolean {
+    return !this.unacknowledged;
   }
 
   /**
-   * The terminal reports it drew the last update at `cols` columns. Another
+   * Take the first `rows` live rows out of the live region as they stand on
+   * screen: committed without writing anything. For rows the terminal has
+   * confirmed it drew at the current width (see acknowledge()), this commits
+   * with nothing on its way to the terminal, so no resize can catch it
+   * half done. The row the cursor is parked on stays live.
+   */
+  promote(rows: number): void {
+    const count = Math.min(rows, this.painted.length - 1);
+    if (!this.started || count <= 0) {
+      return;
+    }
+    this.painted = this.painted.slice(count);
+    this.textAbovePark = this.textAbovePark.slice(count);
+    this.previousTextAbovePark = [];
+    this.anchorRow += count;
+  }
+
+  /**
+   * The terminal reports it drew the last update at `cols` columns (or
+   * never answered: `undefined`). Another
    * width than it was written for means the update reached the terminal
    * after a resize (it was on its way when the terminal reflowed): what the
    * terminal reflowed was then the update before, and relayout() counts that
    * one's rows. A caller that waits for this before each next update knows,
-   * at any resize, exactly which update the terminal reflowed.
+   * at any resize, exactly which update the terminal reflowed. Only the
+   * first acknowledgement after an update counts.
    */
-  acknowledge(cols: number): void {
-    if (this.started) {
-      this.lastArrivedLate = cols !== this.writtenCols;
+  acknowledge(cols: number | undefined): void {
+    // Only the first acknowledgement after an update says when that update arrived. A later one
+    // arrives after it whatever it says. `undefined`: the terminal never answered, so when the update
+    // arrived is not known, and relayout() goes by the cursor report alone.
+    if (this.started && this.unacknowledged) {
+      this.lastArrivedLate = cols !== undefined && cols !== this.writtenCols;
+      this.unacknowledged = false;
     }
   }
 
@@ -190,7 +231,10 @@ export class LiveRegion {
    * instead) is the rewrap counted; otherwise the rows above count one row
    * each, which may leave stale rows but never paints over committed text.
    * (A terminal that does not reflow, with the region on the bottom row, is
-   * the one case still taken as reflowing.)
+   * the one case still taken as reflowing.) A terminal known to reflow (or
+   * not, see LiveRegionOptions.reflows) needs no guess: the cursor follows
+   * its row through a reflow, so moving up by the rewrapped height from
+   * wherever it is lands on the live region's first row, report or not.
    *
    * Without a report (`undefined`), the live region restarts at the row the
    * cursor was parked on: it may leave stale rows above, but it never moves
@@ -211,7 +255,7 @@ export class LiveRegion {
     // the bottom row (where the terminal scrolls content up instead). Anything less, or no report,
     // is ambiguous, and then the count that cannot reach committed text wins: at worst it leaves
     // stale rows above.
-    const reflowed = cursor !== undefined && (grown === 0 || cursor.row - this.parkedRow >= grown || cursor.row >= rows);
+    const reflowed = this.reflows ?? (cursor !== undefined && (grown === 0 || cursor.row - this.parkedRow >= grown || cursor.row >= rows));
     const above = this.textAbovePark.length + (reflowed ? grown : 0);
     // Up from where the terminal kept the cursor (the parked row, wherever its reflow put it), not to
     // a computed row: a frame drawn before the resize reached the terminal may have moved things.
@@ -222,6 +266,7 @@ export class LiveRegion {
     this.textAbovePark = [];
     this.previousTextAbovePark = [];
     this.lastArrivedLate = false;
+    this.unacknowledged = false;
     this.painted = [];
   }
 
