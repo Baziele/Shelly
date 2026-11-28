@@ -138,12 +138,21 @@ After Shelly prints below the prompt (a turn, an answer), the cursor sits
 at the start of an empty line, while the shell's line editor still thinks
 it is at the end of its prompt further up. Enter on the empty line makes
 every shell move down one line from where it thinks it is and draw a new
-prompt, so Shelly first moves the cursor up onto its last line: the new
-prompt lands right under the output, with no blank line. Keys typed
-meanwhile and a line to put back wait until the shell has drawn that
-prompt (its `cwd` marker, then output): sent sooner, the terminal driver
-would echo them. Output the idle shell made meanwhile (a prompt redrawn on
-a resize) is dropped, since the new prompt replaces it.
+prompt. Everything the shell writes before that prompt's `cwd` marker
+(its newline, a late repaint of the old prompt, as fish 3 does after a
+resize) is drawn relative to the old position, so Shelly drops it, and the
+prompt lands on the empty line right under the output, however late the
+rest comes. Output the idle shell made while Shelly drew is dropped for the
+same reason. A shell without hooks has no marker: the cursor goes up onto
+the last printed line first, so the shell's newline brings it back down.
+Keys typed meanwhile and a line to put back wait until the prompt is
+drawn: sent sooner, the terminal driver would echo them. Only printable
+text is replayed (a stale Enter or arrow must not act on the next
+command); Ctrl-C reaches the shell at once.
+
+Shelly never keeps the terminal: every flow that takes it gives it back
+when it fails, and if Shelly is busy for a few seconds with nothing on
+screen, a watchdog gives the prompt back with a one-line notice.
 
 ## Rendering
 
@@ -169,10 +178,10 @@ recorded event sequences from `test/fixtures/thread-events/` through them.
 - Nothing slows the shell: no extra work before the prompt, none per keystroke
   or per byte of output beyond what the hooks need.
 - Heavy modules (Effect, OpenTUI, the daemon connection) load after the shell
-  starts. The daemon is started at the first prompt; its connection (Effect)
-  loads once the terminal has been quiet for a moment, so module loading
-  never lands on a keystroke. Without a daemon, Shelly is a plain shell and
-  `::` says why.
+  starts. The daemon is started at the first prompt; its connection (Effect,
+  about 120 ms of synchronous module loading) loads once the terminal has
+  been quiet for 300 ms. That is best effort: a key pressed during the load
+  waits for it. Without a daemon, Shelly is a plain shell and `::` says why.
 - The daemon starts in the background when a client first runs, warms the
   agent while the user is still typing, and keeps one lean fast-mode process
   warm only for a few minutes after use (each costs about 200 MB).

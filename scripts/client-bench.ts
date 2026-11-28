@@ -6,12 +6,13 @@
  *   feedback  Enter → the first row below the echoed request (agent mode)
  *   memory    the client's RSS after 5 and after 50 agent turns
  *
- *   node --import tsx scripts/client-bench.ts [--entry path/to/src/index.ts] [--runs 10] [--turns 50] [--only startup]
+ *   node --import tsx scripts/client-bench.ts [--entry path/to/src/index.ts] [--runs 10] [--turns 50] [--only startup] [--shell path]
  *
  * --entry points at another checkout's src/index.ts, to compare a branch
  * with main. The checkout must have node_modules. Prints medians.
  */
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { lastPromptRow, type ScenarioDriver } from '../test/tools/scenario.js';
@@ -23,13 +24,16 @@ const { values } = parseArgs({
     runs: { type: 'string', default: '10' },
     turns: { type: 'string', default: '50' },
     only: { type: 'string' },
-    shell: { type: 'string', default: '/bin/zsh' },
+    shell: { type: 'string' },
   },
 });
 
 const runs = Number(values.runs);
 const turns = Number(values.turns);
-const shell = values.shell!;
+/** zsh where there is one, else the user's shell, else bash. */
+const shell = values.shell
+  ?? ['/bin/zsh', '/usr/bin/zsh', process.env.SHELL, '/bin/bash', '/usr/bin/bash'].find((candidate) => candidate && existsSync(candidate))
+  ?? '/bin/sh';
 const command = values.entry
   ? [process.execPath, '--experimental-ffi', '--no-warnings', '--import', import.meta.resolve('tsx'), resolve(values.entry)]
   : undefined;
