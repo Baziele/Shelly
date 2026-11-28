@@ -354,25 +354,40 @@ describe('the daemon failing under the flows', () => {
 });
 
 describe('keys that reach the shell after Shelly had the terminal', () => {
-  it('a multi-line paste during a turn arrives as one paste, newlines inside it', async () => {
+  /** A paste typed during a turn, then the prompt back: what reaches the shell after it. */
+  const pasteDuringTurn = async (rig: Rig) => {
+    await openAgent(rig);
+    await typeKeys(rig, 'hi');
+    rig.type('\r');
+    await until(() => rig.daemon.prompts.length === 1, 'the prompt');
+    const { feed } = rig.daemon.prompts[0]!;
+    feed.push(event({ seq: 1, type: 'turn.started', turnId: 'u1', text: 'hi', at: 0 }));
+    await sleep(30);
+    rig.type('\u001b[200~cd /tmp\nls -la\u001b[201~');
+    feed.push(event({ seq: 2, type: 'message.chunk', turnId: 'u1', messageId: 'm', kind: 'text', text: 'ok' }));
+    feed.push(event({ seq: 3, type: 'turn.ended', turnId: 'u1', stopReason: 'end_turn', error: null, durationMs: 1 }));
+    await until(() => rig.mode() === 'returning', 'the hand-back', 4000);
+    rig.prompt();
+    await until(() => rig.mode() === 'shell', 'the shell');
+    await sleep(20);
+    return rig.toShell.slice(rig.toShell.lastIndexOf('\r') + 1).join('');
+  };
+
+  it('a multi-line paste during a turn, in a shell with bracketed paste on: one paste, newlines inside it', async () => {
     const rig = await startRig();
     try {
-      await openAgent(rig);
-      await typeKeys(rig, 'hi');
-      rig.type('\r');
-      await until(() => rig.daemon.prompts.length === 1, 'the prompt');
-      const { feed } = rig.daemon.prompts[0]!;
-      feed.push(event({ seq: 1, type: 'turn.started', turnId: 'u1', text: 'hi', at: 0 }));
-      await sleep(30);
-      rig.type('\u001b[200~cd /tmp\nls -la\u001b[201~');
-      feed.push(event({ seq: 2, type: 'message.chunk', turnId: 'u1', messageId: 'm', kind: 'text', text: 'ok' }));
-      feed.push(event({ seq: 3, type: 'turn.ended', turnId: 'u1', stopReason: 'end_turn', error: null, durationMs: 1 }));
-      await until(() => rig.mode() === 'returning', 'the hand-back', 4000);
-      rig.prompt();
-      await until(() => rig.mode() === 'shell', 'the shell');
-      await sleep(20);
-      const sent = rig.toShell.slice(rig.toShell.lastIndexOf('\r') + 1).join('');
-      assert.equal(sent, '\u001b[200~cd /tmp\nls -la\u001b[201~');
+      rig.shellOutput('\u001b[?2004h');
+      assert.equal(await pasteDuringTurn(rig), '\u001b[200~cd /tmp\nls -la\u001b[201~');
+    } finally {
+      await rig.stop();
+    }
+  });
+
+  it('a multi-line paste during a turn, in a shell without bracketed paste (bash 3.2): one line of text, nothing run', async () => {
+    const rig = await startRig({ features: 'clear,jump' });
+    try {
+      assert.equal(await pasteDuringTurn(rig), 'cd /tmp ls -la');
+      assert.deepEqual(rig.executed, []);
     } finally {
       await rig.stop();
     }

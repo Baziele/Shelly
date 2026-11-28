@@ -55,6 +55,12 @@ const BUSY_WATCHDOG_MS = Number(process.env.SHELLY_BUSY_WATCHDOG_MS) > 0 ? Numbe
 /** Longest Shelly waits for a prompt it asked for before carrying on anyway. */
 const PROMPT_WAIT_MS = Number(process.env.SHELLY_PROMPT_WAIT_MS) > 0 ? Number(process.env.SHELLY_PROMPT_WAIT_MS) : 1500;
 const NO_HOOKS_PROMPT_WAIT_MS = 100;
+/**
+ * Longest keys wait while Shelly sets the shell's line (see returnAfter);
+ * the line editor's own requests give up after a second, but may queue.
+ */
+const LINE_SET_WAIT_MS = Number(process.env.SHELLY_LINE_SET_WAIT_MS) > 0 ? Number(process.env.SHELLY_LINE_SET_WAIT_MS) : 2500;
+const BELL = '\u0007';
 /** Moves the cursor up one row: onto the last line Shelly printed, which the shell's newline then leaves. */
 const CURSOR_UP = '\u001b[A';
 
@@ -121,11 +127,13 @@ const PASTE_END = '\u001b[201~';
 
 /**
  * Keys typed while Shelly had the terminal, as they may reach the shell:
- * printable text, and bracketed pastes whole (the shell inserts a paste,
- * newlines included, without running it). Never a key that acts: Enter,
- * arrows, control keys.
+ * printable text, never a key that acts (Enter, arrows, control keys).
+ * A bracketed paste goes whole only when `pastes` (the shell has bracketed
+ * paste on now: it inserts a paste, newlines included, without running
+ * it). Otherwise its markers would be text and its newlines Enter, so it
+ * goes as one line of text, newlines and tabs made spaces.
  */
-export const replayable = (text: string): string => {
+export const replayable = (text: string, { pastes }: { readonly pastes: boolean }): string => {
   let kept = '';
   let rest = text;
   for (;;) {
@@ -134,7 +142,9 @@ export const replayable = (text: string): string => {
     if (start < 0 || end < 0) {
       return kept + printableOnly(rest);
     }
-    kept += printableOnly(rest.slice(0, start)) + rest.slice(start, end + PASTE_END.length);
+    const pasted = rest.slice(start + PASTE_START.length, end);
+    kept += printableOnly(rest.slice(0, start))
+      + (pastes ? PASTE_START + pasted + PASTE_END : printableOnly(pasted.replace(/\r\n|[\r\n\t]/g, ' ')));
     rest = rest.slice(end + PASTE_END.length);
   }
 };
@@ -655,7 +665,8 @@ export class Shelly {
       const rewrite = this.open?.rewrite;
       this.open = undefined;
       if (rewrite) {
-        void this.putLineBack(rewrite).then(() => this.replayTyped(typed));
+        // Keys typed while the line goes back wait for it, as in release.
+        this.returnAfter(this.putLineBack(rewrite), (set) => this.replayTyped(typed, '', { pastes: set }));
       } else {
         this.replayTyped(typed, trigger);
       }
@@ -726,8 +737,8 @@ export class Shelly {
    * the shell: Ctrl-C still interrupts; after it, or without it, only the
    * text goes (see replayable), straight to the line, unexecuted.
    */
-  private replayTyped(typed: string, prefix = ''): void {
-    if (!typed && !prefix) {
+  private replayTyped(typed: string, prefix = '', { pastes = true }: { readonly pastes?: boolean } = {}): void {
+    if (this.disposed || (!typed && !prefix)) {
       return;
     }
     // A key erases bash 3.2's notice before it reaches the shell, replayed or not.
@@ -737,7 +748,7 @@ export class Shelly {
       this.shell.write(INTERRUPT);
       this.detector.markLineEmpty();
     }
-    const text = (interrupt >= 0 ? '' : prefix) + replayable(typed.slice(interrupt + 1));
+    const text = (interrupt >= 0 ? '' : prefix) + this.replayable(typed.slice(interrupt + 1), { pastes });
     if (text) {
       this.detector.markLineUnknown();
       this.writeToShell(text);
@@ -769,7 +780,7 @@ export class Shelly {
       ? await editor.notify(LINE_UNREADABLE).then(() => true, () => false)
       : false;
     if (!shown && !this.disposed) {
-      this.host.write('\u0007');
+      this.host.write(BELL);
     }
   }
 
@@ -786,7 +797,7 @@ export class Shelly {
       return;
     }
     if (!found.end) {
-      this.host.write('\u0007');
+      this.host.write(BELL);
       return;
     }
     const drawn = drawBelowLine(LINE_NOT_READABLE_HERE, found.end, this.host.size);
@@ -848,13 +859,55 @@ export class Shelly {
     void this.openOverlay('__', this.queuedInput, { captured });
   }
 
-  /** Put back the line a rewrite took, if it took one. */
-  private putLineBack(rewrite: NonNullable<OpenInput['rewrite']>): Promise<void> {
+  /** Put back the line a rewrite took, if it took one; rejects if the shell would not take it. */
+  private putLineBack(rewrite: NonNullable<OpenInput['rewrite']>): Promise<void> | undefined {
     if (!rewrite.captured.buffer) {
-      return Promise.resolve();
+      return undefined;
     }
     this.detector.markLineUnknown();
-    return this.lineEditor?.restore(rewrite.captured).catch(() => undefined) ?? Promise.resolve();
+    return this.lineEditor?.restore(rewrite.captured);
+  }
+
+  /** Keys typed for Shelly, as the shell may take them now (see replayable). */
+  private replayable(text: string, { pastes = true }: { readonly pastes?: boolean } = {}): string {
+    return replayable(text, { pastes: pastes && this.lineEditor?.takesPastes === true });
+  }
+
+  /**
+   * Back to the shell once Shelly has set its line (`lineSet`, if any):
+   * keys typed meanwhile wait (mode `returning`), since they would land
+   * under the set and be overwritten. Then `then` runs, and the keys follow.
+   * A set that fails, or takes longer than LINE_SET_WAIT_MS, never keeps
+   * the user out: the keys go on anyway, as printable text only.
+   */
+  private returnAfter(lineSet: Promise<unknown> | undefined, then?: (set: boolean) => void): void {
+    if (!lineSet) {
+      this.backToShell(true, then);
+      return;
+    }
+    this.mode = 'returning';
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), LINE_SET_WAIT_MS);
+      timer.unref?.();
+    });
+    void Promise.race([lineSet.then(() => true, () => false), timedOut]).then((set) => {
+      clearTimeout(timer);
+      this.backToShell(set, then);
+    });
+  }
+
+  private backToShell(set: boolean, then?: (set: boolean) => void): void {
+    if (this.disposed) {
+      return;
+    }
+    this.mode = 'shell';
+    then?.(set);
+    const typed = this.replayable(this.queuedInput, { pastes: set });
+    this.queuedInput = '';
+    if (typed) {
+      this.handleInput(typed);
+    }
   }
 
   /**
@@ -947,26 +1000,17 @@ export class Shelly {
         } else {
           this.detector.markLineTyped([...line.text].length);
         }
-        lineSet = this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
+        lineSet = this.lineEditor?.replace(line.text).catch((error: unknown) => {
+          if (!this.disposed) {
+            this.host.write(BELL);
+          }
+          throw error;
+        });
       } else if (rewrite) {
         lineSet = this.putLineBack(rewrite);
       }
       this.flushHeldShellOutput();
-      const replay = (): void => {
-        this.mode = 'shell';
-        const typed = replayable(this.queuedInput);
-        this.queuedInput = '';
-        if (typed) {
-          this.handleInput(typed);
-        }
-      };
-      if (lineSet) {
-        // Keys typed meanwhile go after the line is set, not under it (where the set would overwrite them).
-        this.mode = 'returning';
-        void lineSet.then(replay);
-      } else {
-        replay();
-      }
+      this.returnAfter(lineSet);
     };
 
     if (cursor === 'prompt') {

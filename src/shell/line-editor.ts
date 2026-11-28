@@ -279,6 +279,16 @@ export class LineEditor {
   }
 
   /**
+   * The shell is at its prompt with bracketed paste on (`ESC[?2004h`, and no
+   * `ESC[?2004l` since): a paste sent to it now is inserted, newlines and
+   * all, and never run. Off in bash 3.2, in a shell that turned it off, and
+   * between a command and the next prompt.
+   */
+  get takesPastes(): boolean {
+    return this.bracketedPaste && this.isAtPrompt;
+  }
+
+  /**
    * The shell has taken an Enter at its prompt and not yet said what it did:
    * started a command, drawn a new prompt, or (by staying quiet) neither.
    */
