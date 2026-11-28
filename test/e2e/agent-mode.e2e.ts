@@ -38,7 +38,16 @@ const ask = async (driver: ScenarioDriver, text: string, done: RegExp | string =
   await driver.waitForText(':: Ask Shelly', { timeoutMs: 10_000 });
   await driver.type(text);
   await driver.press('enter');
-  return waitForTurnEnd(driver, text, done);
+  await waitForTurnEnd(driver, text, done);
+  return promptLineStaysEmpty(driver);
+};
+
+/** The prompt after a turn holds nothing but the prompt, also a moment later (a stray terminal reply would show up as `3R`). */
+const promptLineStaysEmpty = async (driver: ScenarioDriver): Promise<string[]> => {
+  await sleep(300);
+  const lines = await driver.lines();
+  assert.equal(lines[lastPromptRow(lines)]?.trimEnd(), '$', `the prompt line holds only the prompt:\n${lines.join('\n')}`);
+  return lines;
 };
 
 const waitForTurnEnd = (driver: ScenarioDriver, text: string, done: RegExp | string): Promise<string[]> =>
@@ -160,6 +169,19 @@ for (const shell of E2E_SHELLS) {
       );
       promptRightAfter(lines, /✓ /);
       assertClean(lines);
+    });
+
+    it('leaves nothing on the prompt line after a turn, however fast the request is typed', async () => {
+      const driver = await start();
+      for (let turn = 1; turn <= 3; turn++) {
+        // All at once, as a paste (or a fast typist over a slow link) delivers it.
+        await driver.type(`::turn ${turn}\r`, { perCharDelayMs: 0 });
+        await waitForTurnEnd(driver, `turn ${turn}`, '✓');
+        await promptLineStaysEmpty(driver);
+      }
+      await driver.type('echo still clean\r');
+      await driver.waitForText(/^still clean$/m);
+      assert.ok(!(await driver.lines({ scrollback: true })).some((line) => /command not found|\d+R$/.test(line)), 'no reply ran as a command');
     });
 
     it('keeps the whole of a long answer in scrollback, in order, with nothing stray', async () => {
