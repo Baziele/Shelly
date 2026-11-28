@@ -7,8 +7,18 @@ Recorded JSON-RPC traffic between a client and two real ACP agents:
   on the `haiku` model.
 - `opencode/`: `opencode acp` from OpenCode 2.4.1, on `opencode-go/hy4-flash-free`.
 
-All of them come from `scripts/acp-probe.ts`, speaking ACP v1
-(`protocolVersion: 1`).
+Two recorders:
+
+- `scripts/acp-probe.ts` speaks plain ACP v1 (`protocolVersion: 1`). Most
+  fixtures come from it.
+- `scripts/acp-record.ts` drives Shelly's own `AgentRuntime` and records what its
+  client exchanges: the `shelly-*` fixtures. Shelly's client sends a hybrid
+  `initialize` that negotiates **ACP v2 with Claude Code** (v1 with OpenCode), so
+  these are what Shelly really sees from Claude: v2 diffs (`changes` plus a git
+  `patch`), terminal output in `terminal_update` session updates (base64), and a
+  turn that ends with a `state_update` (`idle`, `stopReason`, `error`) instead of
+  a prompt response. Its session runs in one folder with the project as an
+  additional directory, like a thread in Shelly's home.
 
 ## Format
 
@@ -42,6 +52,9 @@ tool-call ids and message ids are random and kept.
 
 | Fixture | What it shows |
 | --- | --- |
+| `claude/shelly-write` | Through Shelly's client (v2): a Write of a new file in the additional directory, in Claude's default mode (Auto here, so no permission prompt). The content is a v2 `diff`: `changes: [{operation: "add"}]` and a git patch. |
+| `claude/shelly-bash` | Through Shelly's client (v2): the `bash` command. The tool's content names a `terminal`; the output (with CRLF line ends) and `exitStatus` come in `terminal_update` session updates, some before the tool call. |
+| `claude/shelly-signed-out` | Through Shelly's client (v2), signed out: `session/new` succeeds, `auth/status_update` says `unauthenticated`, and the turn ends with `state_update` idle, `stopReason: "error"`, `error: {code: -32000}`. |
 | `init` | `initialize` and `session/new` with `fs` client capabilities, then the notifications that follow setup (`available_commands_update`; for Claude also `_auth/status_update` and `auth/status_update`). |
 | `claude/init-caps-none` | The same with no client capabilities. claude-agent-acp answers `initialize` identically. |
 | `init-lean` | Claude: `session/new` with tools, settings and MCP off, a `systemPrompt` override and haiku. OpenCode: selecting the `shelly-fast` agent defined in the probe directory's `opencode.json`. |
@@ -58,6 +71,16 @@ tool-call ids and message ids are random and kept.
 
 ## Re-recording
 
+```sh
+node --import tsx scripts/acp-record.ts --agent claude --scenario write        # one haiku prompt
+node --import tsx scripts/acp-record.ts --agent claude --scenario bash         # one haiku prompt
+node --import tsx scripts/acp-record.ts --agent claude --scenario signed-out   # no model call
+```
+
+`signed-out` points HOME and CLAUDE_CONFIG_DIR at an empty folder, so Claude Code
+refuses the prompt before calling a model. The sanitizer (`scripts/acp-sanitize.ts`,
+shared by both recorders) also decodes v2's base64 terminal output to scrub it.
+
 Every scenario except `init` sends one to three tiny prompts to a small model,
 which costs a little.
 
@@ -69,7 +92,7 @@ node --import tsx scripts/acp-probe.ts --agent claude --scenario init --caps non
 node --import tsx scripts/acp-probe.ts --agent claude --scenario bash --caps shelly --claude-exe "$(command -v claude)"
 ```
 
-The scenarios are `init`, `simple`, `tool`, `bash`, `permission-allow`,
+The scenarios are `init`, `simple`, `tool`, `bash`, `write`, `permission-allow`,
 `permission-reject`, `external`, `cancel` and `resume`. `latency` and `rss`
 print measurements without writing a fixture. Each run prints a JSON report
 on stdout and writes `test/fixtures/acp/<agent>/<scenario>[-lean][-caps-<caps>].ndjson`.
