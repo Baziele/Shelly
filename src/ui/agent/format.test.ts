@@ -12,6 +12,7 @@ import {
   fitHints,
   formatStatus,
   formatSummary,
+  UNKNOWN_AGENT,
   formatTool,
   relativeTime,
   shortenPath,
@@ -256,6 +257,11 @@ describe('status and summary', () => {
     assert.deepEqual(lines, ['✗ API connection lost · 3s', '  Try again, or check `claude` on its own.', '']);
     const interrupted = formatSummary({ stopReason: 'interrupted', error: null, durationMs: 500 }, { toolCount: 0, produced: true, noticed: false }, context).map(lineText);
     assert.equal(interrupted[0], '✗ Interrupted: claude stopped unexpectedly · <1s');
+  });
+
+  it('gives a turn that failed before any agent ran neither a time nor a hint about an agent', () => {
+    const lines = formatSummary({ stopReason: 'error', error: 'No agent is set up.', durationMs: 5 }, { toolCount: 0, produced: false, noticed: false }, { ...context, agentName: UNKNOWN_AGENT }).map(lineText);
+    assert.deepEqual(lines, ['✗ No agent is set up.', '']);
   });
 
   it('wraps a long error instead of cutting off its end', () => {

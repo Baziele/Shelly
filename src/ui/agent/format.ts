@@ -514,15 +514,20 @@ export interface SummaryFacts {
  * blank row before the prompt. A turn that showed nothing but a notice
  * leaves no footer at all.
  */
+/** The name shown when no agent is known: a turn that failed before any agent ran (none is set up, say). */
+export const UNKNOWN_AGENT = 'agent';
+
 export const formatSummary = (outcome: TurnOutcome, facts: SummaryFacts, context: FormatContext): Line[] => {
   const time = formatDuration(outcome.durationMs);
   const agent = context.agentName;
+  // Without an agent, there is no run to time and no agent to check: the message says it all.
+  const ran = agent !== UNKNOWN_AGENT;
   const error = outcome.error ? oneLine(outcome.error) : undefined;
   const muted = (text: string): Line[] => wrapMessage([], text, { tone: 'muted' }, context.width);
   const hint = fitLine([seg(`  Try again, or check \`${agent}\` on its own.`, 'muted')], context.width);
   const failed = (text: string, withHint: boolean): Line[] => [
-    ...wrapMessage([seg('✗ ', 'error', { bold: true })], `${text} · ${time}`, { tone: 'error' }, context.width),
-    ...(withHint ? [hint] : []),
+    ...wrapMessage([seg('✗ ', 'error', { bold: true })], ran ? `${text} · ${time}` : text, { tone: 'error' }, context.width),
+    ...(withHint && ran ? [hint] : []),
     [],
   ];
 

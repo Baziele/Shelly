@@ -2,7 +2,7 @@ import type { ThreadEvent, ThreadEventOf, ToolCall } from '../../protocol/schema
 import type { PaintRow } from '../../render/live-region.js';
 import type { ColorDepth } from '../../render/sgr.js';
 import { displayWidth, truncateEnd } from '../../render/text-width.js';
-import { formatSummary, formatToolSummary, relativeTime, type FormatContext } from './format.js';
+import { formatSummary, formatToolSummary, relativeTime, UNKNOWN_AGENT, type FormatContext } from './format.js';
 import { fitLine, oneLine, seg, type Line } from './lines.js';
 import { lineToPaintRow } from './paint-line.js';
 import { layoutMarkdown, rowsToText } from './static-render.js';
@@ -119,7 +119,7 @@ export const renderHistory = async (events: readonly ThreadEvent[], options: His
   const now = options.now ?? Date.now();
   const maxAnswerRows = options.maxAnswerRows ?? 20;
   const maxTools = options.maxTools ?? 6;
-  const agentName = oneLine(options.agentName) || 'agent';
+  const agentName = oneLine(options.agentName) || UNKNOWN_AGENT;
   const context: FormatContext = { cwd: options.cwd, home: options.home, width: options.width, agentName, spinner: '·' };
   const rows: PaintRow[] = [lineToPaintRow(headerRule({ ...options, agentName }, now))];
   const exchange = lastExchange(events);

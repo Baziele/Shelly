@@ -19,6 +19,7 @@ import {
   formatTool,
   shortToolTitle,
   spinnerFrame,
+  UNKNOWN_AGENT,
   type FormatContext,
 } from './format.js';
 import { parseKeys, PasteFilter, type Key } from './keys.js';
@@ -196,7 +197,7 @@ export class AgentView {
       clearInterval: timers?.clearInterval?.bind(timers) ?? REAL_TIMERS.clearInterval,
     };
     this.pastes = new PasteFilter(this.now);
-    this.agentName = oneLine(options.agentName) || 'agent';
+    this.agentName = oneLine(options.agentName) || UNKNOWN_AGENT;
     this.bufferRows = this.baseBufferRows();
     this.laidOutSize = { ...host.size };
     this.confirmFrames = typeof host.queryWidth === 'function';
@@ -240,7 +241,7 @@ export class AgentView {
 
   /** The agent turned out to be another than the view was made for (it was not known yet). */
   setAgentName(name: string): void {
-    this.agentName = oneLine(name) || 'agent';
+    this.agentName = oneLine(name) || UNKNOWN_AGENT;
     this.schedule();
   }
 
