@@ -55,6 +55,11 @@ export class Flows {
     this.fast.commandStarted();
   }
 
+  /** Something is on screen answering keys (a turn's view). */
+  isDrawing(): boolean {
+    return this.agent.isDrawing();
+  }
+
   /** The terminal was resized while Shelly draws below the prompt. */
   relayout(): void {
     this.agent.relayout();

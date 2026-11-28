@@ -182,9 +182,12 @@ export class FastSession {
     }
     // A shell without Shelly's hooks: show the command to copy rather than type it for the user.
     this.host.claim(() => false);
-    terminal.write(echoText(open.trigger, command, 'fast', colorDepth));
-    terminal.write(plainText("This shell can't take the command on its line; copy it from above.", colorDepth, 'muted'));
-    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+    try {
+      terminal.write(echoText(open.trigger, command, 'fast', colorDepth));
+      terminal.write(plainText("This shell can't take the command on its line; copy it from above.", colorDepth, 'muted'));
+    } finally {
+      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+    }
   }
 
   /** A short answer, printed below the request; then the prompt, with the user's line as it was. */
@@ -192,14 +195,18 @@ export class FastSession {
     const { overlay, terminal, colorDepth } = this.host;
     overlay.close();
     this.host.claim(() => false);
-    terminal.write(echoText(open.trigger, request, 'fast', colorDepth));
-    const text = answer.trim() || '(no answer)';
+    // Whatever happens, the prompt comes back.
     try {
-      terminal.write(await renderAnswer(text, terminal.size.cols, colorDepth));
-    } catch {
-      terminal.write(plainText(text, colorDepth));
+      terminal.write(echoText(open.trigger, request, 'fast', colorDepth));
+      const text = answer.trim() || '(no answer)';
+      try {
+        terminal.write(await renderAnswer(text, terminal.size.cols, colorDepth));
+      } catch {
+        terminal.write(plainText(text, colorDepth));
+      }
+    } finally {
+      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
     }
-    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
   }
 }
 

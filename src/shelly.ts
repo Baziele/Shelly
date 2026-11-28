@@ -10,7 +10,7 @@ import { detectColorDepth, type ColorDepth } from './render/sgr.js';
 import { LineEditor, type CapturedLine, type CaptureResult } from './shell/line-editor.js';
 import { prepareShellIntegration } from './shell/shell-integration.js';
 import { ShellMarkerParser, type ShellOutputSegment } from './shell/shell-markers.js';
-import { ShellSession } from './shell/shell-session.js';
+import { ShellSession, type ShellSessionOptions } from './shell/shell-session.js';
 import type { CursorPosition } from './terminal/cursor-report.js';
 import type { HostTerminal, TerminalSize } from './terminal/host-terminal.js';
 import type { InlineOverlay } from './ui/inline-overlay.js';
@@ -38,8 +38,10 @@ const RESIZE_SETTLE_MS = 50;
 const MARKER_HOLD_MS = 50;
 /** How long the terminal must be quiet (no keys, no output) before the daemon connection loads. */
 const IDLE_MS = 300;
+/** Busy this long with nothing drawing, Shelly gives the prompt back (see armWatchdog). */
+const BUSY_WATCHDOG_MS = Number(process.env.SHELLY_BUSY_WATCHDOG_MS) > 0 ? Number(process.env.SHELLY_BUSY_WATCHDOG_MS) : 5000;
 /** Longest Shelly waits for a prompt it asked for before carrying on anyway. */
-const PROMPT_WAIT_MS = 1500;
+const PROMPT_WAIT_MS = Number(process.env.SHELLY_PROMPT_WAIT_MS) > 0 ? Number(process.env.SHELLY_PROMPT_WAIT_MS) : 1500;
 const NO_HOOKS_PROMPT_WAIT_MS = 100;
 /** Moves the cursor up one row: onto the last line Shelly printed, which the shell's newline then leaves. */
 const CURSOR_UP = '\u001b[A';
@@ -53,7 +55,26 @@ export interface ShellyOptions {
   readonly rewriteHotkeys?: readonly string[];
   /** The daemon connection; tests may pass their own. Loaded after the shell is up otherwise. */
   readonly link?: DaemonLink;
+  /** Test seam: start the shell some other way (a fake). */
+  readonly spawnShell?: (options: ShellSessionOptions) => ShellLike;
 }
+
+/** What Shelly needs of the shell process. */
+export type ShellLike = Pick<ShellSession, 'onData' | 'onExit' | 'write' | 'resize' | 'kill' | 'isShellInForeground'>;
+
+/** Keys that mean something now and never later: Ctrl-C reaches the shell at once; Ctrl-D is dropped. */
+const INTERRUPT = '\u0003';
+const EOF_KEY = '\u0004';
+
+/**
+ * Typed text worth replaying once the shell has its line back: printable
+ * characters only. A stale Enter, Ctrl-C, arrow or escape sequence typed
+ * while Shelly drew could act on the next command.
+ */
+export const printableOnly = (text: string): string =>
+  text
+    .replace(/\u001b\[[0-9;?<>=]*[ -/]*[@-~]|\u001bO.|\u001b[\s\S]?/g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
 
 /**
  * Where keystrokes go.
@@ -76,7 +97,7 @@ type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'busy' | 'returning'
  */
 export class Shelly {
   private readonly host: HostTerminal;
-  private readonly shell: ShellSession;
+  private readonly shell: ShellLike;
   private readonly detector: TriggerDetector;
   private readonly colorDepth: ColorDepth;
   /** Reads the shell hooks' markers; absent for shells without hooks. */
@@ -113,8 +134,16 @@ export class Shelly {
   private triggerHoldTimer: NodeJS.Timeout | undefined;
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
+  private watchdog: NodeJS.Timeout | undefined;
   /** Waiting for the shell to draw the prompt Shelly asked for: then this runs. */
-  private promptWait: { sawCwd: boolean; readonly run: () => void; readonly timer: NodeJS.Timeout } | undefined;
+  private promptWait: {
+    sawCwd: boolean;
+    readonly run: () => void;
+    readonly timer: NodeJS.Timeout;
+    /** Output before the new prompt's marker is dropped (see forwardShellOutput). */
+    readonly dropping: boolean;
+    dropped: string;
+  } | undefined;
 
   constructor(options: ShellyOptions) {
     this.host = options.host;
@@ -135,7 +164,7 @@ export class Shelly {
     this.rewriteHotkeys = options.rewriteHotkeys ?? DEFAULT_REWRITE_HOTKEYS;
     this.markers = integration && new ShellMarkerParser(integration.nonce);
     this.commands = new CommandLog({ columns: () => this.host.size.cols });
-    this.shell = ShellSession.spawn({
+    this.shell = (options.spawnShell ?? ((spawnOptions) => ShellSession.spawn(spawnOptions)))({
       shell: options.shell,
       args: integration?.args ?? [],
       cwd: options.cwd,
@@ -231,8 +260,15 @@ export class Shelly {
         break;
       case 'capturing':
       case 'opening':
-      case 'returning':
         this.queuedInput += data;
+        break;
+      case 'returning':
+        // Ctrl-C means now: it reaches the shell at once. Ctrl-D is dropped
+        // (at an empty prompt it would close the shell); the rest waits.
+        if (data.includes(INTERRUPT)) {
+          this.shell.write(INTERRUPT);
+        }
+        this.queuedInput += data.replaceAll(INTERRUPT, '').replaceAll(EOF_KEY, '');
         break;
       case 'busy':
         if (!this.busyKeys?.(data)) {
@@ -351,6 +387,14 @@ export class Shelly {
   }
 
   private forwardShellOutput(data: string): void {
+    const wait = this.promptWait;
+    if (this.mode === 'returning' && wait?.dropping && !wait.sawCwd) {
+      // Before the new prompt: the shell's own newline, and any repaint of the
+      // old prompt it still had to do (fish 3 after a resize), all drawn
+      // relative to where it thought it was. The new prompt replaces them.
+      wait.dropped += data;
+      return;
+    }
     if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
       this.host.write(data);
     } else {
@@ -498,6 +542,30 @@ export class Shelly {
   private claim(onKeys: (data: string) => boolean): void {
     this.mode = 'busy';
     this.busyKeys = onKeys;
+    this.armWatchdog();
+  }
+
+  /**
+   * The user is never locked out of their shell. While Shelly is busy with
+   * nothing on screen to show for it (no turn drawing: an error lost on the
+   * way, say), it gives the prompt back after BUSY_WATCHDOG_MS, saying so.
+   */
+  private armWatchdog(): void {
+    clearTimeout(this.watchdog);
+    this.watchdog = setTimeout(() => {
+      this.watchdog = undefined;
+      if (this.disposed || this.mode !== 'busy') {
+        return;
+      }
+      if (this.flows?.isDrawing()) {
+        // A turn on screen answers keys itself (Esc, Ctrl-C): look again later.
+        this.armWatchdog();
+        return;
+      }
+      this.host.write(`\r\n\u001b[2m(Shelly lost its place; your prompt is back.)\u001b[0m\r\n`);
+      this.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+    }, BUSY_WATCHDOG_MS);
+    this.watchdog.unref?.();
   }
 
   /**
@@ -506,9 +574,13 @@ export class Shelly {
    * meanwhile (held output, typed keys) in order.
    */
   private release({ cursor, line }: ReleaseOptions): void {
-    if (this.disposed) {
+    // Only what Shelly holds can be given back: a second release (an error
+    // path after the first) must not draw another prompt.
+    if (this.disposed || (this.mode !== 'busy' && this.mode !== 'overlay')) {
       return;
     }
+    clearTimeout(this.watchdog);
+    this.watchdog = undefined;
     const rewrite = this.open?.rewrite;
     this.open = undefined;
     this.busyKeys = undefined;
@@ -542,7 +614,7 @@ export class Shelly {
         this.putLineBack(rewrite);
       }
       this.flushHeldShellOutput();
-      const typed = this.queuedInput;
+      const typed = printableOnly(this.queuedInput);
       this.queuedInput = '';
       if (typed) {
         this.handleInput(typed);
@@ -560,16 +632,23 @@ export class Shelly {
       // Keys sent before the new prompt is up would be echoed by the
       // terminal driver, and a line set then would be lost: wait for it.
       this.mode = 'returning';
-      this.whenPromptReady(finish);
+      this.whenPromptReady(finish, this.markers !== undefined);
       this.freshPrompt();
     }
   }
 
-  private whenPromptReady(run: () => void): void {
+  private whenPromptReady(run: () => void, dropping: boolean): void {
     clearTimeout(this.promptWait?.timer);
     // A shell without hooks never says; give it a moment.
-    const timer = setTimeout(() => this.promptReady(), this.markers ? PROMPT_WAIT_MS : NO_HOOKS_PROMPT_WAIT_MS);
-    this.promptWait = { sawCwd: false, run, timer };
+    const timer = setTimeout(() => {
+      const wait = this.promptWait;
+      if (wait && !wait.sawCwd && wait.dropped) {
+        // No prompt marker came (hooks broken?): show what the shell drew, best effort.
+        this.host.write(wait.dropped);
+      }
+      this.promptReady();
+    }, this.markers ? PROMPT_WAIT_MS : NO_HOOKS_PROMPT_WAIT_MS);
+    this.promptWait = { sawCwd: false, run, timer, dropping, dropped: '' };
   }
 
   private promptReady(): void {
@@ -590,13 +669,19 @@ export class Shelly {
   /**
    * The cursor is at the start of an empty line below Shelly's output, and
    * the shell's line editor still thinks it is at the end of its prompt,
-   * further up. Enter on the empty line makes the shell move down one line
-   * (from where it thinks it is) and draw a new prompt, so the cursor first
-   * goes up onto the last printed line: the prompt lands on the empty line,
-   * with no blank line above it.
+   * further up. Enter on the empty line makes the shell draw a new prompt.
+   *
+   * With hooks, everything the shell writes before the new prompt's marker
+   * (its newline, a late repaint of the old prompt) is dropped, since it is
+   * drawn relative to where the shell thought it was, and the prompt then
+   * lands on the empty line, however late the shell's other output comes.
+   * Without hooks there is no marker: the cursor goes up onto the last
+   * printed line first, so the shell's newline brings it back down.
    */
   private freshPrompt(): void {
-    this.host.write(CURSOR_UP);
+    if (!this.markers) {
+      this.host.write(CURSOR_UP);
+    }
     this.shell.write('\r');
   }
 
@@ -644,6 +729,7 @@ export class Shelly {
     clearTimeout(this.markerHoldTimer);
     clearTimeout(this.warmupTimer);
     clearTimeout(this.promptWait?.timer);
+    clearTimeout(this.watchdog);
     this.lineEditor?.dispose();
     this.overlay?.destroy();
     this.host.stop();
