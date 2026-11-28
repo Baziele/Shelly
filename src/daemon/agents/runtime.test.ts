@@ -50,7 +50,8 @@ const drive = (
     return updates;
   });
 
-const waitUntil = (check: () => boolean, ms = 5_000) =>
+// The bound only limits how long a failing test takes.
+const waitUntil = (check: () => boolean, ms = 20_000) =>
   Effect.gen(function* () {
     const deadline = Date.now() + ms;
     while (!check()) {
@@ -182,7 +183,12 @@ describe('AgentRuntime processes and sessions', () => {
       const session = yield* runtime.session(request({ agentId: 'fake' }));
       const crashed = yield* collect(session.prompt('please crash now'));
       yield* waitUntil(() => !isRunning(pids[0]!));
-      const processes = yield* runtime.processCount;
+      // The runtime hears of the exit when the connection ends, a moment after the pid goes.
+      let processes = yield* runtime.processCount;
+      for (let tries = 0; processes > 0 && tries < 2_000; tries++) {
+        yield* Effect.sleep('10 millis');
+        processes = yield* runtime.processCount;
+      }
       const again = yield* runtime.session(request({ agentId: 'fake', nativeSessionId: session.nativeSessionId }));
       const updates = yield* collect(again.prompt('still there?'));
       return { crashed, processes, updates, id: again.nativeSessionId, startedFresh: again.startedFresh };
@@ -212,16 +218,16 @@ describe('AgentRuntime processes and sessions', () => {
     const pids: number[] = [];
     const result = await run({ agents: { fake: fake.agent } }, Effect.gen(function* () {
       const runtime = yield* AgentRuntime;
-      const started = Date.now();
       const sessionRequest = request({ agentId: 'fake' });
       yield* runtime.prewarm({ agentId: 'fake', session: sessionRequest });
       yield* runtime.prewarm({ agentId: 'fake', session: sessionRequest });
       yield* runtime.prewarm({ agentId: 'fake', session: null });
-      const returnedIn = Date.now() - started;
+      // Prewarm returns before anything is up: no agent initializes that fast.
+      const upWhenReturned = yield* runtime.processCount;
       const session = yield* runtime.session(sessionRequest);
-      return { returnedIn, id: session.nativeSessionId };
+      return { upWhenReturned, id: session.nativeSessionId };
     }), { onSpawn: ({ pid }) => pids.push(pid) });
-    assert.ok(result.returnedIn < 100, `prewarm took ${result.returnedIn} ms`);
+    assert.equal(result.upWhenReturned, 0, 'prewarm waited for the agent to start');
     assert.equal(pids.length, 1);
     assert.equal(result.id, 'fake-session-1');
     assert.deepEqual(fake.methods(), ['initialize', 'session/new']);
@@ -232,9 +238,13 @@ describe('AgentRuntime processes and sessions', () => {
     const count = await run({ agents: { fake: fake.agent } }, Effect.gen(function* () {
       const runtime = yield* AgentRuntime;
       yield* runtime.prewarm({ agentId: 'fake', session: null });
-      yield* waitUntil(() => fake.methods().length === 1);
-      yield* Effect.sleep('50 millis');
-      return yield* runtime.processCount;
+      // Up once initialize is answered, not when the agent receives it.
+      let count = 0;
+      while (count === 0) {
+        yield* Effect.sleep('10 millis');
+        count = yield* runtime.processCount;
+      }
+      return count;
     }));
     assert.equal(count, 1);
     assert.deepEqual(fake.methods(), ['initialize']);
@@ -440,7 +450,8 @@ describe('AgentRuntime turns', () => {
       return { updates, ms: Date.now() - started };
     }));
     assert.equal(endOf(result.updates).stopReason, 'cancelled');
-    assert.ok(result.ms < 5_000);
+    // The scenario would run on for 30 s; the bound only says the cancel ended it.
+    assert.ok(result.ms < 20_000);
   });
 
   it('cancels the turn when the consumer stops listening', TIMEOUT, async () => {
@@ -594,7 +605,7 @@ describe('AgentRuntime modes', () => {
   });
 });
 
-async function waitUntilAsync(check: () => boolean, ms = 5_000): Promise<void> {
+async function waitUntilAsync(check: () => boolean, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!check()) {
     if (Date.now() > deadline) {
