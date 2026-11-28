@@ -9,10 +9,18 @@ import { useModernWidths } from '../../test/tools/unicode.js';
 const row = (text: string): PaintRow => [{ text, width: displayWidth(text), style: { fg: DEFAULT_COLOR, bg: DEFAULT_COLOR, attributes: 0 } }];
 const rows = (...texts: string[]): PaintRow[] => texts.map(row);
 
-/** An emulated terminal: everything written lands in xterm.js, scrollback included. */
-const emulate = (cols: number, height: number, { reflow = true }: { reflow?: boolean } = {}) => {
-  // xterm.js does not reflow in its (deprecated) Windows mode.
-  const terminal = new xterm.Terminal({ cols, rows: height, allowProposedApi: true, scrollback: 1000, ...(reflow ? {} : { windowsMode: true }) });
+/**
+ * An emulated terminal: everything written lands in xterm.js (its headless
+ * engine, not a model of it), scrollback included. How its resizes compare
+ * with other terminals: see test/support/emulated-terminal.ts.
+ */
+const emulate = (cols: number, height: number, { reflow = true, cursorLine = false }: { reflow?: boolean; cursorLine?: boolean } = {}) => {
+  // xterm.js does not reflow in its (deprecated) Windows mode. `cursorLine`: rewrap the cursor's line
+  // too, as VTE and iTerm2 do (xterm.js leaves it by default).
+  const terminal = new xterm.Terminal({
+    cols, rows: height, allowProposedApi: true, scrollback: 1000,
+    ...(reflow ? { reflowCursorLine: cursorLine } : { windowsMode: true }),
+  });
   // Wide characters as modern terminals (and Shelly) measure them.
   useModernWidths(terminal);
   let written = '';
@@ -143,6 +151,22 @@ describe('LiveRegion', () => {
     assert.ok(!term.written().includes('6n'), 'asked the terminal something');
   });
 
+  it('clears and repaints after relayout() in one synchronized update, begun and ended once each', async () => {
+    const term = emulate(40, 10);
+    const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 1, col: 1 });
+    region.update(rows('committed'), rows('live 1', 'live 2', 'status'));
+    const before = term.written().length;
+    region.relayout();
+    assert.equal(term.written().length, before, 'relayout() wrote on its own: the region would show empty until the repaint');
+    region.update([], rows('after'));
+    const repaint = term.written().slice(before);
+    assert.match(repaint, /^\u001b\[\?2026h.*\u001b\[2A\r.*\u001b\[J.*after.*\u001b\[\?2026l$/su);
+    region.finish();
+    const all = term.written();
+    assert.equal(all.split('\u001b[?2026h').length, all.split('\u001b[?2026l').length, 'begins and ends do not match');
+  });
+
   it('keeps a full-width row intact', async () => {
     const term = emulate(10, 4);
     const region = new LiveRegion(term.screen, 'truecolor');
@@ -197,10 +221,14 @@ describe('LiveRegion through a resize', () => {
   const committed = ['history 1', 'history 2', `committed ${'x'.repeat(48)}`, 'committed short'];
   const liveRow = `live ${'y'.repeat(50)}`;
 
-  for (const reflow of [true, false]) {
+  for (const [mode, reflow, cursorLine] of [
+    ['rewrapping (as xterm.js)', true, false],
+    ['rewrapping the cursor\'s line too (as VTE, iTerm2)', true, true],
+    ['not rewrapping', false, false],
+  ] as const) {
     for (const inFlight of [false, true]) {
-      it(`${reflow ? 'rewrapping' : 'not rewrapping'}${inFlight ? ', with an update on its way' : ''}: committed lines stay, nothing is lost, at most the live rows show twice`, async () => {
-        const term = emulate(60, 16, { reflow });
+      it(`${mode}${inFlight ? ', with an update on its way' : ''}: committed lines stay, nothing is lost, at most the live rows show twice`, async () => {
+        const term = emulate(60, 16, { reflow, cursorLine });
         const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1 });
         region.start({ row: 1, col: 1 });
         region.update(rows(...committed), rows(liveRow, 'status'));
@@ -241,6 +269,32 @@ describe('LiveRegion through a resize', () => {
       });
     }
   }
+
+  it('when the terminal rewraps live rows into more rows than were printed, keeps committed rows and leaves at most those rows\' text behind', async () => {
+    const term = emulate(90, 20);
+    const region = new LiveRegion(term.screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 1, col: 1 });
+    const committedRows = ['committed one', `committed ${'c'.repeat(70)}`];
+    // Three live rows of 85 cells above the cursor: at 30 columns each takes 3 rows, 9 in all for 3 printed.
+    const live = ['a', 'b', 'd'].map((letter) => `${letter} ${letter.repeat(83)}`);
+    region.update(rows(...committedRows), rows(...live, 'status'));
+    await term.flush();
+    term.terminal.resize(30, 20);
+    region.relayout();
+    region.update([], rows('repainted', 'status'));
+    region.update(rows('repainted'), []);
+    region.finish();
+    await term.flush();
+    const lines = logicalLines(term.terminal);
+    assert.deepEqual(lines.slice(0, 2), committedRows, lines.join('\n'));
+    assert.equal(lines.at(-1), 'repainted');
+    const leftover = lines.slice(2, -1);
+    // What stayed behind is the top of the rewrapped live rows: their text, no more of it than there was.
+    for (const line of leftover) {
+      assert.ok(live.some((row) => row.startsWith(line)), `${JSON.stringify(line)} was not live:\n${lines.join('\n')}`);
+    }
+    assert.ok(leftover.join('').length <= live.join('').length, lines.join('\n'));
+  });
 
   it('counts wide characters by cell, and leaves committed text alone', async () => {
     const term = emulate(50, 12);

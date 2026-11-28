@@ -45,6 +45,8 @@ export interface LiveRegionOptions {
 export class LiveRegion {
   /** The number of live rows above the parked one, as printed. */
   private rowsAbove = 0;
+  /** relayout() ran: the next update clears the whole region and draws it again. */
+  private redrawAll = false;
   private painted: string[] = [];
   private started = false;
   private readonly marginRows: number;
@@ -96,7 +98,7 @@ export class LiveRegion {
     // The first live row to write: the top when committing, else the first that changed. Every row
     // from there down is written again, so the cursor only ever moves down by writing.
     let first = 0;
-    if (commit.length === 0) {
+    if (commit.length === 0 && !this.redrawAll) {
       while (first < encoded.length && first < this.painted.length && encoded[first] === this.painted[first]) {
         first++;
       }
@@ -130,25 +132,22 @@ export class LiveRegion {
     this.screen.write(output);
     this.painted = encoded;
     this.rowsAbove = Math.max(0, encoded.length - 1);
+    this.redrawAll = false;
   }
 
   /**
-   * After a resize: clear the live region so the caller repaints it at the
-   * new width. Moves up by the live rows above the cursor as they were
-   * printed, the fewest rows they can take now, so committed text is never
+   * After a resize: the next update clears the live region and draws it
+   * again at the new width, in one synchronized update, so the region never
+   * shows empty. It moves up by the live rows above the cursor as they were
+   * printed, the fewest they can take now, so committed text is never
    * reached; if the terminal rewrapped them taller, the top of them stays
-   * behind (see the class comment). Needs nothing from the terminal.
+   * behind (see the class comment). Writes nothing itself, and needs
+   * nothing from the terminal.
    */
   relayout(): void {
-    if (!this.started) {
-      return;
+    if (this.started) {
+      this.redrawAll = true;
     }
-    this.screen.write(
-      (this.rowsAbove > 0 ? ansi.cursorUp(this.rowsAbove) : '') + '\r' + ansi.resetStyle + ansi.eraseDown
-        + ansi.autowrapOn + ansi.endSynchronizedUpdate,
-    );
-    this.rowsAbove = 0;
-    this.painted = [];
   }
 
   /** Erase the live region and leave a visible cursor at its start: a fresh line below everything committed. */
