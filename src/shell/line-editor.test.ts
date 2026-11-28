@@ -128,7 +128,7 @@ describe('LineEditor', () => {
   });
 
   it('says when it cannot capture at all', async () => {
-    assert.deepEqual(await create(['clear', 'redraw']).tryCapture(), { status: 'unsupported' });
+    assert.deepEqual(await create(['clear', 'jump']).tryCapture(), { status: 'unsupported' });
     editor?.dispose();
     const away = create(['capture', 'set']);
     away.handleEvent({ type: 'exec', command: 'vim' });
@@ -205,7 +205,7 @@ describe('LineEditor', () => {
 
   describe('without a way to set the line (bash 3.2)', () => {
     it('clears it and types a single line, control characters removed', async () => {
-      const subject = create(['clear', 'redraw']);
+      const subject = create(['clear', 'jump']);
       assert.equal(subject.canCapture, false);
       assert.equal(subject.canReplace, true);
       await subject.replace('ls\t-la\u0007 😀');
@@ -222,16 +222,39 @@ describe('LineEditor', () => {
       await assert.rejects(subject.replace('one\ntwo'), /single-line/);
     });
 
-    it('can redraw the line in place of capturing it', () => {
-      const subject = create(['clear', 'redraw']);
-      assert.equal(subject.redraw(), true);
-      assert.deepEqual(written, [LINE_KEYS.redraw]);
+    it('moves the cursor to the end of the line and back, done once the output goes quiet', async () => {
+      const subject = create(['clear', 'jump']);
+      assert.equal(subject.canJump, true);
+      assert.equal(subject.canNotify, false);
+      let done = false;
+      const end = subject.jumpToLineEnd().then((moved) => {
+        done = true;
+        return moved;
+      });
+      assert.deepEqual(written, [LINE_KEYS.mark + LINE_KEYS.end], 'remembers the cursor first, at once');
+      // The shell moves the cursor a piece at a time; quiet for the settle time ends it.
+      subject.observeOutput('\r');
+      subject.observeOutput('\u001b[C\u001b[C');
+      assert.equal(done, false);
+      assert.equal(await end, true);
+      assert.equal(await subject.jumpBack(), true, 'with no output at all, the cursor was there already');
+      assert.deepEqual(written, [LINE_KEYS.mark + LINE_KEYS.end, LINE_KEYS.back]);
+    });
+
+    it('moves nothing without the keys, or away from the prompt', async () => {
+      assert.equal(await create(['clear']).jumpToLineEnd(), false);
+      editor?.dispose();
+      const subject = create(['clear', 'jump']);
+      subject.handleEvent({ type: 'exec', command: 'cat' });
+      assert.equal(await subject.jumpToLineEnd(), false);
+      assert.deepEqual(written, []);
     });
   });
 
   it('keeps its private keys from being typed at the prompt, and notes Enter', () => {
     const subject = create(['capture', 'set']);
     assert.equal(subject.filterInput(`a${LINE_KEYS.capture}b${LINE_KEYS.set}\u001b[24~`), 'ab\u001b[24~');
+    assert.equal(subject.filterInput(`a${LINE_KEYS.mark}${LINE_KEYS.end}${LINE_KEYS.back}b`), 'ab', 'bash 3.2 keys too');
     assert.equal(subject.filterInput('\u001b[200~x\ny\u001b[201~'), '\u001b[200~x\ny\u001b[201~');
     assert.equal(subject.isAtPrompt, true, 'a pasted newline is not Enter');
     subject.filterInput('ls\r');
@@ -316,6 +339,6 @@ describe('LineEditor', () => {
     const subject = create([]);
     assert.equal(subject.canCapture, false);
     assert.equal(subject.canReplace, false);
-    assert.equal(subject.redraw(), false);
+    assert.equal(subject.canNotify, false);
   });
 });

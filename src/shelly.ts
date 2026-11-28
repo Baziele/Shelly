@@ -7,6 +7,7 @@ import { CommandLog } from './context/command-log.js';
 import { describeEnvironment, type EnvironmentInfo } from './context/environment.js';
 import { TriggerDetector, type TriggerAction } from './input/trigger-detector.js';
 import { detectColorDepth, type ColorDepth } from './render/sgr.js';
+import { drawBelowLine, eraseBelowLine, type BelowLineNotice } from './shell/below-line.js';
 import { LineEditor, type CapturedLine, type CaptureResult } from './shell/line-editor.js';
 import { prepareShellIntegration } from './shell/shell-integration.js';
 import { ShellMarkerParser, type ShellOutputSegment } from './shell/shell-markers.js';
@@ -27,6 +28,8 @@ export const DEFAULT_REWRITE_HOTKEYS = ['\u001d', '\u001b[93;5u', '\u001b[27;5;9
 
 /** Shown below the line when the rewrite hotkey could not take it. */
 const LINE_UNREADABLE = "Shelly couldn't read the line you were typing; it is left as it was.";
+/** Shown below the line when the rewrite hotkey is pressed in a shell that can never hand its line over (bash 3.2). */
+const LINE_NOT_READABLE_HERE = 'Ctrl+] needs bash 4+ (brew install bash); __ on an empty line opens fast mode.';
 /** How long that notice waits for a busy shell to be back at its prompt; after that, a bell. */
 const NOTICE_WAIT_MS = 5000;
 const NOTICE_POLL_MS = 100;
@@ -135,6 +138,8 @@ export class Shelly {
   private readonly rewriteHotkeys: readonly string[];
   /** What the input was opened for, from the trigger until the shell has its line back. */
   private open: OpenInput | undefined;
+  /** A notice Shelly drew below the shell's line (bash 3.2), erased before the next key. */
+  private noticeBelow: BelowLineNotice | undefined;
   /** Where keys go in `busy` mode; returns whether they were used. */
   private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
@@ -284,6 +289,10 @@ export class Shelly {
 
   private handleInput(data: string): void {
     this.lastActivityAt = Date.now();
+    if (this.noticeBelow) {
+      this.host.write(eraseBelowLine(this.noticeBelow));
+      this.noticeBelow = undefined;
+    }
     switch (this.mode) {
       case 'shell':
         this.handleShellInput(data);
@@ -335,9 +344,9 @@ export class Shelly {
   }
 
   private findRewriteHotkey(data: string): { start: number; end: number } | undefined {
-    // A shell that can neither hand over its line nor redraw it below
-    // Shelly's output gets the key itself.
-    if (!this.lineEditor || !(this.lineEditor.canCapture || this.lineEditor.canRedraw)) {
+    // A shell that can neither hand over its line nor say why not gets the
+    // key itself.
+    if (!this.lineEditor || !(this.lineEditor.canCapture || this.lineEditor.canJump)) {
       return undefined;
     }
     let found: { start: number; end: number } | undefined;
@@ -378,6 +387,8 @@ export class Shelly {
 
   private handleShellOutput(data: string): void {
     this.lastActivityAt = Date.now();
+    // The shell drew: the notice may have moved, or be gone.
+    this.noticeBelow = undefined;
     if (!this.markers) {
       this.forwardShellOutput(data);
       return;
@@ -498,17 +509,19 @@ export class Shelly {
     const editor = this.lineEditor!;
     this.mode = 'capturing';
     this.queuedInput = remainder;
+    // bash 3.2 can never hand its line over. Without it there is nothing to
+    // rewrite (fast mode would not see what the user typed), so the input
+    // does not open there: the line stays as it is, with a notice below.
     if (!editor.canCapture) {
-      // bash 3.2: the line stays on the shell's input line, and is redrawn
-      // below anything Shelly prints.
-      this.onRewriteHotkey(undefined);
-      return;
+      await this.sayNeedsBash4(editor);
     }
-    const result = await editor.tryCapture().catch((): CaptureResult => ({ status: 'failed', reason: 'no-answer' }));
+    const result = editor.canCapture
+      ? await editor.tryCapture().catch((): CaptureResult => ({ status: 'failed', reason: 'no-answer' }))
+      : undefined;
     if (this.disposed) {
       return;
     }
-    if (result.status === 'captured') {
+    if (result?.status === 'captured') {
       this.onRewriteHotkey(result.line);
       return;
     }
@@ -517,7 +530,9 @@ export class Shelly {
     this.mode = 'shell';
     this.detector.markLineUnknown();
     this.flushHeldShellOutput();
-    void this.sayLineUnreadable();
+    if (result) {
+      void this.sayLineUnreadable();
+    }
     const typed = this.queuedInput;
     this.queuedInput = '';
     if (typed) {
@@ -548,23 +563,46 @@ export class Shelly {
   }
 
   /**
-   * The rewrite hotkey was pressed at the prompt. `captured` is the line the
-   * user was typing, now cleared from the shell's input line; undefined when
-   * the shell cannot hand its line over (bash 3.2), which then stays where
-   * it is. Not called when a capture fails: the line is not Shelly's then.
-   * Opens fast mode's input to rewrite it; the line comes back as it was
-   * unless a command takes its place.
+   * bash 3.2: draw the notice below the line the shell keeps. The shell
+   * moves its cursor to the line's end (where the terminal says it is) and,
+   * once the notice is drawn, back to where the user left it.
    */
-  private onRewriteHotkey(captured: CapturedLine | undefined): void {
+  private async sayNeedsBash4(editor: LineEditor): Promise<void> {
+    const moved = await editor.jumpToLineEnd();
+    const end = moved ? await this.host.queryCursorPosition().catch((): CursorPosition | undefined => undefined) : undefined;
+    const drawn = end && !this.disposed ? drawBelowLine(LINE_NOT_READABLE_HERE, end, this.host.size) : undefined;
+    if (drawn) {
+      this.host.write(drawn.output);
+    }
+    if (moved) {
+      await editor.jumpBack();
+    }
+    if (this.disposed) {
+      return;
+    }
+    if (drawn) {
+      // After the shell's own cursor move, which would otherwise drop it.
+      this.noticeBelow = drawn.notice;
+    } else {
+      this.host.write('\u0007');
+    }
+  }
+
+  /**
+   * The rewrite hotkey was pressed at the prompt. `captured` is the line the
+   * user was typing, now cleared from the shell's input line. Not called
+   * when a capture fails: the line is not Shelly's then. Opens fast mode's
+   * input to rewrite it; the line comes back as it was unless a command
+   * takes its place.
+   */
+  private onRewriteHotkey(captured: CapturedLine): void {
     void this.openOverlay('__', this.queuedInput, { captured });
   }
 
   /** Put back the line a rewrite took, if it took one. */
   private putLineBack(rewrite: NonNullable<OpenInput['rewrite']>): void {
-    if (rewrite.captured?.buffer) {
+    if (rewrite.captured.buffer) {
       this.lineEditor?.restore(rewrite.captured).catch(() => undefined);
-    }
-    if (!rewrite.captured || rewrite.captured.buffer) {
       this.detector.markLineUnknown();
     }
   }
@@ -658,11 +696,6 @@ export class Shelly {
 
     if (cursor === 'prompt') {
       finish();
-    } else if (rewrite && !rewrite.captured) {
-      // bash 3.2: the line is still on the shell's input line, where Enter
-      // would run it: have the shell redraw prompt and line down here.
-      this.lineEditor?.redraw();
-      finish();
     } else {
       // Keys sent before the new prompt is up would be echoed by the
       // terminal driver, and a line set then would be lost: wait for it.
@@ -734,6 +767,8 @@ export class Shelly {
   }
 
   private handleResize(size: TerminalSize): void {
+    // Reflowed: the notice is no longer where it was drawn.
+    this.noticeBelow = undefined;
     if (this.mode === 'busy' || this.mode === 'returning') {
       // The shell is idle at its prompt and needs no size now. Resized, it
       // would repaint that prompt (and fish 4 asks the terminal where the

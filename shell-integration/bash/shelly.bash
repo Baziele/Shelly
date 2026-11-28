@@ -265,16 +265,23 @@ if [[ -n "$__shelly_nonce" ]]; then
   else
     # bash 3.2 has bind -x but no READLINE_LINE, so the line cannot be read
     # or set. It gets a key that clears the line (Shelly then types the new
-    # one; from vi-command mode it enters insert mode first) and one that
-    # redraws the prompt and line where the cursor is.
-    __shelly_line_features='clear,redraw'
+    # one; from vi-command mode it enters insert mode first), and keys that
+    # move the cursor without touching the line: remember where it is
+    # (readline's mark) and go to the line's end, then back to the mark. With
+    # those Shelly finds where the line ends on screen, to show a notice
+    # below it. (Its bind -x cannot run a command for a key as long as
+    # Shelly's, and a notice from the shell would need one.)
+    __shelly_line_features='clear,jump'
     for __shelly_keymap in emacs vi-insert vi-command; do
       if [[ "$__shelly_keymap" == vi-command ]]; then
         builtin bind -m vi-command '"\e[21;16~": "i\e[21;16~"' 2>/dev/null || __shelly_line_features=''
       else
         builtin bind -m "$__shelly_keymap" '"\e[21;16~": kill-whole-line' 2>/dev/null || __shelly_line_features=''
       fi
-      builtin bind -m "$__shelly_keymap" '"\e[20;16~": redraw-current-line' 2>/dev/null || __shelly_line_features=''
+      builtin bind -m "$__shelly_keymap" '"\e[18;16~": set-mark' 2>/dev/null \
+        && builtin bind -m "$__shelly_keymap" '"\e[15;16~": end-of-line' 2>/dev/null \
+        && builtin bind -m "$__shelly_keymap" '"\e[1;16S": exchange-point-and-mark' 2>/dev/null \
+        || __shelly_line_features=''
     done
   fi
   unset __shelly_keymap
