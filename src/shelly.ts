@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { FlowHost, OpenInput, ReleaseOptions } from './client/flow-host.js';
 import type { Flows } from './client/flows.js';
 import type { DaemonLink } from './client/daemon-link.js';
@@ -39,6 +40,8 @@ const FIND_END_RETRY_MS = 50;
 
 /** How long a possible trigger's first character is held back before it goes to the shell. */
 const TRIGGER_HOLD_MS = 400;
+/** Longest the rewrite hotkey waits for the shell to say what an Enter did; then it goes on as it would anyway. */
+const ENTER_DECISION_WAIT_MS = 1000;
 const RESIZE_SETTLE_MS = 50;
 /** How long output that might begin a shell marker is held before it goes to the terminal anyway. */
 const MARKER_HOLD_MS = 50;
@@ -169,8 +172,12 @@ export class Shelly {
   private triggerHoldTimer: NodeJS.Timeout | undefined;
   /** Counts trigger holds, so a hold's late release never releases a newer one. */
   private holds = 0;
-  /** Keys held while the shell says whether its line is empty (a trigger may be starting); undefined when not asking. */
-  private askingLine: string | undefined;
+  /**
+   * Keys held while the shell answers something they depend on: whether its
+   * line is empty (a trigger may be starting), or what an Enter did (before
+   * the rewrite hotkey). Undefined when nothing is held.
+   */
+  private heldInput: string | undefined;
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
   private watchdog: NodeJS.Timeout | undefined;
@@ -344,9 +351,17 @@ export class Shelly {
   }
 
   /** Keystrokes for the shell, unless they hold the rewrite hotkey and the shell is at its prompt. */
-  private handleShellInput(data: string, mayAsk = true): void {
-    if (this.askingLine !== undefined) {
-      this.askingLine += data;
+  /** `mayAsk`/`mayWait` false when replaying held input: what it waited for is in. */
+  private handleShellInput(data: string, { mayAsk = true, mayWait = true }: { mayAsk?: boolean; mayWait?: boolean } = {}): void {
+    if (this.heldInput !== undefined) {
+      this.heldInput += data;
+      return;
+    }
+    if (mayWait && this.lineEditor?.isDeciding && this.rewriteHotkeys.some((key) => data.includes(key))) {
+      // Right after an Enter, Ctrl+] belongs to the prompt or to a command,
+      // depending on what the Enter did: wait for the shell to say.
+      const decided = Promise.race([this.lineEditor.decided(), delay(ENTER_DECISION_WAIT_MS, undefined, { ref: false })]);
+      void this.holdInput(data, decided, { mayAsk, mayWait: false });
       return;
     }
     const hotkey = this.overlayUnavailable ? undefined : this.findRewriteHotkey(data);
@@ -432,24 +447,31 @@ export class Shelly {
    * holds, then let the detector look at them again. A shell at its prompt
    * answers within milliseconds; see LineEditor.query for the limit.
    */
-  private async askLine(pending: string): Promise<void> {
-    this.askingLine = pending;
-    const result = await this.lineEditor!.query();
-    if (result.status === 'captured') {
-      const { buffer, cursor } = result.line;
-      if (buffer === '') {
-        this.detector.markLineEmpty();
-      } else if (cursor === buffer.length && !buffer.includes('\n')) {
-        this.detector.markLineTyped([...buffer].length);
+  private askLine(pending: string): Promise<void> {
+    const answered = this.lineEditor!.query().then((result) => {
+      if (result.status === 'captured') {
+        const { buffer, cursor } = result.line;
+        if (buffer === '') {
+          this.detector.markLineEmpty();
+        } else if (cursor === buffer.length && !buffer.includes('\n')) {
+          this.detector.markLineTyped([...buffer].length);
+        }
       }
-    }
-    const held = this.askingLine;
-    this.askingLine = undefined;
+    });
+    return this.holdInput(pending, answered, { mayAsk: false });
+  }
+
+  /** Hold `data`, and whatever is typed after it, until `until` settles; then handle it all in order. */
+  private async holdInput(data: string, until: Promise<unknown>, replay: { mayAsk?: boolean; mayWait?: boolean }): Promise<void> {
+    this.heldInput = data;
+    await until.catch(() => undefined);
+    const held = this.heldInput;
+    this.heldInput = undefined;
     if (this.disposed) {
       return;
     }
     if (this.mode === 'shell') {
-      this.handleShellInput(held, false);
+      this.handleShellInput(held, replay);
     } else {
       this.queuedInput += held;
     }

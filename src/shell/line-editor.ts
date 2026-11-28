@@ -208,6 +208,8 @@ export class LineEditor {
    * a history search leaves the shell at the same prompt, with no marker.
    */
   private enterTimer: NodeJS.Timeout | undefined;
+  /** Waiting for the shell to say what the Enter did; see `decided`. */
+  private decidedWaiters: (() => void)[] = [];
   private bracketedPaste = false;
   private pendingCapture: PendingCapture | undefined;
   private pendingSet: PendingSet | undefined;
@@ -274,6 +276,26 @@ export class LineEditor {
    */
   get isAtPrompt(): boolean {
     return this.atPrompt && this.enterTimer === undefined && !this.disposed && this.isShellInForeground();
+  }
+
+  /**
+   * The shell has taken an Enter at its prompt and not yet said what it did:
+   * started a command, drawn a new prompt, or (by staying quiet) neither.
+   */
+  get isDeciding(): boolean {
+    return this.atPrompt && this.enterTimer !== undefined && !this.disposed;
+  }
+
+  /**
+   * Resolves once the shell has said what an Enter did (at once if there is
+   * none pending), so a key that needs to know can wait for it rather than
+   * for the clock.
+   */
+  decided(): Promise<void> {
+    if (!this.isDeciding) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.decidedWaiters.push(resolve));
   }
 
   private get canSet(): boolean {
@@ -358,7 +380,7 @@ export class LineEditor {
       // meanwhile: whatever the shell starts, nothing it runs needs them.
       clearTimeout(this.enterTimer);
       this.enterTimer = setTimeout(() => {
-        this.enterTimer = undefined;
+        this.clearEnter();
       }, this.enterQuietMs);
       this.enterTimer.unref();
     }
@@ -551,6 +573,11 @@ export class LineEditor {
   private clearEnter(): void {
     clearTimeout(this.enterTimer);
     this.enterTimer = undefined;
+    const waiters = this.decidedWaiters;
+    this.decidedWaiters = [];
+    for (const resolve of waiters) {
+      resolve();
+    }
   }
 
   private abandon(request: number): void {

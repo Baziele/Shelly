@@ -348,6 +348,33 @@ describe('LineEditor', () => {
     assert.equal(subject.isAtPrompt, false, 'Enter after the paste starts a command');
   });
 
+  it('says when the shell has decided what an Enter did, whichever way', async () => {
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const subject = create(['capture', 'set'], { enterQuietMs: 30 });
+    assert.equal(subject.isDeciding, false);
+    let decided = false;
+    await subject.decided().then(() => (decided = true));
+    assert.equal(decided, true, 'at once with no Enter pending');
+
+    for (const outcome of ['quiet', 'exec', 'cwd'] as const) {
+      decided = false;
+      subject.filterInput('\r');
+      assert.equal(subject.isDeciding, true);
+      const settled = subject.decided().then(() => (decided = true));
+      await wait(5);
+      assert.equal(decided, false, outcome);
+      if (outcome === 'exec') {
+        subject.handleEvent({ type: 'exec', command: 'ls' });
+      } else if (outcome === 'cwd') {
+        subject.handleEvent({ type: 'cwd', path: '/' });
+      }
+      await settled;
+      assert.equal(subject.isDeciding, false, outcome);
+      assert.equal(subject.isAtPrompt, outcome !== 'exec', outcome);
+      subject.handleEvent({ type: 'cwd', path: '/' });
+    }
+  });
+
   it('queries the line without touching it, and ignores an answer that comes too late', async () => {
     const subject = create(['capture', 'set', 'query']);
     assert.equal(subject.canQuery, true);
