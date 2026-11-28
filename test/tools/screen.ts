@@ -563,6 +563,16 @@ const CROP_MARK = { r: 0xff, g: 0x00, b: 0xfe };
 
 const run = promisify(execFile);
 
+/** `path` holds a PNG that decodes and is at least `width` by `height`. */
+const wholePng = (path: string, width: number, height: number): boolean => {
+  try {
+    const image = decodePng(readFileSync(path));
+    return image.width >= width && image.height >= height;
+  } catch {
+    return false;
+  }
+};
+
 /** Rasterises an SVG of the given CSS size. Throws when no PNG route exists. */
 export const svgToPng = async (svg: string, width: number, height: number, scale = 2): Promise<Buffer> => {
   const route = pngRoute();
@@ -585,10 +595,18 @@ export const svgToPng = async (svg: string, width: number, height: number, scale
       // A page exactly the SVG's size, with nothing around it.
       const page = join(dir, 'screen.html');
       writeFileSync(page, `<!doctype html><html><body style="margin:0;background:#000">${svg.replace(/^<\?xml[^>]*>/, '')}</body></html>`);
-      await run(findChrome()!, [
-        '--headless', '--disable-gpu', '--hide-scrollbars', '--no-sandbox', `--force-device-scale-factor=${scale}`,
-        `--window-size=${width},${height}`, `--screenshot=${target}`, `file://${page}`,
-      ], { timeout: 30_000 });
+      try {
+        await run(findChrome()!, [
+          '--headless', '--disable-gpu', '--hide-scrollbars', '--no-sandbox', `--force-device-scale-factor=${scale}`,
+          `--window-size=${width},${height}`, `--screenshot=${target}`, `file://${page}`,
+        ], { timeout: 30_000 });
+      } catch (error) {
+        // Chrome sometimes fails on its way out ("Teardown watchdog expired") after writing the
+        // screenshot: a whole PNG is still the answer.
+        if (!wholePng(target, outWidth, outHeight)) {
+          throw error;
+        }
+      }
       return encodePng(cropImage(decodePng(readFileSync(target)), outWidth, outHeight));
     }
     // Quick Look draws a thumbnail scaled to fit a square, and on macOS 27 draws an SVG about 11%
