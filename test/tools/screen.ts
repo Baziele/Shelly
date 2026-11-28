@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { IBufferCell, Terminal } from '@xterm/headless';
-import { cropImage, decodePng, encodePng } from './png.js';
+import { cropImage, resizeImage, decodePng, encodePng } from './png.js';
 
 /*
  * Turns what an @xterm/headless terminal shows into text, SVG, HTML or PNG.
@@ -529,18 +529,37 @@ ${rows.join('\n')}
 `;
 };
 
-export type PngRoute = 'qlmanage' | 'rsvg-convert';
+export type PngRoute = 'chrome' | 'qlmanage' | 'rsvg-convert';
+
+const CHROME_PATHS = [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+];
+const CHROME_COMMANDS = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
+
+/** A headless Chrome or Chromium, which draws an SVG at exactly the size asked. */
+const findChrome = (): string | undefined =>
+  CHROME_PATHS.find((path) => existsSync(path)) ?? CHROME_COMMANDS.map(onPath).find(Boolean);
 
 const onPath = (command: string): string | undefined =>
   (process.env.PATH ?? '').split(delimiter).map((dir) => join(dir, command)).find((path) => existsSync(path));
 
 /** How PNGs get made on this machine, if at all. */
 export const pngRoute = (): PngRoute | undefined => {
+  if (process.env.SHELLY_SCREEN_PNG_ROUTE) {
+    return process.env.SHELLY_SCREEN_PNG_ROUTE as PngRoute;
+  }
+  if (findChrome()) {
+    return 'chrome';
+  }
   if (process.platform === 'darwin' && existsSync('/usr/bin/qlmanage')) {
     return 'qlmanage';
   }
   return onPath('rsvg-convert') ? 'rsvg-convert' : undefined;
 };
+
+/** The marker colour Quick Look's output is cropped at (see svgToPng). */
+const CROP_MARK = { r: 0xff, g: 0x00, b: 0xfe };
 
 const run = promisify(execFile);
 
@@ -561,12 +580,41 @@ export const svgToPng = async (svg: string, width: number, height: number, scale
       await run('rsvg-convert', ['-z', String(scale), '-o', target, source]);
       return readFileSync(target);
     }
-    // Quick Look draws the image scaled to fit a square of this size, top-left aligned, and pads the rest.
-    const size = Math.max(outWidth, outHeight);
-    await run('/usr/bin/qlmanage', ['-t', '-s', String(size), '-o', dir, source], { timeout: 30_000 });
+    if (route === 'chrome') {
+      const target = join(dir, 'screen.png');
+      // A page exactly the SVG's size, with nothing around it.
+      const page = join(dir, 'screen.html');
+      writeFileSync(page, `<!doctype html><html><body style="margin:0;background:#000">${svg.replace(/^<\?xml[^>]*>/, '')}</body></html>`);
+      await run(findChrome()!, [
+        '--headless', '--disable-gpu', '--hide-scrollbars', '--no-sandbox', `--force-device-scale-factor=${scale}`,
+        `--window-size=${width},${height}`, `--screenshot=${target}`, `file://${page}`,
+      ], { timeout: 30_000 });
+      return encodePng(cropImage(decodePng(readFileSync(target)), outWidth, outHeight));
+    }
+    // Quick Look draws a thumbnail scaled to fit a square, and on macOS 27 draws an SVG about 11%
+    // larger than asked, losing its right and bottom edges. So the screen goes, at its own size, into
+    // a larger square filled with a marker colour, and the result is cropped where the marker starts:
+    // right whatever scale Quick Look picks.
+    const side = Math.ceil(Math.max(width, height) * 1.3);
+    const mark = `#${[CROP_MARK.r, CROP_MARK.g, CROP_MARK.b].map((value) => value.toString(16).padStart(2, '0')).join('')}`;
+    writeFileSync(source, `<svg xmlns="http://www.w3.org/2000/svg" width="${side}" height="${side}"><rect width="${side}" height="${side}" fill="${mark}"/>${svg.replace(/^<\?xml[^>]*>/, '')}</svg>`);
+    await run('/usr/bin/qlmanage', ['-t', '-s', String(Math.round(side * scale)), '-o', dir, source], { timeout: 30_000 });
     const thumbnail = decodePng(readFileSync(`${source}.png`));
-    const fit = thumbnail.width / Math.max(width, height);
-    return encodePng(cropImage(thumbnail, Math.round(width * fit), Math.round(height * fit)));
+    const isMark = (x: number, y: number): boolean => {
+      const index = (y * thumbnail.width + x) * 4;
+      return Math.abs(thumbnail.data[index]! - CROP_MARK.r) < 24 && thumbnail.data[index + 1]! < 24 && Math.abs(thumbnail.data[index + 2]! - CROP_MARK.b) < 24;
+    };
+    let drawnWidth = 0;
+    while (drawnWidth < thumbnail.width && !isMark(drawnWidth, 1)) {
+      drawnWidth++;
+    }
+    let drawnHeight = 0;
+    while (drawnHeight < thumbnail.height && !isMark(1, drawnHeight)) {
+      drawnHeight++;
+    }
+    const drawn = cropImage(thumbnail, drawnWidth, drawnHeight);
+    // Quick Look's scale is not the one asked for; bring the picture to the size the caller expects.
+    return encodePng(drawn.width === outWidth && drawn.height === outHeight ? drawn : resizeImage(drawn, outWidth, outHeight));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

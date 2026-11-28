@@ -108,6 +108,20 @@ export const cropImage = (image: RgbaImage, width: number, height: number): Rgba
   return { width: w, height: h, data };
 };
 
+/** The image scaled to `width` × `height`, nearest pixel (keeps cell colours exact). */
+export const resizeImage = (image: RgbaImage, width: number, height: number): RgbaImage => {
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const sourceY = Math.min(image.height - 1, Math.floor((y + 0.5) * image.height / height));
+    for (let x = 0; x < width; x++) {
+      const sourceX = Math.min(image.width - 1, Math.floor((x + 0.5) * image.width / width));
+      const from = (sourceY * image.width + sourceX) * 4;
+      data.set(image.data.subarray(from, from + 4), (y * width + x) * 4);
+    }
+  }
+  return { width, height, data };
+};
+
 /** The pixel at (x, y) as `#rrggbb`. */
 export const pixelAt = (image: RgbaImage, x: number, y: number): string => {
   const i = (Math.floor(y) * image.width + Math.floor(x)) * 4;

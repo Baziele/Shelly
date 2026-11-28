@@ -122,4 +122,22 @@ describe('screen snapshots', () => {
     const png = await renderPng(terminal, { scale: 1 });
     assert.equal(decodePng(png).width, width);
   });
+
+  it('draws the whole screen to the PNG, edges included, at every size', { skip: !pngRoute() && 'no SVG rasteriser here' }, async () => {
+    // A rasteriser that scales the drawing (Quick Look on macOS 27 draws about 11% too large) loses
+    // the right column and the bottom row: probe the corner cells, which carry their own colours.
+    for (const [cols, rows] of [[44, 8], [100, 30], [50, 24]] as const) {
+      const corner = (row: number, col: number, colour: number) => `${CSI}${row};${col}H${CSI}48;5;${colour}m ${CSI}0m`;
+      const terminal = await terminalWith(corner(1, 1, 46) + corner(1, cols, 196) + corner(rows, 1, 21) + corner(rows, cols, 226) + `${CSI}?25l`, cols, rows);
+      const image = decodePng(await renderPng(terminal));
+      const { width, height } = renderSize(terminal);
+      assert.equal(image.width, width * 2, `${cols}x${rows} width`);
+      assert.equal(image.height, height * 2, `${cols}x${rows} height`);
+      const cell = (col: number, row: number): [number, number] => [Math.round((8 + (col + 0.5) * 8.4) * 2), Math.round((8 + (row + 0.5) * 18) * 2)];
+      assert.equal(pixelAt(image, ...cell(0, 0)), '#00ff00', `${cols}x${rows} top-left`);
+      assert.equal(pixelAt(image, ...cell(cols - 1, 0)), '#ff0000', `${cols}x${rows} top-right`);
+      assert.equal(pixelAt(image, ...cell(0, rows - 1)), '#0000ff', `${cols}x${rows} bottom-left`);
+      assert.equal(pixelAt(image, ...cell(cols - 1, rows - 1)), '#ffff00', `${cols}x${rows} bottom-right`);
+    }
+  });
 });
