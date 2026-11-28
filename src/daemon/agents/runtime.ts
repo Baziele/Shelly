@@ -35,7 +35,7 @@ import {
   ToolTracker,
 } from './mapping.js';
 import { cancelIdle, type IdleTimer, idleTimer, startIdle, stopFiber } from './idle.js';
-import { type AgentProcess, type SessionSink, shutdownAgentProcess, spawnAgentProcess } from './process.js';
+import { type AgentProcess, type ProtocolTap, type SessionSink, shutdownAgentProcess, spawnAgentProcess } from './process.js';
 
 /*
  * AgentRuntime over ACP. One process per agent, shared by its sessions; one
@@ -64,6 +64,10 @@ export interface AgentRuntimeOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Test hook: called with each agent process's pid. */
   readonly onSpawn?: (info: { readonly agentId: string; readonly pid: number }) => void;
+  /** How idle timers wait. Default `Effect.sleep`; tests fire them by hand. */
+  readonly sleep?: (ms: number) => Effect.Effect<void>;
+  /** Recording hook for fixtures: every JSON-RPC line with each agent. Never set in the daemon. */
+  readonly onProtocolMessage?: ProtocolTap;
 }
 
 const AVAILABILITY_TTL_MS = 10_000;
@@ -159,6 +163,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
   const processScope = yield* Scope.make('parallel');
   let shuttingDown = false;
   const env = options.env ?? process.env;
+  const idleSleep = options.sleep ?? Effect.sleep;
 
   const agentSlots = new Map<string, AgentSlot>();
   const threadSlots = new Map<string, ThreadSlot>();
@@ -233,7 +238,7 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
           Effect.andThen(shutdownAgentProcess(agentProcess).pipe(Effect.forkIn(scope))),
           Effect.asVoid,
         );
-      })));
+      })), idleSleep);
 
   const onTerminated = (agentProcess: AgentProcess, error: AcpError.AcpError): Effect.Effect<void> =>
     Effect.suspend(() => {
@@ -291,7 +296,11 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
         yield* cancelIdle(slot.idle);
         return slot.process;
       }
-      const started = yield* spawnAgentProcess(definition, processScope, { onTerminated, onSpawn: options.onSpawn }).pipe(
+      const started = yield* spawnAgentProcess(definition, processScope, {
+        onTerminated,
+        onSpawn: options.onSpawn,
+        onProtocolMessage: options.onProtocolMessage,
+      }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
       slot.process = started;
@@ -410,14 +419,22 @@ const make = (options: AgentRuntimeOptions) => Effect.gen(function* () {
             Effect.annotateLogs({ agentId: live.definition.id, threadId: live.slot.threadId }),
             Effect.andThen(closeLive(live)),
           );
-        })));
+        })), idleSleep);
 
   const endFor = (live: LiveSession, turn: Turn, exit: Exit.Exit<Acp.PromptResponse, AcpError.AcpError>) => {
     const name = live.definition.name;
     const notices: AgentUpdate[] = [];
     let stopReason: StopReason;
     let error: string | null = null;
-    if (Exit.isSuccess(exit)) {
+    if (Exit.isSuccess(exit) && (exit.value.error || (exit.value.stopReason as string) === 'error')) {
+      // ACP v2 ends a failed turn with an idle state (stopReason `error`, and an
+      // `error`) instead of failing the prompt request: Claude Code signed out ends so.
+      const failure = exit.value.error;
+      stopReason = 'error';
+      error = failure?.code === -32000 || live.process.signedOut()
+        ? live.definition.signInMessage
+        : `${name} failed: ${short(failure?.message ?? '') || 'unknown error'}`;
+    } else if (Exit.isSuccess(exit)) {
       stopReason = mapStopReason(exit.value.stopReason);
       if (
         stopReason === 'cancelled' && turn.rejected !== null && !turn.cancelRequested

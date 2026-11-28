@@ -38,6 +38,7 @@ export const startIdle = (
   scope: Scope.Scope,
   ms: number,
   fire: (current: () => boolean, claim: () => void) => Effect.Effect<void>,
+  sleep: (ms: number) => Effect.Effect<void> = Effect.sleep,
 ): Effect.Effect<void> =>
   Effect.suspend(() => {
     const token = {};
@@ -49,7 +50,7 @@ export const startIdle = (
       timer.token = null;
       timer.fiber = null;
     };
-    return Effect.sleep(ms).pipe(
+    return sleep(ms).pipe(
       Effect.andThen(Effect.suspend(() => current() ? fire(current, claim) : Effect.void)),
       Effect.forkIn(scope),
       Effect.flatMap((fiber) => Effect.suspend(() => {
