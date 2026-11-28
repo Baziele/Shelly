@@ -40,6 +40,11 @@ const FIND_END_RETRY_MS = 50;
 
 /** How long a possible trigger's first character is held back before it goes to the shell. */
 const TRIGGER_HOLD_MS = 400;
+/**
+ * Longest a possible trigger waits for the shell to say whether its line is
+ * empty, queue included; the query itself gives up sooner (see LineEditor.query).
+ */
+const LINE_QUERY_WAIT_MS = 150;
 /** Longest the rewrite hotkey waits for the shell to say what an Enter did; then it goes on as it would anyway. */
 const ENTER_DECISION_WAIT_MS = 1000;
 const RESIZE_SETTLE_MS = 50;
@@ -350,14 +355,17 @@ export class Shelly {
     }
   }
 
-  /** Keystrokes for the shell, unless they hold the rewrite hotkey and the shell is at its prompt. */
-  /** `mayAsk`/`mayWait` false when replaying held input: what it waited for is in. */
+  /**
+   * Keystrokes for the shell, unless they hold the rewrite hotkey and the
+   * shell is at its prompt. `mayAsk`/`mayWait` are false when replaying held
+   * input: what it waited for is in.
+   */
   private handleShellInput(data: string, { mayAsk = true, mayWait = true }: { mayAsk?: boolean; mayWait?: boolean } = {}): void {
     if (this.heldInput !== undefined) {
       this.heldInput += data;
       return;
     }
-    if (mayWait && this.lineEditor?.isDeciding && this.rewriteHotkeys.some((key) => data.includes(key))) {
+    if (mayWait && !this.overlayUnavailable && this.lineEditor?.isDeciding && this.rewriteHotkeys.some((key) => data.includes(key))) {
       // Right after an Enter, Ctrl+] belongs to the prompt or to a command,
       // depending on what the Enter did: wait for the shell to say.
       const decided = Promise.race([this.lineEditor.decided(), delay(ENTER_DECISION_WAIT_MS, undefined, { ref: false })]);
@@ -454,7 +462,14 @@ export class Shelly {
    * answers within milliseconds; see LineEditor.query for the limit.
    */
   private askLine(pending: string): Promise<void> {
+    // The query waits behind anything else the line editor is doing (a late
+    // restore, say), so the keys wait no longer than this in all; an answer
+    // after that is too late to count.
+    let late = false;
     const answered = this.lineEditor!.query().then((result) => {
+      if (late) {
+        return;
+      }
       if (result.status === 'captured') {
         const { buffer, cursor } = result.line;
         if (buffer === '') {
@@ -464,7 +479,10 @@ export class Shelly {
         }
       }
     });
-    return this.holdInput(pending, answered, { mayAsk: false });
+    const limit = delay(LINE_QUERY_WAIT_MS, undefined, { ref: false }).then(() => {
+      late = true;
+    });
+    return this.holdInput(pending, Promise.race([answered, limit]), { mayAsk: false });
   }
 
   /** Hold `data`, and whatever is typed after it, until `until` settles; then handle it all in order. */

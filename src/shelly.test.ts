@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -63,8 +63,10 @@ const setup = (fakes: SetupOptions = {}) => {
   let shellOutput: (data: string) => void = () => undefined;
   let exit: (code: number) => void = () => undefined;
   let nonce = '';
+  let lineFile = '';
   const spawnShell = (options: ShellSessionOptions) => {
     nonce = String(options.env.SHELLY_NONCE ?? '');
+    lineFile = String(options.env.SHELLY_LINE_FILE ?? '');
     return {
       onData: (listener: (data: string) => void) => (shellOutput = listener),
       onExit: (listener: (code: number) => void) => (exit = listener),
@@ -111,6 +113,8 @@ const setup = (fakes: SetupOptions = {}) => {
     type: (data: string) => onInput(data),
     shellOutput: (data: string) => shellOutput(data),
     prompt,
+    /** The request number in the line file, as the hooks read it. */
+    request: () => Number(/^\w+ (\d+)/.exec(readFileSync(lineFile, 'utf8'))?.[1]),
     stop: async () => {
       shelly.terminate();
       await running;
@@ -120,6 +124,82 @@ const setup = (fakes: SetupOptions = {}) => {
 };
 
 const freshLine: ReleaseOptions = { cursor: 'fresh-line', line: { type: 'as-before' } };
+
+describe('Shelly asks the shell about a line it lost track of', () => {
+  const UP = '\u001b[A';
+  const CTRL_U = '\u0015';
+
+  /** At a prompt in a shell that can be asked, after ↑ (so the line is unknown); `queries` collects each request asked. */
+  const recalled = () => {
+    const queries: number[] = [];
+    const t = setup({
+      onShellWrite: (data) => {
+        if (data.includes(LINE_KEYS.query)) {
+          queries.push(t.request());
+        }
+      },
+    });
+    t.shellOutput(t.marker('line-editor', 'capture,set,notice,query'));
+    t.prompt();
+    t.type(UP);
+    const sent = () => t.toShell.join('');
+    /** Everything sent to the shell after the query key. */
+    const afterQuery = () => sent().slice(sent().lastIndexOf(LINE_KEYS.query) + LINE_KEYS.query.length);
+    const answer = (buffer: string, cursor = [...buffer].length) =>
+      t.shellOutput(t.marker('query', `${queries.at(-1)};${encodeURIComponent(buffer)};${cursor}`));
+    return { t, queries, sent, afterQuery, answer };
+  };
+
+  it('opens the input on a trigger once the shell says Ctrl+U emptied the line', async () => {
+    const { t, queries, sent, answer } = recalled();
+    t.type(CTRL_U);
+    t.type(':');
+    assert.equal(queries.length, 1, 'asked at the first trigger character');
+    t.type(':how do I');
+    assert.ok(!sent().includes(':'), 'nothing of it reaches the shell meanwhile');
+    answer('');
+    await sleep(20);
+    assert.ok(['opening', 'overlay'].includes(t.internals.mode), t.internals.mode);
+    assert.ok(!sent().includes(':'), 'nor after');
+    await t.stop();
+  });
+
+  it('sends the keys on in the order typed when the line holds text, and follows it from there', async () => {
+    const { t, queries, afterQuery, answer } = recalled();
+    t.type(':');
+    t.type(':b');
+    answer('ls -l');
+    await sleep(5);
+    assert.equal(afterQuery(), '::b');
+    t.type(' :');
+    assert.equal(queries.length, 1, 'the line is known now: no second question');
+    assert.equal(afterQuery(), '::b :');
+    await t.stop();
+  });
+
+  it('keeps a rewrite hotkey typed while asking behind the keys before it', async () => {
+    const { t, answer, afterQuery } = recalled();
+    t.type(':');
+    t.type('x\u001d');
+    answer('ls');
+    await sleep(5);
+    // The line holds text, so the colon is text; then the hotkey takes the line.
+    assert.equal(afterQuery(), `:x${LINE_KEYS.capture}`);
+    assert.equal(t.internals.mode, 'capturing');
+    await t.stop();
+  });
+
+  it('sends the keys on, without waiting long, when the shell does not answer', async () => {
+    const { t, queries, sent } = recalled();
+    t.type(':');
+    assert.equal(queries.length, 1);
+    await sleep(60);
+    assert.ok(!sent().endsWith(':'), 'held a moment');
+    await sleep(200);
+    assert.ok(sent().endsWith(':'), 'then sent');
+    await t.stop();
+  });
+});
 
 describe('Shelly loads on first use', () => {
   it('starts the daemon at the first prompt, but loads neither the UI nor the connection', async () => {
