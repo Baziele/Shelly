@@ -19,6 +19,7 @@ import {
   formatTool,
   shortToolTitle,
   spinnerFrame,
+  UNKNOWN_AGENT,
   type FormatContext,
 } from './format.js';
 import { parseKeys, PasteFilter, type Key } from './keys.js';
@@ -28,10 +29,8 @@ import { lineToPaintRow } from './paint-line.js';
 import { toStyledText } from './styled.js';
 import { hasGapBefore, TurnModel, type Block, type LineBlock, type Phase, type PermissionRequest } from './turn-model.js';
 
-/** The host terminal as the agent view uses it. */
-export interface AgentViewHost extends LiveRegionScreen {
-  queryCursorPosition(timeoutMs?: number): Promise<CursorPosition>;
-}
+/** The host terminal as the agent view uses it: its size, and output. It is never asked anything. */
+export type AgentViewHost = LiveRegionScreen;
 
 export interface AgentViewOptions {
   /** Shown in the status line and prompts: `claude`. */
@@ -75,6 +74,20 @@ const ESCAPE_WAIT_MS = 40;
 const WAITING_REDRAW_MS = 1000;
 /** A resize nobody passed on to relayout() is handled after the size has held still this long. */
 const AUTO_RELAYOUT_MS = 150;
+/** Frames drawn again because they came out at another width than the terminal's, at most, for one terminal width. */
+const MAX_WIDTH_REDRAWS = 2;
+
+/**
+ * Whether a frame `frameWidth` cells wide should be drawn again for a
+ * terminal `cols` wide: OpenTUI applies a resize only after the frame it is
+ * drawing, so the first frame after one can still be at the old width.
+ * Not for an empty frame (no width to go by), and not more than
+ * MAX_WIDTH_REDRAWS times for one terminal width: a frame that keeps coming out at
+ * another width is painted as it is (its rows are cut at the edge, never
+ * wrapped), so drawing never stalls.
+ */
+export const redrawForWidth = (frameWidth: number, cols: number, redrawsSoFar: number): boolean =>
+  frameWidth > 0 && frameWidth !== cols && redrawsSoFar < MAX_WIDTH_REDRAWS;
 /** Longest finish() waits for the last frames before giving the terminal back anyway. */
 const FINISH_TIMEOUT_MS = 2000;
 
@@ -105,6 +118,8 @@ type BlockView = MessageBlockView | TextBlockView;
 /** The layout of one frame, read while OpenTUI hands the frame over. */
 interface FrameSnapshot {
   readonly rows: PaintFrame['rows'];
+  /** Cells across the frame: the width OpenTUI actually drew at. */
+  readonly width: number;
   readonly height: number;
   readonly blocks: ReadonlyArray<{ readonly key: string; readonly bottom: number; readonly final: boolean; readonly split: StableSplit | undefined; readonly top: number }>;
 }
@@ -143,8 +158,8 @@ export class AgentView {
   private awaitingFrame = false;
   /** Something changed while a frame was in flight. */
   private dirty = false;
-  /** A resize is being handled; nothing is painted until it is. */
-  private paused = false;
+  /** Frames drawn again for their width since the terminal became `cols` wide (see redrawForWidth). */
+  private widthRedraws = { cols: 0, count: 0 };
   private selectedOption = 0;
   private shownRequestId: string | undefined;
   /** When the prompt on screen first showed; keys before PROMPT_ARM_MS after it are ignored. */
@@ -161,7 +176,7 @@ export class AgentView {
 
   constructor(
     private readonly host: AgentViewHost,
-    colorDepth: ColorDepth,
+    private readonly colorDepth: ColorDepth,
     private readonly options: AgentViewOptions,
   ) {
     this.now = options.now ?? Date.now;
@@ -174,7 +189,7 @@ export class AgentView {
       clearInterval: timers?.clearInterval?.bind(timers) ?? REAL_TIMERS.clearInterval,
     };
     this.pastes = new PasteFilter(this.now);
-    this.agentName = oneLine(options.agentName) || 'agent';
+    this.agentName = oneLine(options.agentName) || UNKNOWN_AGENT;
     this.bufferRows = this.baseBufferRows();
     this.laidOutSize = { ...host.size };
     this.headless = HeadlessRenderer.create({ width: host.size.cols, height: this.bufferRows });
@@ -217,7 +232,7 @@ export class AgentView {
 
   /** The agent turned out to be another than the view was made for (it was not known yet). */
   setAgentName(name: string): void {
-    this.agentName = oneLine(name) || 'agent';
+    this.agentName = oneLine(name) || UNKNOWN_AGENT;
     this.schedule();
   }
 
@@ -358,31 +373,19 @@ export class AgentView {
   }
 
   /**
-   * Re-anchor and reflow after the terminal was resized. Call once the size
-   * has settled; it asks the terminal where the cursor (parked on the live
-   * region) ended up.
+   * Repaint at the new size after the terminal was resized. Call once the
+   * size has settled. It clears the rows the live region certainly owns and
+   * draws them again at the new width; it asks the terminal nothing, so it
+   * never waits on it (see LiveRegion.relayout).
    */
   async relayout(): Promise<void> {
     if (this.state !== 'running' && this.state !== 'finishing') {
       return;
     }
-    this.paused = true;
     this.cancelAutoRelayout();
-    let cursor: CursorPosition | undefined;
-    try {
-      cursor = await this.host.queryCursorPosition();
-    } catch {
-      // No report: the live region restarts at the row the cursor was parked on (see LiveRegion.relayout).
-      cursor = undefined;
-    }
-    // The view may have been finished or destroyed while the terminal answered.
-    if ((this.state as State) === 'done') {
-      return;
-    }
-    this.region.relayout(cursor);
+    this.region.relayout();
     this.laidOutSize = { ...this.host.size };
     this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
-    this.paused = false;
     this.schedule();
   }
 
@@ -391,7 +394,7 @@ export class AgentView {
     if (this.state === 'running' || this.state === 'finishing') {
       // Torn down mid-turn (an error, the shell exiting): no live rows or hidden cursor left behind.
       if (this.awaitingRelayout()) {
-        this.region.relayout(undefined);
+        this.region.relayout();
       }
       this.region.finish();
     }
@@ -402,6 +405,11 @@ export class AgentView {
     this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
     this.releaseRenderer();
+  }
+
+  /** Rows in the live region now: what a resize can disturb. */
+  get liveRowCount(): number {
+    return this.region.liveRowCount;
   }
 
   /** Rendering costs so far, for measurements. */
@@ -556,7 +564,7 @@ export class AgentView {
     if (this.state === 'created' || this.state === 'done') {
       return;
     }
-    if (this.awaitingFrame || this.paused) {
+    if (this.awaitingFrame) {
       this.dirty = true;
       return;
     }
@@ -574,7 +582,7 @@ export class AgentView {
     if (this.state === 'created' || this.state === 'done') {
       return;
     }
-    if (this.awaitingFrame || this.paused || this.awaitingRelayout()) {
+    if (this.awaitingFrame || this.awaitingRelayout()) {
       if (this.awaitingRelayout()) {
         this.armAutoRelayout();
       }
@@ -624,7 +632,7 @@ export class AgentView {
     const renderer = this.headless.renderer;
     const base = { key: block.key, syncedFinal: false, syncedVersion: -1, syncedWidth: -1, syncedSpinner: '' };
     if (block.kind === 'message') {
-      const message = new MessageView(renderer, this.style);
+      const message = new MessageView(renderer, this.style, { codeMarks: this.colorDepth === 'none' });
       return { ...base, kind: 'message', root: message.root, message };
     }
     const root = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
@@ -679,10 +687,11 @@ export class AgentView {
         top: view.root.y - top,
         bottom: view.root.y + view.root.height - top,
         final: view.syncedFinal,
-        split: view.kind === 'message' && !view.syncedFinal ? shiftSplit(view.message.stableSplit(), view.message.markdown.y - top) : undefined,
+        split: view.kind === 'message' && !view.syncedFinal ? messageSplit(view.message, frame.rows, view.message.markdown.y - top) : undefined,
       }];
     });
-    const snapshot: FrameSnapshot = { rows: frame.rows, height: this.root.height, blocks };
+    const width = frame.rows[0]?.reduce((sum, span) => sum + span.width, 0) ?? 0;
+    const snapshot: FrameSnapshot = { rows: frame.rows, width, height: this.root.height, blocks };
     // Let OpenTUI finish its frame before the tree changes.
     queueMicrotask(() => {
       this.processFrame(snapshot);
@@ -696,11 +705,21 @@ export class AgentView {
     if (this.state === 'done' || this.state === 'created') {
       return;
     }
-    if (this.paused || this.awaitingRelayout()) {
-      if (!this.paused) {
-        this.armAutoRelayout();
-      }
+    if (this.awaitingRelayout()) {
+      this.armAutoRelayout();
       this.dirty = true;
+      return;
+    }
+    const { cols } = this.host.size;
+    if (this.widthRedraws.cols !== cols) {
+      this.widthRedraws = { cols, count: 0 };
+    }
+    if (redrawForWidth(snapshot.width, cols, this.widthRedraws.count)) {
+      // Drawn at the old width (see redrawForWidth): draw it again at the terminal's.
+      this.widthRedraws.count++;
+      this.headless.resize({ width: cols, height: this.bufferRows });
+      this.dirty = true;
+      this.afterFrame();
       return;
     }
     if (snapshot.height > snapshot.rows.length) {
@@ -734,6 +753,11 @@ export class AgentView {
     const live = this.clip(snapshot.rows.slice(commitEnd, snapshot.height));
     this.region.update(commit, live);
     this.stats.frames++;
+    this.afterCommit(snapshot, commitEnd, committedBlocks, split);
+  }
+
+  /** After the rows of the stable prefix went to scrollback: their block views go, and the rest draws again. */
+  private afterCommit(snapshot: FrameSnapshot, commitEnd: number, committedBlocks: number, split: { key: string; split: StableSplit } | undefined): void {
     if (this.stats.firstPaintMs < 0) {
       this.stats.firstPaintMs = this.now() - this.startedAt;
     }
@@ -906,7 +930,7 @@ export class AgentView {
           ]
           : phase.type === 'stopping'
             ? []
-            : [{ text: 'esc background', short: 'esc', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
+            : [{ text: 'esc background', short: 'esc bg', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
       }, context));
     }
     return lines;
@@ -918,6 +942,17 @@ const firstOption = (request: PermissionRequest, type: 'allow' | 'reject') =>
 
 const shiftSplit = (split: StableSplit | undefined, offset: number): StableSplit | undefined =>
   split && { row: split.row + offset, byteOffset: split.byteOffset };
+
+/**
+ * Where a streaming message can be cut, in frame rows: between rows of the
+ * paragraph it is writing when that can be done with certainty (so the
+ * live region keeps only that paragraph's last row), else before its first
+ * block not finished yet. `offset` is the message's first row in the frame.
+ */
+const messageSplit = (message: MessageView, rows: readonly PaintRow[], offset: number): StableSplit | undefined => {
+  const rowText = (row: number): string => (rows[offset + row] ?? []).map((span) => span.text).join('').trimEnd();
+  return shiftSplit(message.lineSplit(rowText) ?? message.stableSplit(), offset);
+};
 
 const phaseText = (phase: Phase, agentName: string, context: FormatContext): string => {
   switch (phase.type) {
@@ -941,7 +976,7 @@ export const lineBlockLines = (block: LineBlock, context: FormatContext): Line[]
   const { content } = block;
   switch (content.type) {
     case 'notice':
-      return [formatNotice(content.level, content.text, context.width)];
+      return formatNotice(content.level, content.text, context.width);
     case 'mode':
       return [formatModeChange(content.name, context.width)];
     case 'permission':
@@ -949,6 +984,6 @@ export const lineBlockLines = (block: LineBlock, context: FormatContext): Line[]
     case 'plan':
       return formatPlan(content.entries, context.width);
     case 'summary':
-      return [formatSummary(content.ended, content.toolCount, context)];
+      return formatSummary(content.ended, { toolCount: content.toolCount, produced: content.produced, noticed: content.noticed }, context);
   }
 };

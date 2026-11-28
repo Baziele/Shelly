@@ -75,7 +75,7 @@ describe('UI demo in a real terminal', { timeout: 120_000 }, () => {
     assertClean(run);
     const lines = contentLines(run);
     assert.equal(lines[0], '~/acme-web $ :: run the tests and fix what fails');
-    const order = ['✗ $ pnpm test', '● Edit src/pages/Profile.tsx  +3 −0', '● $ pnpm test --filter profile', '✓ 21s · 6 tools'].map((line) => lines.indexOf(line));
+    const order = ['✗ $ pnpm test', '● Edit src/pages/Profile.tsx  +3', '● $ pnpm test --filter profile', '✓ 21s · 6 tools'].map((line) => lines.indexOf(line));
     assert.ok(order.every((index) => index > 0), lines.join('\n'));
     assert.deepEqual(order, [...order].sort((a, b) => a - b));
     assert.equal(lines.at(-1), '✓ 21s · 6 tools');
@@ -121,7 +121,10 @@ describe('UI demo in a real terminal', { timeout: 120_000 }, () => {
 
   it('shows how a failed and a stopped turn ended', async () => {
     const failed = contentLines(await runDemo('error-turn', { cols: 80, rows: 24 }));
-    assert.equal(failed.at(-1), '✗ claude-agent-acp exited unexpectedly (code 1): API connection lost');
+    const end = failed.findLastIndex((line) => line.startsWith('✗ '));
+    assert.match(failed[end] ?? '', /^✗ claude-agent-acp exited unexpectedly \(code 1\): API connection lost · \d+s$/, failed.join('\n'));
+    assert.match(failed[end + 1] ?? '', /^ {2}Try again, or check `\S+` on its own\.$/);
+    assert.deepEqual(failed.slice(end + 2).filter((line) => line.trim() !== ''), [], 'nothing after the hint but the blank row');
     const stopped = contentLines(await runDemo('cancelled-turn', { cols: 80, rows: 24 }));
     assert.match(stopped.at(-1)!, /^◼ Stopped · \d+s$/);
     assert.ok(stopped.includes('◼ Write README.md'), 'the tool that never ran shows as stopped');

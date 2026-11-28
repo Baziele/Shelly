@@ -273,3 +273,90 @@ describe('HostTerminal teardown', () => {
     });
   }
 });
+
+describe('HostTerminal input while a query waits', () => {
+  it('passes keystrokes on at once, Ctrl-C included, instead of holding them for the reply', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const position = host.queryCursorPosition();
+    await answer('ab\u0003');
+    assert.deepEqual(typed, ['ab\u0003'], 'typing waited for the reply');
+    await answer('c\u001b[?4;80R\u001b[4;80R');
+    assert.deepEqual(await position, { row: 4, col: 80 });
+    host.stop();
+    assert.deepEqual(typed.join(''), 'ab\u0003c');
+  });
+
+  it('holds only the start of a reply cut off at the end of a read, and takes it whole', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const position = host.queryCursorPosition();
+    await answer('x\u001b[?12;');
+    assert.deepEqual(typed, ['x']);
+    await answer('80R\u001b[12;80Ry');
+    assert.deepEqual(await position, { row: 12, col: 80 });
+    host.stop();
+    assert.deepEqual(typed.join(''), 'xy');
+  });
+
+  it('keeps keys in order behind a Shift+F3 that may be the reply, whichever it turns out to be', async () => {
+    const asKey = fakeTerminal();
+    const first = asKey.host.queryCursorPosition();
+    await asKey.answer('\u001b[1;2Ra');
+    await asKey.answer('b\u001b[9;9R');
+    assert.deepEqual(await first, { row: 9, col: 9 });
+    asKey.host.stop();
+    assert.equal(asKey.typed.join(''), '\u001b[1;2Rab', 'Shift+F3 and the keys after it, in order');
+
+    const asReply = fakeTerminal();
+    const second = asReply.host.queryCursorPosition();
+    await asReply.answer('\u001b[1;2Ra');
+    assert.deepEqual(await second, { row: 1, col: 2 });
+    await sleep(10);
+    asReply.host.stop();
+    assert.equal(asReply.typed.join(''), 'a', 'the key after the reply');
+  });
+});
+
+describe('HostTerminal keys held behind a possible Shift+F3', () => {
+  it('takes a DEC reply split across reads after it, and passes the Shift+F3 and keys on in order, no part of the reply', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const position = host.queryCursorPosition();
+    await answer('\u001b[1;2Ra');
+    await answer('b\u001b[?9;');
+    await answer('9R\u001b[9;9Rc');
+    assert.deepEqual(await position, { row: 9, col: 9 });
+    await sleep(80);
+    host.stop();
+    assert.equal(typed.join(''), '\u001b[1;2Rabc');
+  });
+
+  it('passes the keys held behind it on when the terminal stops', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    void host.queryCursorPosition().catch(() => undefined);
+    await answer('\u001b[1;2Rxy');
+    host.stop();
+    assert.equal(typed.join(''), 'xy');
+  });
+
+  it('gives a lone Esc typed during a query to the shell once nothing follows it', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    void host.queryCursorPosition(1_000).catch(() => undefined);
+    await answer('\u001b');
+    await sleep(80);
+    assert.deepEqual(typed, ['\u001b']);
+    host.stop();
+  });
+});
+
+describe('HostTerminal callers asking at once', () => {
+  it('share one query, so a terminal that never answers costs one timeout, not one per caller', async () => {
+    const { host, written } = fakeTerminal();
+    const started = Date.now();
+    const asks = [host.queryCursorPosition(60), host.queryCursorPosition(60), host.queryCursorPosition(60)];
+    for (const ask of asks) {
+      await assert.rejects(ask);
+    }
+    assert.ok(Date.now() - started < 500, `took ${Date.now() - started} ms`);
+    assert.equal(written().split('\u001b[?6n').length - 1, 1, 'asked more than once');
+    host.stop();
+  });
+});

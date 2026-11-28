@@ -39,7 +39,15 @@ export type LineBlockContent =
   | { readonly type: 'mode'; readonly name: string }
   | { readonly type: 'permission'; readonly title: string; readonly outcome: PermissionOption['kind'] | null }
   | { readonly type: 'plan'; readonly entries: readonly PlanEntry[] }
-  | { readonly type: 'summary'; readonly ended: ThreadEventOf<'turn.ended'>; readonly toolCount: number };
+  | {
+    readonly type: 'summary';
+    readonly ended: ThreadEventOf<'turn.ended'>;
+    readonly toolCount: number;
+    /** The turn showed text or a tool call. */
+    readonly produced: boolean;
+    /** It showed a notice. */
+    readonly noticed: boolean;
+  };
 
 export interface LineBlock {
   readonly kind: 'line';
@@ -282,15 +290,36 @@ export class TurnModel {
       this.resolvePermission(request.requestId, null);
     }
     if (this.plan && this.plan.length > 0) {
-      this.appendLine({ type: 'plan', entries: this.plan });
+      this.insertPlan(this.plan);
     }
     this.thought = undefined;
     this.plan = undefined;
   }
 
+  /**
+   * The plan goes to scrollback in its last state where it reads in order:
+   * before the closing message still on screen (the conclusion comes after
+   * the checklist it concludes), or at the end.
+   */
+  private insertPlan(entries: readonly PlanEntry[]): void {
+    const last = this.blocks.at(-1);
+    const line: LineBlock = { kind: 'line', key: this.key(), content: { type: 'plan', entries }, final: true, version: 0 };
+    if (last?.kind === 'message' && this.blocks.length - 1 >= this.committed) {
+      this.blocks.splice(this.blocks.length - 1, 0, line);
+    } else {
+      this.blocks.push(line);
+    }
+  }
+
   private end(event: ThreadEventOf<'turn.ended'>): void {
     this.settle();
-    this.appendLine({ type: 'summary', ended: event, toolCount: this.toolCount });
+    const produced = this.blocks.some((block) => block.kind === 'message' || block.kind === 'tool');
+    const noticed = this.blocks.some((block) => block.kind === 'line' && block.content.type === 'notice');
+    // A turn that ended normally with only a notice to show (say, that the agent gave no reply)
+    // has said all there is: no footer, and no gap for one, before the prompt.
+    if (!(event.stopReason === 'end_turn' && !produced && noticed)) {
+      this.appendLine({ type: 'summary', ended: event, toolCount: this.toolCount, produced, noticed });
+    }
     this.ended = event;
   }
 

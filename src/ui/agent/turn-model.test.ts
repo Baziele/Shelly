@@ -169,6 +169,35 @@ describe('TurnModel', () => {
   });
 });
 
+describe('TurnModel at the end of a turn', () => {
+  it('puts the plan before the closing message, so the conclusion comes after its checklist', () => {
+    const model = new TurnModel();
+    model.apply(ev<'plan.updated'>({ type: 'plan.updated', turnId: 't', entries: [{ content: 'step', priority: 'high', status: 'completed' }] }));
+    model.apply(tool('a', 'completed'));
+    model.markCommitted(1);
+    model.apply(text('m1', 'All done: here is what changed.'));
+    model.apply(end());
+    assert.deepEqual(kinds(model).slice(1), ['plan', 'message', 'summary']);
+  });
+
+  it('records whether the turn showed anything, for the footer', () => {
+    const empty = new TurnModel();
+    empty.apply(end());
+    const summary = empty.blocks.at(-1);
+    assert.ok(summary?.kind === 'line' && summary.content.type === 'summary');
+    assert.equal(summary.content.type === 'summary' && summary.content.produced, false);
+    assert.equal(summary.content.type === 'summary' && summary.content.noticed, false);
+  });
+
+  it('adds no footer (nor a gap for one) when a notice is all the turn showed', () => {
+    const model = new TurnModel();
+    model.apply(ev<'notice'>({ type: 'notice', turnId: 't', level: 'warning', text: 'no reply' }));
+    model.apply(end());
+    assert.deepEqual(kinds(model), ['notice']);
+    assert.equal(phaseOf(model).type, 'ended');
+  });
+});
+
 describe('hasGapBefore', () => {
   it('sets prose apart from tool rows, keeps tool rows together', () => {
     const model = new TurnModel();

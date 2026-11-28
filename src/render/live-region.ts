@@ -18,26 +18,35 @@ export interface LiveRegionOptions {
 }
 
 /**
- * Output that grows downwards from an anchor on the main screen, the way a
- * command's output does. Committed rows are written as ordinary lines, so the
- * terminal scrolls them into its scrollback and they are never touched again.
- * Below them, a live region repaints in place, rewriting only rows that
- * changed.
+ * Output that grows downwards from where it starts on the main screen, the
+ * way a command's output does. Committed rows are written as ordinary lines,
+ * so the terminal scrolls them into its scrollback, and nothing ever moves
+ * onto them again. Below them, a small live region repaints in place.
  *
- * The live region always starts at column 1 of the anchor row, and owns every
- * row from there to the bottom of the screen. Between updates the (hidden)
- * cursor is parked in the first column of the last live row: nothing is
- * below it to reflow, and column 1 stays on that row's first line whether
- * or not the terminal rewraps it. After a resize, the terminal's cursor
- * report, less the height the live rows above it reflowed to, says where the
- * live region now starts.
+ * The live region owns every row from its first to the bottom of the screen.
+ * Between updates the (hidden) cursor is parked in column 1 of its last row,
+ * and every move is relative to it: up by at most the rows the region
+ * printed above it, then down only by writing rows. No absolute position is
+ * ever used and no answer from the terminal is waited for.
+ *
+ * Why that never reaches committed text: a terminal that is resized
+ * rewraps rows (most do) or leaves them as they are; either way the rows
+ * above the cursor take at least as many rows as were printed, and the
+ * cursor stays on its row. So moving up by the printed count always lands
+ * inside the live region, even for an update written before a resize and
+ * drawn after it. Live rows are written without autowrap, so each takes
+ * exactly one row however wide the terminal turns out to be.
+ *
+ * The price: where a terminal rewrapped live rows, the top of the taller
+ * rows can stay behind above the region after a resize (a fragment of a
+ * row that was live then). The caller keeps the region small, so that is a
+ * row or two at most.
  */
 export class LiveRegion {
-  private anchorRow = 1;
-  /** The text of each live row above the parked one, for working out where they went after a reflow. */
-  private textAbovePark: string[] = [];
-  /** The screen row the cursor was parked on. */
-  private parkedRow = 1;
+  /** The number of live rows above the parked one, as printed. */
+  private rowsAbove = 0;
+  /** relayout() ran: the next update clears the whole region and draws it again. */
+  private redrawAll = false;
   private painted: string[] = [];
   private started = false;
   private readonly marginRows: number;
@@ -48,11 +57,6 @@ export class LiveRegion {
     options: LiveRegionOptions = {},
   ) {
     this.marginRows = options.marginRows ?? 2;
-  }
-
-  /** The screen row the live region starts on. */
-  get anchor(): CursorPosition {
-    return { row: this.anchorRow, col: 1 };
   }
 
   /** Tallest the live region may get; taller content must be clipped by the caller. */
@@ -73,13 +77,11 @@ export class LiveRegion {
     const { rows } = this.screen.size;
     this.started = true;
     this.painted = [];
-    if (cursor.col <= 1) {
-      this.anchorRow = Math.min(cursor.row, rows);
-      return;
+    this.rowsAbove = 0;
+    if (cursor.col > 1) {
+      // A line feed on the bottom row scrolls, which is what a fresh line there needs.
+      this.screen.write(ansi.cursorTo(Math.min(cursor.row, rows), cursor.col) + ansi.resetStyle + '\r\n');
     }
-    // A line feed on the bottom row scrolls, which is what a fresh line there needs.
-    this.screen.write(ansi.cursorTo(Math.min(cursor.row, rows), cursor.col) + ansi.resetStyle + '\r\n');
-    this.anchorRow = Math.min(cursor.row + 1, rows);
   }
 
   /**
@@ -90,89 +92,62 @@ export class LiveRegion {
     if (!this.started) {
       return;
     }
-    const { rows } = this.screen.size;
-    let output = ansi.beginSynchronizedUpdate + ansi.hideCursor;
-
-    if (commit.length > 0) {
-      output += ansi.cursorTo(this.anchorRow, 1);
-      for (const row of commit) {
-        // Erase first: erasing after a row that fills the width would clear its last cell on some terminals.
-        output += ansi.resetStyle + ansi.eraseLine + encodeRow(row, this.colorDepth) + ansi.resetStyle + '\r\n';
-      }
-      this.anchorRow = Math.min(this.anchorRow + commit.length, rows);
-      // Whatever the live region left below the committed rows is stale now.
-      output += ansi.resetStyle + ansi.eraseDown;
-      this.painted = [];
-    }
-
     const shown = live.length > this.maxLiveRows ? live.slice(live.length - this.maxLiveRows) : live;
-    const overflow = this.anchorRow + shown.length - 1 - rows;
-    if (overflow > 0) {
-      // Scroll the screen up to make room; only rows above the live region leave it.
-      output += ansi.resetStyle + ansi.cursorTo(rows, 1) + '\n'.repeat(overflow);
-      this.anchorRow -= overflow;
-      this.painted = [];
-    }
-
     const encoded = shown.map((row) => encodeRow(row, this.colorDepth));
-    encoded.forEach((content, index) => {
-      if (this.painted[index] === content) {
+
+    // The first live row to write: the top when committing, else the first that changed. Every row
+    // from there down is written again, so the cursor only ever moves down by writing.
+    let first = 0;
+    if (commit.length === 0 && !this.redrawAll) {
+      while (first < encoded.length && first < this.painted.length && encoded[first] === this.painted[first]) {
+        first++;
+      }
+      if (first === encoded.length && encoded.length === this.painted.length) {
         return;
       }
-      output += ansi.cursorTo(this.anchorRow + index, 1) + ansi.resetStyle + ansi.eraseLine + content + ansi.resetStyle;
-    });
-    for (let index = encoded.length; index < this.painted.length; index++) {
-      output += ansi.cursorTo(this.anchorRow + index, 1) + ansi.eraseLine;
+      // No further down than the parked row: the cursor is there, and rows are only written downwards.
+      first = Math.min(first, Math.max(0, encoded.length - 1), this.rowsAbove);
     }
-    this.painted = encoded;
 
-    const last = Math.max(0, shown.length - 1);
-    this.textAbovePark = shown.slice(0, last).map(rowText);
-    this.parkedRow = this.anchorRow + last;
-    output += ansi.cursorTo(this.anchorRow + last, 1) + ansi.endSynchronizedUpdate;
+    let output = ansi.beginSynchronizedUpdate + ansi.hideCursor;
+    const up = this.rowsAbove - first;
+    if (up > 0) {
+      output += ansi.cursorUp(up);
+    }
+    // Everything from here down is the live region's: clear it, then write.
+    output += '\r' + ansi.resetStyle + ansi.eraseDown;
+    for (const row of commit) {
+      output += encodeRow(row, this.colorDepth) + ansi.resetStyle + '\r\n';
+    }
+    // Live rows are written without autowrap: one written for a wider terminal than it lands in (the
+    // terminal was resized while it was on its way) is cut at the edge instead of wrapping, so each
+    // live row is one terminal row, as the next update counts it. It is drawn again at the new width
+    // moments later. Committed rows keep autowrap: they are never cut.
+    output += ansi.autowrapOff;
+    encoded.slice(first).forEach((content, index, written) => {
+      output += content + ansi.resetStyle + (index < written.length - 1 ? '\r\n' : '');
+    });
+    // Parked in column 1 of the last live row (or on the fresh line after the committed rows).
+    output += '\r' + ansi.autowrapOn + ansi.endSynchronizedUpdate;
     this.screen.write(output);
+    this.painted = encoded;
+    this.rowsAbove = Math.max(0, encoded.length - 1);
+    this.redrawAll = false;
   }
 
   /**
-   * Re-anchor after a resize. `cursor` is where the terminal now reports the
-   * cursor, which was parked in column 1 of the live region's last row; the
-   * old live rows are erased and the caller repaints at the new width.
-   *
-   * A terminal that reflows rewraps the live rows above the parked one, and
-   * the cursor moves down with them; one that does not reflow leaves the
-   * cursor where it was. Only when the cursor moved down at least as far as
-   * those rows grew (or sits on the bottom row, where content scrolls
-   * instead) is the rewrap counted; otherwise the rows above count one row
-   * each, which may leave stale rows but never paints over committed text.
-   * (A terminal that does not reflow, with the region on the bottom row, is
-   * the one case still taken as reflowing.)
-   *
-   * Without a report (`undefined`), the live region restarts at the row the
-   * cursor was parked on: it may leave stale rows above, but it never moves
-   * up onto committed text.
+   * After a resize: the next update clears the live region and draws it
+   * again at the new width, in one synchronized update, so the region never
+   * shows empty. It moves up by the live rows above the cursor as they were
+   * printed, the fewest they can take now, so committed text is never
+   * reached; if the terminal rewrapped them taller, the top of them stays
+   * behind (see the class comment). Writes nothing itself, and needs
+   * nothing from the terminal.
    */
-  relayout(cursor: CursorPosition | undefined): void {
-    if (!this.started) {
-      return;
+  relayout(): void {
+    if (this.started) {
+      this.redrawAll = true;
     }
-    const { cols, rows } = this.screen.size;
-    let anchor: number;
-    if (!cursor) {
-      anchor = this.parkedRow;
-    } else {
-      const unwrapped = this.textAbovePark.length;
-      const rewrapped = this.textAbovePark.reduce((sum, text) => sum + rowsNeeded(text, cols), 0);
-      // Rewrapping pushes the cursor down at least as far as the rows above it grew, unless it is on
-      // the bottom row (where the terminal scrolls content up instead). Anything less is ambiguous,
-      // and then the anchor that cannot reach committed text wins: at worst it leaves stale rows.
-      const grown = rewrapped - unwrapped;
-      const reflowed = grown === 0 || cursor.row - this.parkedRow >= grown || cursor.row >= rows;
-      anchor = cursor.row - (reflowed ? rewrapped : unwrapped);
-    }
-    this.anchorRow = Math.min(Math.max(1, anchor), rows);
-    this.textAbovePark = [];
-    this.painted = [];
-    this.screen.write(ansi.cursorTo(this.anchorRow, 1) + ansi.resetStyle + ansi.eraseDown);
   }
 
   /** Erase the live region and leave a visible cursor at its start: a fresh line below everything committed. */
@@ -181,16 +156,15 @@ export class LiveRegion {
       return;
     }
     this.started = false;
+    const up = this.rowsAbove;
     this.painted = [];
+    this.rowsAbove = 0;
     this.screen.write(
-      ansi.beginSynchronizedUpdate + ansi.cursorTo(this.anchorRow, 1) + ansi.resetStyle + ansi.eraseDown
+      ansi.beginSynchronizedUpdate + (up > 0 ? ansi.cursorUp(up) : '') + '\r' + ansi.resetStyle + ansi.eraseDown
         + ansi.showCursor + ansi.endSynchronizedUpdate,
     );
   }
 }
-
-/** A row's text, trailing blanks left out: what a terminal rewraps. */
-const rowText = (row: PaintRow): string => row.map((span) => span.text).join('').replace(/ +$/, '');
 
 /**
  * Rows `text` takes when a terminal wraps it at `cols`, counting cells as

@@ -86,7 +86,7 @@ describe('AgentView', { timeout: 30_000 }, () => {
       '● Read src/profile/profile.test.ts · 40 lines',
       '● grep -rn "fetchUser(" src · 3 results',
       '· Context compacted: 48k tokens → 12k',
-      '● Edit src/pages/Profile.tsx  +3 −0',
+      '● Edit src/pages/Profile.tsx  +3',
       '● $ pnpm test --filter profile',
       '! Settings.tsx also calls fetchUser() without a check; not changed.',
       '✓ 21s · 6 tools',

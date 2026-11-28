@@ -81,6 +81,7 @@ export class InlineOverlay {
     this.session = { origin: { ...cursor }, anchor, lastCursor: undefined, laidOutSize: { ...this.host.size } };
     this.headless.resize({ width: cols, height: MAX_VIEW_ROWS });
     this.painter.invalidate();
+    this.view.setScreenRows(this.host.size.rows);
     this.view.open({ inputCol: anchor.col, trigger, ...options });
     if (initialInput) {
       this.headless.feed(initialInput);
@@ -177,6 +178,7 @@ export class InlineOverlay {
 
     session.laidOutSize = { ...this.host.size };
     this.host.write(this.painter.erase(session.anchor));
+    this.view.setScreenRows(this.host.size.rows);
     this.headless.resize({ width: this.host.size.cols, height: MAX_VIEW_ROWS });
     this.headless.requestRender();
   }

@@ -2,6 +2,7 @@ import { base } from '../../fixtures/fake-agent/scenarios/_shared.js';
 import { script as markdown } from '../../fixtures/fake-agent/scenarios/markdown-showcase.js';
 import { script as permission } from '../../fixtures/fake-agent/scenarios/permission.js';
 import { script as tools } from '../../fixtures/fake-agent/scenarios/tool-heavy.js';
+import { LONG_ANSWER } from '../../fixtures/fake-agent/scenarios/long-answer.js';
 import { defineScenario, type Step } from '../../fixtures/fake-agent/types.js';
 
 /*
@@ -27,6 +28,9 @@ export default defineScenario({
   ...base,
   name: 'e2e',
   rules: [
+    // A long answer at a person's reading pace, and as fast as an agent can send it (resize tests).
+    { match: 'paced slowly', script: [{ type: 'message', text: LONG_ANSWER, charsPerTick: 12, tickMs: 50 }] },
+    { match: 'paced quickly', script: [{ type: 'message', text: LONG_ANSWER, charsPerTick: 80, tickMs: 10 }] },
     { match: 'markdown', script: markdown },
     { match: 'tools', script: tools },
     { match: 'permission', script: permission },

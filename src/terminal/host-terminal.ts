@@ -7,13 +7,16 @@ export interface TerminalSize {
 }
 
 interface PendingCursorQuery {
-  buffered: string;
   readonly promise: Promise<CursorPosition>;
   readonly resolve: (position: CursorPosition) => void;
   readonly reject: (error: Error) => void;
   readonly timer: NodeJS.Timeout;
-  /** A plain report that may be Shift+F3 and friends, waiting to see whether a real one follows. */
-  held?: { readonly text: string; readonly position: CursorPosition; readonly timer: NodeJS.Timeout };
+  /**
+   * A plain report that may be Shift+F3 and friends, waiting to see whether
+   * a real one follows; input that comes meanwhile waits behind it (`after`),
+   * so keys keep their order.
+   */
+  held?: { readonly text: string; readonly position: CursorPosition; readonly timer: NodeJS.Timeout; after: string };
 }
 
 /** How long an ambiguous plain report waits for a clearer one before it counts as the answer. */
@@ -94,6 +97,11 @@ export class HostTerminal {
         }
       }
     }
+    // Keys typed behind a possible Shift+F3 still go on (the held report itself, likely a late reply, does not).
+    const heldKeys = this.pendingCursorQuery?.held?.after;
+    if (heldKeys) {
+      this.deliver(heldKeys);
+    }
     // Nothing is delivered or settled after this: the query in flight fails, and every timer goes.
     this.inputListener = undefined;
     const query = this.pendingCursorQuery;
@@ -125,92 +133,102 @@ export class HostTerminal {
   }
 
   /**
-   * Ask the terminal where the cursor is. Keystrokes that arrive while waiting
-   * are delivered as usual once the reply (or the timeout) comes in. Callers
-   * that ask while a query is in flight share its answer.
+   * Ask the terminal where the cursor is. Keystrokes that arrive while
+   * waiting go on at once; only what may be the reply is held. Callers that
+   * ask while a query is in flight share its answer, so a stalled terminal
+   * costs one timeout, not one per caller.
    */
   queryCursorPosition(timeoutMs = 500): Promise<CursorPosition> {
     if (this.pendingCursorQuery) {
       return this.pendingCursorQuery.promise;
     }
-
     let resolve!: (position: CursorPosition) => void;
     let reject!: (error: Error) => void;
     const promise = new Promise<CursorPosition>((promiseResolve, promiseReject) => {
       resolve = promiseResolve;
       reject = promiseReject;
     });
+    // Callers that share a query may not all wait on it.
+    promise.catch(() => undefined);
     const timer = setTimeout(() => {
       this.failPendingQuery(new Error('The terminal did not report its cursor position.'));
     }, timeoutMs);
-    this.pendingCursorQuery = { buffered: '', promise, resolve, reject, timer };
+    this.pendingCursorQuery = { promise, resolve, reject, timer };
     // Both forms: the DEC answer cannot be mistaken for a key; the plain one works everywhere.
     this.write(ansi.requestDecCursorPosition + ansi.requestCursorPosition);
     return promise;
   }
 
+  /**
+   * Input, with the replies to Shelly's queries taken out. Keystrokes are
+   * never held for a reply: while a query waits, only what may be its reply
+   * is (a report that could be Shift+F3, briefly; the start of a report cut
+   * off at the end of a read, briefly). Typing and Ctrl-C go on at once.
+   */
   private readonly handleData = (data: string | Buffer): void => {
     let text = typeof data === 'string' ? data : data.toString('utf8');
-    const query = this.pendingCursorQuery;
-
-    if (!query) {
-      this.passOn(text);
-      return;
+    if (this.partialReport) {
+      clearTimeout(this.partialReport.timer);
+      text = this.partialReport.text + text;
+      this.partialReport = undefined;
     }
+    // A reply still owed for an earlier query (the plain echo of a DEC answer) comes ahead of a
+    // new query's own: taken as that query's answer, it would leave the new query's to reach the shell.
+    text = this.dropLateReplies(text);
 
-    if (this.lateRepliesOwed()) {
-      // A reply still owed for an earlier query (the plain echo of a DEC
-      // answer) comes ahead of this query's own: taken as this query's answer,
-      // it would leave this query's replies to reach the shell as typed text.
-      if (this.partialReport) {
-        clearTimeout(this.partialReport.timer);
-        text = this.partialReport.text + text;
-        this.partialReport = undefined;
-      }
-      text = this.dropLateReplies(text);
-    }
-
-    query.buffered += text;
-    for (;;) {
-      const report = extractCursorReport(query.buffered);
+    for (let query = this.pendingCursorQuery; query; query = this.pendingCursorQuery) {
+      const report = extractCursorReport(text);
       if (!report) {
-        return;
+        break;
       }
       if (report.kind === 'plain' && report.ambiguous && !query.held) {
-        // Maybe Shift+F3: hold it and see whether a clearer report follows.
-        query.buffered = report.remaining;
+        // Maybe Shift+F3: hold it (and what follows, to keep keys in order) and see whether a clearer
+        // report follows.
+        this.deliver(report.before);
         const held = report.position;
         query.held = {
           text: `\u001b[${held.row};${held.col}R`,
           position: held,
           timer: setTimeout(() => this.settleQuery(held), AMBIGUOUS_REPORT_WAIT_MS),
+          after: '',
         };
+        text = report.after;
         continue;
       }
-      // A held report followed by another one was a key after all.
-      query.buffered = (query.held?.text ?? '') + report.before + report.after;
+      if (query.held) {
+        // A held report followed by another one was a key after all: it goes on, in order.
+        clearTimeout(query.held.timer);
+        this.deliver(query.held.text + query.held.after);
+        query.held = undefined;
+      }
+      this.deliver(report.before);
       if (report.kind === 'dec') {
         // A terminal that answers the DEC form also answers the plain one, right behind it.
         this.expectLateReplies(1, report.position);
       }
       this.settleQuery(report.position);
-      return;
+      text = this.dropLateReplies(report.after);
     }
+    this.deliverOrHold(text);
   };
 
-  /** Resolve the pending query with `position` and pass on the keystrokes that came with it. */
+  /** Resolve the pending query with `position`. */
   private settleQuery(position: CursorPosition): void {
     const query = this.pendingCursorQuery;
     if (!query) {
       return;
     }
     clearTimeout(query.timer);
+    const after = query.held?.after ?? '';
     if (query.held) {
       clearTimeout(query.held.timer);
     }
     this.pendingCursorQuery = undefined;
     query.resolve(position);
-    this.passOn(query.buffered);
+    // Input that waited behind a held report that turned out to be the answer.
+    if (after) {
+      this.deliverOrHold(after);
+    }
   }
 
   private expectLateReplies(count: number, position?: CursorPosition): void {
@@ -256,31 +274,34 @@ export class HostTerminal {
   }
 
   /**
-   * Pass input on to the listener, without the replies still owed. While
-   * replies are owed, input that ends in what may be the start of one is
-   * held back briefly, so a reply split across two reads is recognised
-   * whole instead of reaching the shell in pieces.
+   * Where input goes once the replies in it are taken out. One path for all
+   * of it, so keys keep their order:
+   * - the start of a reply cut off at the end of a read (while a reply is
+   *   owed or awaited) waits briefly for the rest, then goes on as input if
+   *   nothing follows;
+   * - while a report that may be Shift+F3 is held, everything else waits
+   *   behind it (see settleQuery, stop);
+   * - otherwise it goes on at once.
    */
-  private passOn(input: string): void {
+  private deliverOrHold(input: string, mayBeCut = true): void {
     let text = input;
-    if (this.partialReport) {
-      clearTimeout(this.partialReport.timer);
-      text = this.partialReport.text + text;
-      this.partialReport = undefined;
-    }
-    text = this.dropLateReplies(text);
-    const partial = this.lateRepliesOwed() ? PARTIAL_REPORT.exec(text) : null;
+    const partial = mayBeCut && (this.lateRepliesOwed() || this.pendingCursorQuery) ? PARTIAL_REPORT.exec(text) : null;
     if (partial) {
-      const held = text.slice(partial.index);
+      const start = text.slice(partial.index);
       text = text.slice(0, partial.index);
       this.partialReport = {
-        text: held,
+        text: start,
         timer: setTimeout(() => {
           // Nothing followed: it was input after all.
           this.partialReport = undefined;
-          this.deliver(held);
+          this.deliverOrHold(this.dropLateReplies(start), false);
         }, PARTIAL_REPORT_WAIT_MS),
       };
+    }
+    const held = this.pendingCursorQuery?.held;
+    if (held) {
+      held.after += text;
+      return;
     }
     this.deliver(text);
   }
@@ -307,6 +328,5 @@ export class HostTerminal {
     query.reject(error);
     // A slow terminal (over SSH, say) may still answer: both replies are swallowed if they come soon.
     this.expectLateReplies(2);
-    this.passOn(query.buffered);
   }
 }

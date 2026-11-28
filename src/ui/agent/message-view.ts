@@ -10,6 +10,7 @@ import {
 import { theme } from '../theme.js';
 import { sanitizeTerminalText } from '../../render/sanitize.js';
 import { highlightCodeLine } from './code-highlight.js';
+import { splitAfterRows } from './line-split.js';
 import { sanitizeText } from './lines.js';
 import { toStyledText } from './styled.js';
 
@@ -50,9 +51,14 @@ export interface StableSplit {
 }
 
 interface NativeBlock {
+  readonly kind?: number;
   readonly parent: number | null | undefined;
   readonly sourceStart: number;
+  readonly sourceEnd?: number;
 }
+
+/** OpenTUI's block kind for a paragraph (OT_MD_PARAGRAPH). */
+const PARAGRAPH = 0;
 
 /**
  * One agent message: streaming markdown in a box. Finished top-level blocks
@@ -67,8 +73,14 @@ export class MessageView {
   private text = '';
   private rawText = '';
   private readonly codeBlocks = new Map<number, CodeBlockView>();
+  private readonly codeMarks: boolean;
 
-  constructor(private readonly renderer: CliRenderer, style: SyntaxStyle) {
+  /**
+   * `codeMarks`: keep the backticks around inline code. Without colour
+   * (NO_COLOR), they are the only way to tell code from prose.
+   */
+  constructor(private readonly renderer: CliRenderer, style: SyntaxStyle, { codeMarks = false }: { codeMarks?: boolean } = {}) {
+    this.codeMarks = codeMarks;
     this.root = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
     this.markdown = new MarkdownRenderable(renderer, {
       syntaxStyle: style,
@@ -79,6 +91,7 @@ export class MessageView {
       flexShrink: 0,
       tableOptions: { style: 'grid', widthMode: 'content', borderColor: theme.muted, wrapMode: 'word', cellPaddingX: 1 },
       renderBlock: (block) => (block.kind === 'code' ? this.renderCode(block) : undefined),
+      ...(codeMarks ? { inlineHook: (spans) => spans.map((span) => (span.code ? { ...span, text: `\`${span.text}\`` } : span)) } : {}),
     });
     this.root.add(this.markdown);
   }
@@ -109,16 +122,11 @@ export class MessageView {
     if (committed <= 0) {
       return undefined;
     }
-    const doc = (this.markdown as unknown as { _doc?: { blocks?: readonly NativeBlock[] } })._doc;
-    const blocks = doc?.blocks;
-    const children = this.markdown.getChildren();
-    if (!Array.isArray(blocks)) {
+    const layout = this.topLevelBlocks();
+    if (!layout || committed >= layout.children.length) {
       return undefined;
     }
-    const topLevel = blocks.filter((block) => block.parent === null || block.parent === undefined || block.parent === -1);
-    if (topLevel.length !== children.length || committed >= children.length) {
-      return undefined;
-    }
+    const { blocks: topLevel, children } = layout;
     const next = children[committed]!;
     const byteOffset = topLevel[committed]!.sourceStart;
     const row = next.y - this.markdown.y;
@@ -126,6 +134,50 @@ export class MessageView {
       return undefined;
     }
     return { row, byteOffset };
+  }
+
+  /**
+   * Where the paragraph still streaming at the end of the message can be cut
+   * between rows (see splitAfterRows): after all of its rows but the last,
+   * or as many as can be cut with certainty. `rowText(row)` is the text of a
+   * row as drawn, counted from the top of the markdown. Undefined when the
+   * message does not end in a paragraph, or no row can be cut.
+   */
+  lineSplit(rowText: (row: number) => string): StableSplit | undefined {
+    const layout = this.topLevelBlocks();
+    const block = layout?.blocks.at(-1);
+    const child = layout?.children.at(-1);
+    if (!block || !child || block.kind !== PARAGRAPH || block.sourceEnd === undefined) {
+      return undefined;
+    }
+    const top = child.y - this.markdown.y;
+    const height = child.height;
+    if (height < 2 || top < 0) {
+      return undefined;
+    }
+    const shown = Buffer.from(this.text.slice(this.shownFrom), 'utf8');
+    const source = shown.subarray(block.sourceStart, block.sourceEnd).toString('utf8');
+    const rows = Array.from({ length: height - 1 }, (_, index) => rowText(top + index));
+    const split = splitAfterRows(source, rows, { codeMarks: this.codeMarks });
+    if (!split) {
+      return undefined;
+    }
+    return { row: top + split.rows, byteOffset: block.sourceStart + Buffer.byteLength(source.slice(0, split.offset), 'utf8') };
+  }
+
+  /** The top-level blocks of the last layout and the renderables that draw them, when they line up. */
+  private topLevelBlocks(): { blocks: readonly NativeBlock[]; children: ReturnType<MarkdownRenderable['getChildren']> } | undefined {
+    const doc = (this.markdown as unknown as { _doc?: { blocks?: readonly NativeBlock[] } })._doc;
+    const blocks = doc?.blocks;
+    const children = this.markdown.getChildren();
+    if (!Array.isArray(blocks)) {
+      return undefined;
+    }
+    const topLevel = blocks.filter((block) => block.parent === null || block.parent === undefined || block.parent === -1);
+    if (topLevel.length !== children.length) {
+      return undefined;
+    }
+    return { blocks: topLevel, children };
   }
 
   /** Drop the source before `byteOffset` (of the shown source) once its rows are in scrollback. */
