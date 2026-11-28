@@ -131,6 +131,64 @@ describe('replayed shell commands', () => {
   });
 });
 
+describe("replayed sessions through Shelly's own client (ACP v2 with Claude Code)", () => {
+  const lastTool = (updates: readonly AgentUpdate[]) => {
+    const tool = updates.findLast((update) => update.type === 'tool');
+    assert.ok(tool?.type === 'tool');
+    return tool.tool;
+  };
+
+  it('a Write shows the new file as a diff', TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('claude', 'shelly-write', (session) =>
+      turn(session, 'write', none).pipe(Effect.map((updates) => [updates])));
+    const tool = lastTool(updates!);
+    assert.equal(tool.kind, 'edit');
+    assert.equal(tool.status, 'completed');
+    assert.equal(tool.title, 'Write /tmp/extra/notes.txt');
+    assert.deepEqual(tool.content, [
+      { type: 'diff', path: '/tmp/extra/notes.txt', oldText: null, newText: 'alpha\nbeta\ngamma', truncated: false },
+    ]);
+    assert.equal(endOf(updates!).stopReason, 'end_turn');
+  });
+
+  it("a command's output comes from v2 terminal updates", TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('claude', 'shelly-bash', (session) =>
+      turn(session, 'run it', none).pipe(Effect.map((updates) => [updates])));
+    const tool = lastTool(updates!);
+    assert.equal(tool.kind, 'execute');
+    assert.equal(tool.status, 'failed');
+    assert.deepEqual(tool.content, [{ type: 'text', text: 'one\ntwo\nthree\noops\nExit code 3', truncated: false }]);
+  });
+
+  it("OpenCode's write, which sends no diff when it doesn't ask, shows the new file", TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('opencode', 'shelly-write', (session) =>
+      turn(session, 'write', none).pipe(Effect.map((updates) => [updates])));
+    const tool = lastTool(updates!);
+    assert.equal(tool.status, 'completed');
+    assert.deepEqual(tool.content[0], { type: 'diff', path: '/tmp/extra/notes.txt', oldText: null, newText: 'alpha\nbeta\ngamma\n', truncated: false });
+  });
+
+  it("OpenCode's write after a permission prompt keeps the diff it asked with", TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('opencode', 'permission-allow', (session) =>
+      turn(session, 'write', (update) =>
+        update.type === 'permission' ? session.respond(update.requestId, 'once') : Effect.void,
+      ).pipe(Effect.map((updates) => [updates])));
+    const tool = lastTool(updates!);
+    assert.equal(tool.status, 'completed');
+    assert.equal(tool.content[0]?.type, 'diff');
+  });
+
+  it('a signed-out Claude Code ends the turn with the sign-in message', TIMEOUT, async () => {
+    const { turns: [updates] } = await replay('claude', 'shelly-signed-out', (session) =>
+      turn(session, 'hi', none).pipe(Effect.map((updates) => [updates])));
+    assert.deepEqual(endOf(updates!), {
+      type: 'end',
+      stopReason: 'error',
+      error: "Claude Code isn't signed in. Run `claude` once to sign in.",
+    });
+  });
+});
+
 describe('replayed OpenCode sessions', () => {
   it('a rejected write: OpenCode cancels the turn, Shelly reports the rejection', TIMEOUT, async () => {
     const { session, turns: [updates] } = await replay('opencode', 'permission-reject', (session) =>
