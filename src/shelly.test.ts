@@ -324,6 +324,33 @@ describe('Shelly hands the terminal back', () => {
     await t.stop();
   });
 
+  it('passes the answer to a query the shell asked just before Shelly took the terminal, while busy', async () => {
+    const t = setup();
+    t.prompt();
+    t.shellOutput('\u001b[6n');
+    let keys = '';
+    take(t.internals, (data) => {
+      keys += data;
+      return true;
+    });
+    assert.equal(t.internals.mode, 'busy');
+    t.type('\u001b[5;3Rq');
+    assert.equal(t.toShell.at(-1), '\u001b[5;3R', 'to the shell, at once');
+    assert.equal(keys, 'q', 'only the key to what Shelly draws');
+    await t.stop();
+  });
+
+  it('passes the answer to the shell while the input is open, not to the input as keys', async () => {
+    const t = setup();
+    t.prompt();
+    t.shellOutput('\u001b[c');
+    t.internals.mode = 'overlay';
+    t.type('\u001b[?62;22c');
+    assert.equal(t.toShell.at(-1), '\u001b[?62;22c');
+    t.internals.mode = 'shell';
+    await t.stop();
+  });
+
   it('holds a key that looks like an answer (Ctrl+F3) when no query waits for one', async () => {
     const t = setup();
     t.prompt();

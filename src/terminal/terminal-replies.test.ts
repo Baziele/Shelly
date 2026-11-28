@@ -41,6 +41,20 @@ describe('TerminalReplies', () => {
     assert.equal(replies.split('\u001b[2;3R').replies, '\u001b[2;3R');
   });
 
+  it('keeps at most 32 queries waiting, however many the output holds with nobody typing', () => {
+    let now = 0;
+    const replies = new TerminalReplies(() => now);
+    replies.asked('\u001b[6n'.repeat(1000));
+    const answers = '\u001b[1;1R'.repeat(40);
+    assert.equal(replies.split(answers).replies, '\u001b[1;1R'.repeat(32));
+    // Expired as more come, without a key typed.
+    replies.asked('\u001b[6n');
+    now = 2500;
+    replies.asked('\u001b[c');
+    assert.equal(replies.split('\u001b[2;2R').keys, '\u001b[2;2R', 'the cursor query from before is gone');
+    assert.equal(replies.split('\u001b[?62c').replies, '\u001b[?62c');
+  });
+
   it('stops waiting for an answer a terminal never gives', () => {
     let now = 0;
     const replies = new TerminalReplies(() => now);

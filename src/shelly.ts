@@ -366,35 +366,35 @@ export class Shelly {
 
   private handleInput(data: string): void {
     this.eraseNoticeBelow();
-    if ((this.mode === 'shell' || this.mode === 'busy' || this.mode === 'overlay') && this.replies.waiting) {
-      // Answers go where they always do here; they settle their queries all the same.
-      this.replies.split(data);
+    // In every mode, the terminal's answers to the shell's queries go to it
+    // at once (see passReplies); what is left are keys, routed by mode.
+    const keys = this.passReplies(data);
+    if (!keys) {
+      return;
     }
     switch (this.mode) {
       case 'shell':
-        this.handleShellInput(data);
+        this.handleShellInput(keys);
         break;
       case 'capturing':
       case 'opening':
-        this.queuedInput += this.passReplies(data);
+        this.queuedInput += keys;
         break;
-      case 'returning': {
+      case 'returning':
         // Ctrl-C means now: it reaches the shell at once. Ctrl-D is dropped
         // (at an empty prompt it would close the shell); the rest waits.
-        const keys = this.passReplies(data);
         if (keys.includes(INTERRUPT)) {
           this.shell.write(INTERRUPT);
         }
         this.queuedInput += keys.replaceAll(INTERRUPT, '').replaceAll(EOF_KEY, '');
         break;
-      }
       case 'busy':
-        if (!this.busyKeys?.(data)) {
-          this.queuedInput += data;
+        if (!this.busyKeys?.(keys)) {
+          this.queuedInput += keys;
         }
         break;
       case 'overlay':
-        this.overlay?.feed(data);
+        this.overlay?.feed(keys);
         break;
     }
   }

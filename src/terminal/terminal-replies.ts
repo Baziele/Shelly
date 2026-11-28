@@ -15,6 +15,12 @@ type Kind = 'cursor' | 'status' | 'attributes' | 'mode' | 'keyboard' | 'window' 
 
 /** A terminal that does not know a query never answers it: after this, the query no longer counts. */
 const ANSWER_WAIT_MS = 2000;
+/**
+ * Most queries waiting at once. A shell asks a handful at a time; output
+ * full of them (a file of escape sequences on the screen) with nobody
+ * typing would otherwise pile up. The oldest go first.
+ */
+const MAX_OUTSTANDING = 32;
 /** Longest piece of an unfinished query kept for the next chunk of output. */
 const MAX_TAIL = 256;
 
@@ -74,15 +80,24 @@ export class TerminalReplies {
 
   /** Shell output on its way to the terminal: note the queries in it. */
   asked(output: string): void {
-    if (!output.includes('\u001b') && !this.tail) {
+    // On all the shell's output: most of it has no escape at all.
+    if (!this.tail && output.indexOf('\u001b') < 0) {
       return;
     }
     const data = this.tail + output;
     const at = this.now();
+    let added = false;
     for (const match of data.matchAll(QUERY)) {
       const kind = queryKind(match);
       if (kind) {
         this.outstanding.push({ kind, at });
+        added = true;
+      }
+    }
+    if (added) {
+      this.expire();
+      if (this.outstanding.length > MAX_OUTSTANDING) {
+        this.outstanding.splice(0, this.outstanding.length - MAX_OUTSTANDING);
       }
     }
     const last = data.lastIndexOf('\u001b');
