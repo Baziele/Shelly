@@ -691,9 +691,6 @@ export class AgentSession {
         if (reason) {
           this.notifyHidden(`✗ ${reason}`);
         }
-      } else if (!view.hasStarted) {
-        view.destroy();
-        terminal.write(reason ? errorText(reason, colorDepth) : plainText('Stopped.', colorDepth, 'muted'));
       } else {
         view.apply(synthetic({
           type: 'turn.ended',
@@ -702,7 +699,12 @@ export class AgentSession {
           error: reason ?? null,
           durationMs: Date.now() - startedAt,
         }));
+        // Waits for the view to start if the terminal has not said where the cursor is yet.
         await view.finish();
+        if (!view.hasStarted) {
+          // It never did: the reason as plain text, where the view would have been.
+          terminal.write(reason ? errorText(reason, colorDepth) : plainText('Stopped.', colorDepth, 'muted'));
+        }
       }
     } finally {
       this.releaseView(output);

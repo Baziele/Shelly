@@ -371,10 +371,7 @@ export class Shelly {
   }
 
   private handleInput(data: string): void {
-    if (this.noticeBelow) {
-      this.host.write(eraseBelowLine(this.noticeBelow));
-      this.noticeBelow = undefined;
-    }
+    this.eraseNoticeBelow();
     switch (this.mode) {
       case 'shell':
         this.handleShellInput(data);
@@ -720,6 +717,11 @@ export class Shelly {
    * text goes (see replayable), straight to the line, unexecuted.
    */
   private replayTyped(typed: string, prefix = ''): void {
+    if (!typed && !prefix) {
+      return;
+    }
+    // A key erases bash 3.2's notice before it reaches the shell, replayed or not.
+    this.eraseNoticeBelow();
     const interrupt = typed.lastIndexOf(INTERRUPT);
     if (interrupt >= 0) {
       this.shell.write(INTERRUPT);
@@ -729,6 +731,13 @@ export class Shelly {
     if (text) {
       this.detector.markLineUnknown();
       this.writeToShell(text);
+    }
+  }
+
+  private eraseNoticeBelow(): void {
+    if (this.noticeBelow) {
+      this.host.write(eraseBelowLine(this.noticeBelow));
+      this.noticeBelow = undefined;
     }
   }
 
