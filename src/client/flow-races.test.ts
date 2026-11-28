@@ -177,6 +177,28 @@ describe('keys before the turn is under way', () => {
     }
   });
 
+  it('Esc while the thread is being made, then another request: refused until the first is under way, no second thread', async () => {
+    const { rig, create } = await begin();
+    try {
+      await sleep(50);
+      rig.type('\u001b');
+      await until(() => rig.mode() === 'returning', 'the hand-back', 250);
+      rig.prompt();
+      await until(() => rig.mode() === 'shell', 'the shell');
+      await openAgent(rig);
+      await typeKeys(rig, 'and another');
+      rig.type('\r');
+      await until(() => /Still sending your last request/.test(plain(rig.written())), 'the refusal');
+      assert.equal(rig.mode(), 'overlay', 'the input stays open, with what was typed');
+      assert.equal(rig.daemon.calls.filter((call) => call === 'createThread').length, 1);
+    } finally {
+      create.resolve(summary('t1'));
+      await sleep(20);
+      for (const prompt of rig.daemon.prompts) prompt.feed.end();
+      await rig.stop();
+    }
+  });
+
   it('Ctrl-C while the thread is being made: the request is never sent, and the prompt comes back', async () => {
     const { rig, create } = await begin();
     try {

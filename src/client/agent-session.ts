@@ -147,6 +147,8 @@ export class AgentSession {
   /** Per thread, the mode the user last saw reported, so only changes are shown. */
   private readonly shownModes = new Map<string, string>();
   private live: LiveTurn | undefined;
+  /** A request getting its thread ready, before the daemon has a turn for it. */
+  private starting: Output | undefined;
   private unseen: UnseenTurn | undefined;
   /** The view on screen now, for resizes. */
   private view: AgentView | undefined;
@@ -305,10 +307,27 @@ export class AgentSession {
       }
       return;
     }
+    if (this.starting?.backgrounded) {
+      // Sent to the background before its thread was ready: it is still on its way (and may make the thread).
+      this.host.overlay.setError('Still sending your last request · try again in a moment');
+      return;
+    }
     const output = this.beginOutput(open, text);
     if (!output) {
       return;
     }
+    this.starting = output;
+    try {
+      await this.send(output, text);
+    } finally {
+      if (this.starting === output) {
+        this.starting = undefined;
+      }
+    }
+  }
+
+  /** Make the thread ready, send the request and follow its turn, in `output`. */
+  private async send(output: Output, text: string): Promise<void> {
     const { view } = output;
     const started = Date.now();
     let client: DaemonClient;
@@ -341,6 +360,9 @@ export class AgentSession {
       // The daemon took the turn: from here this terminal tracks it (not before, so a refused
       // prompt never replaces a turn that is still running).
       this.turnTaken(live, context);
+      if (this.starting === output) {
+        this.starting = undefined;
+      }
       if (output.cancelled) {
         // Ctrl-C while the daemon was taking it: stop it now that there is something to stop.
         void client.cancel(threadId).catch(() => undefined);
