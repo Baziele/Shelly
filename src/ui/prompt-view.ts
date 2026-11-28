@@ -490,7 +490,8 @@ export class PromptView {
     const room = this.renderer.terminalWidth - this.textOffset - 1;
     const typed = displayWidth(this.input.value);
     const hint = this.hint && !this.busy && !this.picker ? this.hint : undefined;
-    const hintCells = hint ? displayWidth(hint) + HINT_GAP : 0;
+    // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
+    const hintCells = hint ? displayWidth(hint) + HINT_GAP + 1 : 0;
 
     let placeholder: string = displayWidth(full) <= room ? full : short;
     let showHint = false;
@@ -506,8 +507,8 @@ export class PromptView {
     this.input.placeholder = placeholder;
     this.hintText.visible = showHint;
     if (hint && showHint) {
-      this.hintText.content = toStyledText([[seg(hint, 'muted')]]);
-      this.hintText.width = displayWidth(hint);
+      this.hintText.content = toStyledText([[seg(hint, 'muted'), seg(' ')]]);
+      this.hintText.width = displayWidth(hint) + 1;
     }
   }
 }

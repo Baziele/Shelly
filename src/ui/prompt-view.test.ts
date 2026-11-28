@@ -46,7 +46,8 @@ describe('PromptView', { timeout: 20_000 }, () => {
   it('shows the hint right-aligned, shortens the placeholder for it, and hides it when there is no room', async () => {
     const wide = await open(80, '::', '', { hint: '● claude is working · enter to watch' });
     const [row] = await wide.screen((lines) => lines[0]?.endsWith('enter to watch') ?? false);
-    assert.ok(row!.startsWith(`${PROMPT}:: Ask anything`) && row!.endsWith('● claude is working · enter to watch') && row!.length === 80, row ?? '');
+    // One cell stays free at the right edge (● and · are two cells wide in some terminals).
+    assert.ok(row!.startsWith(`${PROMPT}:: Ask anything`) && row!.endsWith('● claude is working · enter to watch') && row!.length === 79, row ?? '');
     overlay?.destroy();
     const narrow = await open(44, '::', 'why did the build fail', { hint: 'claude · new thread' });
     const narrowExpected = [`${PROMPT}:: why did the build fail`];
