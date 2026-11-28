@@ -99,6 +99,85 @@ describe('TriggerDetector', () => {
     assert.ok(triggered(subject.push('::')));
   });
 
+  describe('on a line it lost track of, when the shell can be asked', () => {
+    const asking = (canAsk = true) => new TriggerDetector({ triggers: ['::', '__'], canAskLine: () => canAsk });
+    const asked = (actions: TriggerAction[]) => actions.find((action) => action.type === 'ask');
+
+    it('asks before a character that could start a trigger, holding it and all after it', () => {
+      const subject = asking();
+      subject.push('\u001b[A');
+      const actions = subject.push('x::y');
+      assert.equal(forwarded(actions), 'x');
+      assert.deepEqual(asked(actions), { type: 'ask', pending: '::y' });
+      assert.equal(forwarded(subject.push('ls')), 'ls', 'only trigger characters are asked about');
+    });
+
+    it('fires once the shell says the line is empty', () => {
+      const subject = asking();
+      subject.push('\u001b[A\u0015');
+      assert.deepEqual(asked(subject.push('::')), { type: 'ask', pending: '::' });
+      subject.markLineEmpty();
+      assert.deepEqual(subject.push('::', { mayAsk: false }), [{ type: 'trigger', trigger: '::', remainder: '' }]);
+    });
+
+    it('forwards the keys as typed once the shell says the line holds text, and follows it from there', () => {
+      const subject = asking();
+      subject.push('\u001b[A');
+      assert.ok(asked(subject.push('::')));
+      subject.markLineTyped(4);
+      assert.equal(forwarded(subject.push('::', { mayAsk: false })), '::');
+      subject.push('\u007f'.repeat(6));
+      assert.ok(triggered(subject.push('__')), 'deleting it all makes the line empty again');
+    });
+
+    it('forwards the keys when the shell does not answer, and asks again next time', () => {
+      const subject = asking();
+      subject.push('\u001b[D');
+      assert.ok(asked(subject.push(':')));
+      assert.equal(forwarded(subject.push(':', { mayAsk: false })), ':');
+      assert.ok(asked(subject.push('_')));
+    });
+
+    it('asks after any plain editing key', () => {
+      for (const key of ['\u001b[A', '\u001b[1;5D', '\u001bOH', '\u001b[3~', '\u0001', '\u0005', '\u000b', '\u0017', '\u0010', '\u001bb', '\u001b\u007f']) {
+        const subject = asking();
+        subject.push(key);
+        assert.ok(asked(subject.push(':')), `after ${JSON.stringify(key)}`);
+      }
+    });
+
+    it('does not ask after keys that may leave the line editor in a mode of its own, until a fresh line', () => {
+      // Tab (a menu), history search, Esc (vi command mode), a prefix key, Alt+X, Shift+Tab, a paste.
+      for (const key of ['\t', '\u0012', '\u0013', '\u001b', '\u0018', '\u001bx', '\u001b[Z', '\u001b[200~ls\u001b[201~']) {
+        const subject = asking();
+        subject.push('\u001b[A');
+        subject.push(key);
+        subject.push('\u001b[D\u0015');
+        assert.equal(forwarded(subject.push('::')), '::', `after ${JSON.stringify(key)}`);
+        subject.push('\r');
+        assert.ok(triggered(subject.push('::')));
+      }
+    });
+
+    it('does not ask when the shell cannot answer, or when told not to', () => {
+      const subject = asking(false);
+      subject.push('\u001b[A');
+      assert.equal(forwarded(subject.push('::')), '::');
+      const other = asking();
+      other.push('\u001b[A');
+      assert.equal(forwarded(other.push('::', { mayAsk: false })), '::');
+    });
+
+    it('asks about a line Shelly put back, and not about one it knows', () => {
+      const subject = asking();
+      subject.markLineUnknown();
+      assert.ok(asked(subject.push(':')));
+      const known = asking();
+      known.push('ls ');
+      assert.equal(forwarded(known.push('::')), '::');
+    });
+  });
+
   it('defers to isEnabled, e.g. when vim owns the terminal', () => {
     assert.equal(forwarded(detector(() => false).push('::')), '::');
   });

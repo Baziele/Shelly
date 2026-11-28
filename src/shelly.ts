@@ -169,6 +169,8 @@ export class Shelly {
   private triggerHoldTimer: NodeJS.Timeout | undefined;
   /** Counts trigger holds, so a hold's late release never releases a newer one. */
   private holds = 0;
+  /** Keys held while the shell says whether its line is empty (a trigger may be starting); undefined when not asking. */
+  private askingLine: string | undefined;
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
   private watchdog: NodeJS.Timeout | undefined;
@@ -213,6 +215,7 @@ export class Shelly {
     this.detector = new TriggerDetector({
       triggers: options.triggers ?? DEFAULT_TRIGGERS,
       isEnabled: () => !this.overlayUnavailable && this.shell.isShellInForeground(),
+      canAskLine: () => this.mode === 'shell' && Boolean(this.lineEditor?.canQuery && this.lineEditor.isAtPrompt),
     });
   }
 
@@ -341,10 +344,14 @@ export class Shelly {
   }
 
   /** Keystrokes for the shell, unless they hold the rewrite hotkey and the shell is at its prompt. */
-  private handleShellInput(data: string): void {
+  private handleShellInput(data: string, mayAsk = true): void {
+    if (this.askingLine !== undefined) {
+      this.askingLine += data;
+      return;
+    }
     const hotkey = this.overlayUnavailable ? undefined : this.findRewriteHotkey(data);
     if (!hotkey) {
-      this.routeToShell(this.detector.push(data));
+      this.routeToShell(this.detector.push(data, { mayAsk }));
       return;
     }
 
@@ -394,6 +401,9 @@ export class Shelly {
     for (const action of actions) {
       if (action.type === 'forward') {
         this.writeToShell(action.data);
+      } else if (action.type === 'ask') {
+        void this.askLine(action.pending);
+        return;
       } else {
         void this.openOverlay(action.trigger, action.remainder);
         return;
@@ -413,6 +423,35 @@ export class Shelly {
           }
         });
       }, TRIGGER_HOLD_MS);
+    }
+  }
+
+  /**
+   * A trigger may be starting on a line the detector lost track of (after
+   * history recall, say): hold the keys while the shell says what its line
+   * holds, then let the detector look at them again. A shell at its prompt
+   * answers within milliseconds; see LineEditor.query for the limit.
+   */
+  private async askLine(pending: string): Promise<void> {
+    this.askingLine = pending;
+    const result = await this.lineEditor!.query();
+    if (result.status === 'captured') {
+      const { buffer, cursor } = result.line;
+      if (buffer === '') {
+        this.detector.markLineEmpty();
+      } else if (cursor === buffer.length && !buffer.includes('\n')) {
+        this.detector.markLineTyped([...buffer].length);
+      }
+    }
+    const held = this.askingLine;
+    this.askingLine = undefined;
+    if (this.disposed) {
+      return;
+    }
+    if (this.mode === 'shell') {
+      this.handleShellInput(held, false);
+    } else {
+      this.queuedInput += held;
     }
   }
 
