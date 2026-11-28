@@ -70,6 +70,12 @@ export interface FlowHost {
    */
   claim(open: OpenInput, onKeys: (data: string) => boolean): Claim | undefined;
   /**
+   * A one-line note for the user at the shell (a turn finished in the
+   * background, say): shown muted below an empty prompt, else above the
+   * next one. Gone once they type.
+   */
+  notice(text: string): void;
+  /**
    * Give the terminal back to the shell, then replay what was typed
    * meanwhile. With a claim: only while it is the one holding the terminal
    * (a later claim replaces it). Without: only from the open input.

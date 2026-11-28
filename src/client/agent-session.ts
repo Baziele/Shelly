@@ -795,19 +795,19 @@ export class AgentSession {
     this.giveBack(output.hold);
   }
 
-  /** A one-line note below the shell's line, when the user is at the prompt and not looking at the turn. */
+  /** A one-line note for the user at the shell, when they are not looking at the turn (nor at the input, whose hint says it). */
   private noticeIfHidden(live: LiveTurn, text: string): void {
     if (!live.view) {
       this.notifyHidden(text);
     }
   }
 
+  /** A one-line note for the user at the shell, unless the input (whose hint says it) or a view is on screen. */
   private notifyHidden(text: string): void {
-    const editor = this.host.lineEditor;
-    if (!editor?.canNotify || !editor.isAtPrompt || this.host.overlay.isOpen || this.view) {
+    if (this.host.overlay.isOpen || this.view) {
       return;
     }
-    void editor.notify(text).catch(() => undefined);
+    this.host.notice(text);
   }
 
   // ─── Watching ─────────────────────────────────────────────────────────────

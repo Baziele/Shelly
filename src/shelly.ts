@@ -167,6 +167,17 @@ export const replayable = (text: string, { pastes }: { readonly pastes: boolean 
 type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'busy' | 'returning';
 
 /**
+ * Whether the cursor is at the start of a line after `data` (given where it
+ * was before): its last character that moves the cursor is a line feed or a
+ * carriage return. Escape sequences (a shell's mode switches, say) do not count.
+ */
+const endsAtLineStart = (data: string, before: boolean): boolean => {
+  const text = data.replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[()][0-9A-Za-z]|[^[\]()])/g, '');
+  const last = text.at(-1);
+  return last === undefined ? before : last === '\n' || last === '\r';
+};
+
+/**
  * A transparent proxy between the terminal and the user's shell. Until a
  * trigger is typed, every byte passes through untouched in both directions.
  */
@@ -182,10 +193,16 @@ export class Shelly {
   private readonly rewriteHotkeys: readonly string[];
   /** What the input was opened for, from the trigger until the shell has its line back. */
   private open: OpenInput | undefined;
-  /** A notice Shelly drew below the shell's line (bash 3.2), erased before the next key. */
+  /** A notice Shelly drew below the shell's line, erased before the next key or the shell's output. */
   private noticeBelow: BelowLineNotice | undefined;
   /** How much of `queuedInput` was typed before bash 3.2's notice was on screen: after it, keys are for the shell. */
   private typedBeforeNotice: number | undefined;
+  /** A note for the user that found the shell busy (or a line being typed): printed above the next prompt. */
+  private pendingNotice: string | undefined;
+  /** Keys handled so far, to tell whether the user typed while Shelly asked where the cursor is. */
+  private inputCount = 0;
+  /** The shell's output so far ended a line (the cursor is at the start of one). */
+  private outputEndedLine = true;
   /** Where keys go in `busy` mode; returns whether they were used. */
   private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
@@ -357,6 +374,7 @@ export class Shelly {
       commands: this.commands,
       lineEditor: this.lineEditor,
       home: this.env.HOME || homedir(),
+      notice: (text) => this.notice(text),
       configPath: configPathForDisplay(this.env),
       shellyHome: shellyHome(this.env),
       recordsCommands: this.markers !== undefined,
@@ -368,6 +386,7 @@ export class Shelly {
   }
 
   private handleInput(data: string): void {
+    this.inputCount++;
     this.eraseNoticeBelow();
     // In every mode, the terminal's answers to the shell's queries go to it
     // at once (see passReplies); what is left are keys, routed by mode.
@@ -589,6 +608,7 @@ export class Shelly {
         this.lineEditor?.handleEvent(segment.event);
         if (segment.event.type === 'cwd') {
           this.warmUp();
+          this.printPendingNotice();
           if (this.promptWait) {
             this.promptWait.sawCwd = true;
           }
@@ -619,6 +639,7 @@ export class Shelly {
     }
     if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
       this.toTerminal(data);
+      this.outputEndedLine = endsAtLineStart(data, this.outputEndedLine);
     } else {
       this.heldShellOutput.push(data);
     }
@@ -637,7 +658,55 @@ export class Shelly {
     void this.loadLink().then((link) => link.startDaemon()).catch(() => undefined);
   }
 
+  /**
+   * A one-line note for the user (a turn finished in the background, say),
+   * muted. At an empty prompt Shelly draws it below the line, where it stays
+   * until the next key or the shell's output; with the shell busy or a line
+   * being typed, it is printed above the next prompt instead.
+   */
+  private notice(text: string): void {
+    const line = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+    if (!line || this.disposed) {
+      return;
+    }
+    if (this.mode !== 'shell' || !this.lineEditor?.isAtPrompt || !this.detector.isLineEmpty) {
+      this.pendingNotice = line;
+      return;
+    }
+    const typed = this.inputCount;
+    void this.host.queryCursorPosition().then(
+      (cursor) => {
+        // Only on the line as it was asked about: a key since, and the cursor may be elsewhere.
+        if (this.disposed || this.inputCount !== typed || this.mode !== 'shell' || !this.lineEditor?.isAtPrompt || !this.detector.isLineEmpty) {
+          this.pendingNotice = line;
+          return;
+        }
+        this.eraseNoticeBelow();
+        const drawn = drawBelowLine(line, cursor, this.host.size);
+        this.host.write(drawn.output);
+        this.noticeBelow = drawn.notice;
+        this.pendingNotice = undefined;
+      },
+      () => {
+        this.pendingNotice = line;
+      },
+    );
+  }
+
+  /** The shell is about to draw a prompt: the note that waited for it goes just above. */
+  private printPendingNotice(): void {
+    const line = this.pendingNotice;
+    if (line === undefined || this.mode !== 'shell') {
+      return;
+    }
+    this.pendingNotice = undefined;
+    this.host.write(`${this.outputEndedLine ? '\r' : '\r\n'}\u001b[2m${line}\u001b[0m\r\n`);
+    this.outputEndedLine = true;
+  }
+
   private async openOverlay(trigger: string, remainder: string, rewrite?: OpenInput['rewrite']): Promise<void> {
+    // The input shows where things stand (a turn that finished, say): the note is not needed.
+    this.pendingNotice = undefined;
     this.mode = 'opening';
     this.open = { trigger, mode: trigger === '__' ? 'fast' : 'agent', rewrite };
     this.queuedInput = remainder;
