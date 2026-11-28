@@ -29,6 +29,28 @@ export const FAST_TRIGGER = '__';
 
 /** Below this many cells between the typed text and the edge, the hint is hidden. */
 const HINT_GAP = 3;
+/** A thread title in the hint is shortened to fit, down to this many cells (… included). */
+const MIN_HINT_TITLE_CELLS = 6;
+
+/**
+ * `hint` in `cells`, its quoted thread title (`“…”`) cut short to fit;
+ * undefined when even a short title would not fit, or there is none.
+ */
+export const shortenTitle = (hint: string, cells: number): string | undefined => {
+  const match = /“([^”]*)”/.exec(hint);
+  if (!match) {
+    return undefined;
+  }
+  const title = match[1]!;
+  const keep = displayWidth(title) - (displayWidth(hint) - cells);
+  if (keep >= displayWidth(title)) {
+    return hint;
+  }
+  if (keep < MIN_HINT_TITLE_CELLS) {
+    return undefined;
+  }
+  return hint.replace(match[0], `“${truncateEnd(title, keep)}”`);
+};
 /** The streamed preview moves to its own row when less room than this is left beside the text. */
 const MIN_PREVIEW_CELLS = 16;
 
@@ -526,25 +548,32 @@ export class PromptView {
     const room = this.renderer.terminalWidth - this.textOffset - 1;
     const typed = displayWidth(this.input.value);
     const hint = this.hint && !this.busy && !this.picker ? this.hint : undefined;
-    // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
-    const hintCells = hint ? displayWidth(hint) + HINT_GAP + 1 : 0;
 
     let placeholder: string = displayWidth(full) <= room ? full : short;
-    let showHint = false;
+    let shown: string | undefined;
     if (hint) {
-      const used = typed > 0 ? typed : displayWidth(placeholder);
-      if (used + hintCells <= room) {
-        showHint = true;
-      } else if (typed === 0 && displayWidth(short) + hintCells <= room) {
-        placeholder = short;
-        showHint = true;
+      // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
+      const roomFor = (text: string): number => room - displayWidth(text) - HINT_GAP - 1;
+      const beside = typed > 0 ? this.input.value : placeholder;
+      // The whole hint, with the shorter placeholder if need be; then with its title shortened.
+      for (const [withPlaceholder, shorten] of [[beside, false], [short, false], [beside, true], [short, true]] as const) {
+        if (withPlaceholder !== beside && typed > 0) {
+          continue;
+        }
+        shown = shorten ? shortenTitle(hint, roomFor(withPlaceholder)) : displayWidth(hint) <= roomFor(withPlaceholder) ? hint : undefined;
+        if (shown !== undefined) {
+          if (typed === 0) {
+            placeholder = withPlaceholder;
+          }
+          break;
+        }
       }
     }
     this.input.placeholder = placeholder;
-    this.hintText.visible = showHint;
-    if (hint && showHint) {
-      this.hintText.content = toStyledText([[seg(hint, 'muted'), seg(' ')]]);
-      this.hintText.width = displayWidth(hint) + 1;
+    this.hintText.visible = shown !== undefined;
+    if (shown !== undefined) {
+      this.hintText.content = toStyledText([[seg(shown, 'muted'), seg(' ')]]);
+      this.hintText.width = displayWidth(shown) + 1;
     }
   }
 }
