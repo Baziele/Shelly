@@ -181,20 +181,26 @@ export class FastSession {
       return;
     }
     // A shell without Shelly's hooks: show the command to copy rather than type it for the user.
-    this.host.claim(() => false);
+    const claim = this.host.claim(open, () => false);
+    if (claim === undefined) {
+      return;
+    }
     try {
       terminal.write(echoText(open.trigger, command, 'fast', colorDepth));
       terminal.write(plainText("This shell can't take the command on its line; copy it from above.", colorDepth, 'muted'));
     } finally {
-      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } }, claim);
     }
   }
 
   /** A short answer, printed below the request; then the prompt, with the user's line as it was. */
   private async answer(open: OpenInput, request: string, answer: string): Promise<void> {
     const { overlay, terminal, colorDepth } = this.host;
+    const claim = this.host.claim(open, () => false);
+    if (claim === undefined) {
+      return;
+    }
     overlay.close();
-    this.host.claim(() => false);
     // Whatever happens, the prompt comes back.
     try {
       terminal.write(echoText(open.trigger, request, 'fast', colorDepth));
@@ -205,7 +211,7 @@ export class FastSession {
         terminal.write(plainText(text, colorDepth));
       }
     } finally {
-      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } }, claim);
     }
   }
 }

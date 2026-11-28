@@ -10,14 +10,14 @@ import type {
   ThreadStatus,
   ThreadSummary,
 } from '../protocol/schema.js';
-import { AgentView } from '../ui/agent/agent-view.js';
+import { AgentView, type AgentAction } from '../ui/agent/agent-view.js';
 import { renderHistory } from '../ui/agent/history.js';
 import { oneLine, seg, type Line } from '../ui/agent/lines.js';
 import type { PickerItem } from '../ui/list-picker.js';
 import { agentPickerItems, modePickerItems, threadPickerItems } from '../ui/pickers.js';
 import { truncateEnd } from '../render/text-width.js';
 import type { DaemonClient } from './daemon-client.js';
-import type { FlowHost, OpenInput } from './flow-host.js';
+import type { Claim, FlowHost, OpenInput } from './flow-host.js';
 import { buildPromptContext, newestCommandId } from './prompt-context.js';
 import { echoText, errorText, linesText, plainText } from './terminal-text.js';
 
@@ -79,6 +79,34 @@ interface UnseenTurn {
 
 type Outcome = 'ended' | 'lost';
 
+/**
+ * Shelly's hold on the terminal while this session prints or draws below
+ * the prompt. Keys go to whatever draws now; giving it back is once only.
+ */
+interface Hold {
+  readonly claim: Claim;
+  keys: (data: string) => boolean;
+  released: boolean;
+}
+
+/**
+ * A turn's view on screen and what the user asked of it, from its first
+ * moment: Esc and Ctrl-C work before the turn exists, and are honoured
+ * once it does.
+ */
+interface Output {
+  readonly view: AgentView;
+  readonly hold: Hold;
+  /** Where its answers and stops go, once there is a turn. */
+  target: { readonly client: DaemonClient; readonly threadId: string } | undefined;
+  /** The turn it shows, once there is one (Esc moves it to the background). */
+  live: LiveTurn | undefined;
+  /** Ctrl-C: a turn not sent yet never is; one on its way is stopped as soon as the daemon takes it. */
+  cancelled: boolean;
+  /** Esc before the turn existed: the prompt is back, and the turn goes ahead out of sight. */
+  backgrounded: boolean;
+}
+
 /** What the next prompt does about threads: start a new one, where, and in which mode. */
 interface NextThread {
   readonly newThread: boolean;
@@ -88,6 +116,8 @@ interface NextThread {
 }
 
 const TITLE_IN_HINT = 32;
+/** How far the daemon's clock may be behind this one when matching a turn to the request that started it. */
+const CLOCK_SLACK_MS = 2000;
 /** How stale the agent list may get before opening :: refreshes it (in the background). */
 const AGENTS_REFRESH_MS = 30_000;
 const LIST_LIMIT = 50;
@@ -163,7 +193,17 @@ export class AgentSession {
           this.host.overlay.setError(link.lastError ?? "Shelly's background service is not running.");
         }
       },
-    );
+    ).catch((error: unknown) => {
+      // The daemon answered the connection but not the agent list (it went away, say): say so, in the input.
+      if (generation === this.inputGeneration && this.host.overlay.mode === 'agent') {
+        this.host.overlay.setError(this.describeError(error));
+      }
+    });
+  }
+
+  /** The input this flow started from is still the one open: nothing closed it since `generation`. */
+  private stillOpen(generation: number): boolean {
+    return generation === this.inputGeneration && this.host.overlay.isOpen;
   }
 
   /** Esc, Ctrl-C or Backspace past the start: the input closes, nothing happens. */
@@ -265,7 +305,11 @@ export class AgentSession {
       }
       return;
     }
-    const view = this.beginOutput(open, text);
+    const output = this.beginOutput(open, text);
+    if (!output) {
+      return;
+    }
+    const { view } = output;
     const started = Date.now();
     let client: DaemonClient;
     let threadId: string;
@@ -280,82 +324,145 @@ export class AgentSession {
       threadId = thread.id;
       context = await this.contextFor(threadId);
     } catch (error) {
-      await this.endView(view, this.describeError(error), started);
+      await this.endView(output, this.describeError(error), started);
+      return;
+    }
+    if (output.cancelled) {
+      // Ctrl-C while the thread was being made ready: the request is never sent.
+      await this.endView(output, undefined, started);
       return;
     }
 
-    const live: LiveTurn = { ...newTracker(text, 0), threadId, agentId: this.thread?.agentId ?? 'agent', view };
-    const stop = this.handleActions(view, client, live);
+    const live: LiveTurn = { ...newTracker(text, 0), threadId, agentId: this.thread?.agentId ?? 'agent', view: output.backgrounded ? undefined : view };
+    output.target = { client, threadId };
+    output.live = live;
+    const sentAt = Date.now();
+    const onStarted = (): void => {
+      // The daemon took the turn: from here this terminal tracks it (not before, so a refused
+      // prompt never replaces a turn that is still running).
+      this.turnTaken(live, context);
+      if (output.cancelled) {
+        // Ctrl-C while the daemon was taking it: stop it now that there is something to stop.
+        void client.cancel(threadId).catch(() => undefined);
+      }
+    };
     try {
-      const outcome = await this.follow(client.prompt(threadId, text, context), live, live, view, () => {
-        // The daemon took the turn: from here this terminal tracks it (not before, so a refused
-        // prompt never replaces a turn that is still running).
-        this.live = live;
-        this.unseen = undefined;
-        if (this.thread?.id === threadId) {
-          this.thread.status = 'running';
-        }
-        this.sentUpTo.set(threadId, newestCommandId(context, this.sentUpTo.get(threadId)));
-      });
+      const outcome = await this.follow(client.prompt(threadId, text, context), live, live, view, onStarted);
       if (outcome === 'lost') {
-        await this.recover(live, live, view);
+        await this.recover(live, live, view, { at: sentAt, onStarted });
       }
     } catch (error) {
       if (live.view === view && live.status !== 'ended') {
         live.status = 'ended';
         live.view = undefined;
-        stop();
-        await this.endView(view, this.describeError(error), started, live.turnId);
+        output.target = undefined;
+        await this.endView(output, this.describeError(error), started, live.turnId);
         this.settled(live);
         return;
       }
       live.status = 'ended';
+      if (live.turnId === undefined) {
+        // Refused out of sight (Esc came first): the user is at their prompt, so tell them there.
+        this.notifyHidden(`✗ ${this.describeError(error)}`);
+      }
     } finally {
-      stop();
+      output.target = undefined;
     }
-    await this.settle(live, live, view);
+    await this.settle(live, live, output);
   }
 
-  /** Close the input, echo the request and start a view right away, so feedback is immediate. */
-  private beginOutput(open: OpenInput, text: string, agentId?: string, note?: string): AgentView {
+  /** The daemon took a turn this terminal sent: track it, and count its context as heard. */
+  private turnTaken(live: LiveTurn, context: PromptContext): void {
+    this.live = live;
+    this.unseen = undefined;
+    if (this.thread?.id === live.threadId) {
+      this.thread.status = 'running';
+    }
+    this.sentUpTo.set(live.threadId, newestCommandId(context, this.sentUpTo.get(live.threadId)));
+    this.refreshHint();
+  }
+
+  /**
+   * Take the terminal from the open input, close it, echo the request and
+   * start a view right away, so feedback is immediate. Undefined, drawing
+   * nothing, if the input is no longer Shelly's to take from.
+   */
+  private beginOutput(open: OpenInput, text: string, agentId?: string, note?: string): Output | undefined {
+    const hold = this.take(open);
+    if (!hold) {
+      return undefined;
+    }
     this.inputGeneration++;
     const { overlay, terminal, colorDepth } = this.host;
     overlay.close();
     terminal.write(echoText(open.trigger, text, 'agent', colorDepth, note));
-    const view = new AgentView(terminal, colorDepth, {
-      agentName: agentId ?? (this.thread && !this.next.newThread ? this.thread.agentId : this.nextAgentId()) ?? 'agent',
-      cwd: this.host.cwd(),
-      home: this.host.home,
-    });
+    return this.showView(hold, agentId ?? (this.thread && !this.next.newThread ? this.thread.agentId : this.nextAgentId()) ?? 'agent');
+  }
+
+  /** Claim the terminal from `open`, if it is still the input on screen. */
+  private take(open: OpenInput): Hold | undefined {
+    let hold: Hold | undefined;
+    const claim = this.host.claim(open, (data) => hold?.keys(data) ?? false);
+    if (claim === undefined) {
+      return undefined;
+    }
+    hold = { claim, keys: () => false, released: false };
+    return hold;
+  }
+
+  /** The prompt comes back on a fresh line below what was drawn; once per hold. */
+  private giveBack(hold: Hold): void {
+    if (hold.released) {
+      return;
+    }
+    hold.released = true;
+    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } }, hold.claim);
+  }
+
+  /** A view drawn under `hold`, listening to the user from its first moment. */
+  private showView(hold: Hold, agentName: string): Output {
+    const { terminal, colorDepth } = this.host;
+    const view = new AgentView(terminal, colorDepth, { agentName, cwd: this.host.cwd(), home: this.host.home });
+    const output: Output = { view, hold, target: undefined, live: undefined, cancelled: false, backgrounded: false };
     this.view = view;
-    this.host.claim((data) => view.handleInput(data));
+    hold.keys = (data) => view.handleInput(data);
+    view.onAction((action) => this.act(output, action));
     void terminal.queryCursorPosition().then(
       (cursor) => view.start(cursor),
       // No answer: start at the bottom row, where the echo most likely left the cursor.
       () => view.start({ row: terminal.size.rows, col: 1 }),
     );
-    return view;
+    return output;
   }
 
-  /** Answers, stop and background from the view, sent where they belong. */
-  private handleActions(view: AgentView, client: DaemonClient, live: LiveTurn): () => void {
-    return view.onAction((action) => {
-      switch (action.type) {
-        case 'answer':
-          void client.respond(live.threadId, action.requestId, action.optionId).catch(() => undefined);
+  /** Answers, stop and background from the view, sent where they belong, or kept until there is a turn. */
+  private act(output: Output, action: AgentAction): void {
+    const { view, target, live } = output;
+    switch (action.type) {
+      case 'answer':
+        if (target) {
+          void target.client.respond(target.threadId, action.requestId, action.optionId).catch(() => undefined);
+        }
+        return;
+      case 'cancel':
+        output.cancelled = true;
+        if (target) {
+          void target.client.cancel(target.threadId).catch(() => undefined);
+        }
+        return;
+      case 'background':
+        if (live && live.view !== view) {
           return;
-        case 'cancel':
-          void client.cancel(live.threadId).catch(() => undefined);
-          return;
-        case 'background':
-          if (live.view === view) {
-            live.view = undefined;
-            // The view writes its note and closes right after telling us; give the prompt back after that.
-            setImmediate(() => this.releaseView(view));
-          }
-          return;
-      }
-    });
+        }
+        if (live) {
+          live.view = undefined;
+        } else {
+          output.backgrounded = true;
+        }
+        // The view writes its note and closes right after telling us; give the prompt back after that.
+        setImmediate(() => this.releaseView(output));
+        return;
+    }
   }
 
   /**
@@ -454,18 +561,41 @@ export class AgentSession {
     }
   }
 
-  /** The daemon went away mid-turn: start it again and catch up, or say what happened. */
-  private async recover(tracker: Tracker, live: LiveTurn, view: AgentView): Promise<void> {
+  /**
+   * The daemon went away mid-turn: start it again and catch up, or say what
+   * happened. A request lost before the daemon said it took it is looked
+   * for in the thread (`sent`): found, it is followed from its start; not
+   * found, the user is told it may never have reached the agent. Never a
+   * replay of the thread from its beginning, which would show an old turn
+   * as this one's answer.
+   */
+  private async recover(
+    tracker: Tracker,
+    live: LiveTurn,
+    view: AgentView,
+    sent?: { readonly at: number; readonly onStarted: () => void },
+  ): Promise<void> {
     const shown = (): boolean => live.view === view;
     if (shown()) {
       view.apply(synthetic({ type: 'notice', turnId: tracker.turnId ?? null, level: 'warning', text: "Lost the connection to Shelly's background service. Reconnecting…" }));
     }
+    let unsent = false;
     try {
       const client = await this.host.link.get();
       const hello = await this.host.link.reconnect();
-      await client.attachThread(live.threadId, { historyTurns: 0 });
+      const lookFor = sent !== undefined && tracker.turnId === undefined;
+      const { history } = await client.attachThread(live.threadId, { historyTurns: lookFor ? 1 : 0 });
       this.attachedOn = hello.pid;
-      await this.follow(client.watch(live.threadId, tracker.lastSeq), tracker, live, view);
+      if (lookFor) {
+        const newest = history.findLast((event) => event.type === 'turn.started');
+        if (!newest || newest.text !== live.text || newest.at < sent.at - CLOCK_SLACK_MS) {
+          unsent = true;
+        } else {
+          await this.follow(client.watch(live.threadId, newest.seq - 1), tracker, live, view, sent.onStarted);
+        }
+      } else {
+        await this.follow(client.watch(live.threadId, tracker.lastSeq), tracker, live, view);
+      }
     } catch {
       // Said below.
     }
@@ -475,7 +605,10 @@ export class AgentSession {
         type: 'turn.ended',
         turnId: tracker.turnId ?? 'lost',
         stopReason: 'interrupted' satisfies StopReason,
-        error: `lost the connection to Shelly's background service${reason ? ` (${reason})` : ''}`,
+        error: unsent || tracker.turnId === undefined
+          // One line: say the part that matters first.
+          ? `connection lost before ${live.agentId} started · it may not have your request`
+          : `lost the connection to Shelly's background service${reason ? ` (${reason})` : ''}`,
         durationMs: 0,
       }));
     }
@@ -483,7 +616,8 @@ export class AgentSession {
   }
 
   /** After a stream ends: finish the view if it still shows the turn, else note an unseen result. */
-  private async settle(tracker: Tracker, live: LiveTurn, view: AgentView): Promise<void> {
+  private async settle(tracker: Tracker, live: LiveTurn, output: Output): Promise<void> {
+    const { view } = output;
     if (this.thread?.id === live.threadId && tracker.status === 'ended') {
       this.thread.status = 'idle';
     }
@@ -495,7 +629,7 @@ export class AgentSession {
       try {
         await view.finish();
       } finally {
-        this.releaseView(view);
+        this.releaseView(output);
       }
       return;
     }
@@ -520,34 +654,57 @@ export class AgentSession {
     this.refreshHint();
   }
 
-  /** End a view that never got a turn (the request failed), with the reason as its summary. */
-  private async endView(view: AgentView, reason: string, startedAt: number, turnId?: string): Promise<void> {
+  /**
+   * End a view that never got a turn, with the reason as its summary (no
+   * reason: the user stopped it first). A view the terminal never placed
+   * prints the reason as plain text; one sent to the background says it
+   * below the prompt.
+   */
+  private async endView(output: Output, reason: string | undefined, startedAt: number, turnId?: string): Promise<void> {
+    const { view, hold } = output;
+    const { terminal, colorDepth } = this.host;
     try {
-      view.apply(synthetic({
-        type: 'turn.ended',
-        turnId: turnId ?? 'failed',
-        stopReason: 'error' satisfies StopReason,
-        error: reason,
-        durationMs: Date.now() - startedAt,
-      }));
-      await view.finish();
+      if (hold.released) {
+        view.destroy();
+        if (reason) {
+          this.notifyHidden(`✗ ${reason}`);
+        }
+      } else if (!view.hasStarted) {
+        view.destroy();
+        terminal.write(reason ? errorText(reason, colorDepth) : plainText('Stopped.', colorDepth, 'muted'));
+      } else {
+        view.apply(synthetic({
+          type: 'turn.ended',
+          turnId: turnId ?? 'failed',
+          stopReason: (reason === undefined ? 'cancelled' : 'error') satisfies StopReason,
+          error: reason ?? null,
+          durationMs: Date.now() - startedAt,
+        }));
+        await view.finish();
+      }
     } finally {
-      this.releaseView(view);
+      this.releaseView(output);
     }
   }
 
   /** The view left the cursor on a fresh line below its output: the shell's prompt goes there. */
-  private releaseView(view: AgentView): void {
-    if (this.view === view) {
+  private releaseView(output: Output): void {
+    if (this.view === output.view) {
       this.view = undefined;
     }
-    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+    this.giveBack(output.hold);
   }
 
   /** A one-line note below the shell's line, when the user is at the prompt and not looking at the turn. */
   private noticeIfHidden(live: LiveTurn, text: string): void {
+    if (!live.view) {
+      this.notifyHidden(text);
+    }
+  }
+
+  private notifyHidden(text: string): void {
     const editor = this.host.lineEditor;
-    if (live.view || !editor?.canNotify || !editor.isAtPrompt || this.host.overlay.isOpen || this.view) {
+    if (!editor?.canNotify || !editor.isAtPrompt || this.host.overlay.isOpen || this.view) {
       return;
     }
     void editor.notify(text).catch(() => undefined);
@@ -578,10 +735,15 @@ export class AgentSession {
 
   /** A thread running elsewhere (or before this terminal took it): find its turn in the history, then watch. */
   private async watchOther(open: OpenInput, thread: CurrentThread): Promise<void> {
+    const generation = this.inputGeneration;
     try {
       const client = await this.host.link.get();
       const { history } = await client.attachThread(thread.id, { historyTurns: 1 });
       this.attachedOn = (await client.connect()).pid;
+      if (!this.stillOpen(generation)) {
+        // The user closed the input meanwhile and is back at the shell: nothing to show them now.
+        return;
+      }
       const started = history.findLast((event) => event.type === 'turn.started');
       const ended = started && history.some((event) => event.type === 'turn.ended' && event.turnId === started.turnId);
       if (!started || ended) {
@@ -591,21 +753,31 @@ export class AgentSession {
         return;
       }
       const live: LiveTurn = { ...newTracker(started.text, started.seq - 1), threadId: thread.id, agentId: thread.agentId, view: undefined };
-      this.live = live;
       await this.watch(open, live, started.seq - 1);
     } catch (error) {
-      this.host.overlay.setError(this.describeError(error));
+      if (this.stillOpen(generation)) {
+        this.host.overlay.setError(this.describeError(error));
+      }
     }
   }
 
   /**
    * Show a turn from its start (`afterSeq` is just before its turn.started):
    * stored events, then live ones until it ends. `live` may still be read
-   * by the prompt that started it; this view takes over drawing it.
+   * by the prompt that started it; this view takes over drawing it. From
+   * the open input (echoing the request), or under a hold already taken
+   * (below a thread's history).
    */
-  private async watch(open: OpenInput | undefined, live: LiveTurn, afterSeq: number): Promise<void> {
-    const view = open ? this.beginOutput(open, live.text, live.agentId, 'watching') : this.startView(live.agentId);
+  private async watch(from: OpenInput | Hold, live: LiveTurn, afterSeq: number): Promise<void> {
+    const output = 'trigger' in from
+      ? this.beginOutput(from, live.text, live.agentId, 'watching')
+      : this.showView(from, live.agentId);
+    if (!output) {
+      return;
+    }
+    const { view } = output;
     const started = Date.now();
+    output.live = live;
     live.view = view;
     if (live.status !== 'ended') {
       this.live = live;
@@ -614,11 +786,17 @@ export class AgentSession {
     try {
       client = await this.host.link.get();
     } catch (error) {
-      live.view = undefined;
-      await this.endView(view, this.describeError(error), started);
+      if (live.view === view) {
+        live.view = undefined;
+      }
+      await this.endView(output, this.describeError(error), started);
       return;
     }
-    const stop = this.handleActions(view, client, live);
+    output.target = { client, threadId: live.threadId };
+    if (output.cancelled) {
+      // Ctrl-C while connecting.
+      void client.cancel(live.threadId).catch(() => undefined);
+    }
     // This view's own reading of the turn: the prompt's stream may still be reading it too.
     const tracker = newTracker(live.text, afterSeq);
     try {
@@ -633,30 +811,17 @@ export class AgentSession {
     } catch (error) {
       if (live.view === view) {
         live.view = undefined;
-        stop();
-        await this.endView(view, this.describeError(error), started, tracker.turnId);
+        output.target = undefined;
+        await this.endView(output, this.describeError(error), started, tracker.turnId);
         return;
       }
     } finally {
-      stop();
+      output.target = undefined;
     }
     if (tracker.status === 'ended') {
       live.status = 'ended';
     }
-    await this.settle(tracker, live, view);
-  }
-
-  /** A view below output already printed (a thread's history), without an echo. */
-  private startView(agentId: string): AgentView {
-    const { terminal, colorDepth } = this.host;
-    const view = new AgentView(terminal, colorDepth, { agentName: agentId, cwd: this.host.cwd(), home: this.host.home });
-    this.view = view;
-    this.host.claim((data) => view.handleInput(data));
-    void terminal.queryCursorPosition().then(
-      (cursor) => view.start(cursor),
-      () => view.start({ row: terminal.size.rows, col: 1 }),
-    );
-    return view;
+    await this.settle(tracker, live, output);
   }
 
   // ─── Threads ──────────────────────────────────────────────────────────────
@@ -808,10 +973,16 @@ export class AgentSession {
 
   private async switchTo(open: OpenInput, client: DaemonClient, summary: ThreadSummary, force: boolean): Promise<void> {
     const overlay = this.host.overlay;
+    const generation = this.inputGeneration;
     let attached: Awaited<ReturnType<DaemonClient['attachThread']>>;
+    let hello: Awaited<ReturnType<DaemonClient['connect']>>;
     try {
       attached = await client.attachThread(summary.id, { force, historyTurns: SWITCH_HISTORY_TURNS });
+      hello = await client.connect();
     } catch (error) {
+      if (!this.stillOpen(generation)) {
+        return;
+      }
       if (tagOf(error) !== 'ThreadBusy' || force) {
         throw error;
       }
@@ -832,6 +1003,13 @@ export class AgentSession {
       });
       return;
     }
+    if (!this.stillOpen(generation)) {
+      // The user closed the input while the thread came, and is back at the shell: no switch.
+      if (summary.id !== this.thread?.id) {
+        void client.detachThread(summary.id).catch(() => undefined);
+      }
+      return;
+    }
 
     const previous = this.thread;
     if (previous && previous.id !== summary.id) {
@@ -840,7 +1018,7 @@ export class AgentSession {
     const thread = fromSummary(attached.thread);
     this.thread = thread;
     this.next = { newThread: false, here: false };
-    this.attachedOn = (await client.connect()).pid;
+    this.attachedOn = hello.pid;
     if (this.unseen && this.unseen.threadId !== thread.id) {
       this.unseen = undefined;
     }
@@ -857,9 +1035,9 @@ export class AgentSession {
     const before = isRunning ? attached.history.filter((event) => event.seq < running.seq) : attached.history;
 
     const { terminal, colorDepth } = this.host;
-    const printHistory = async (): Promise<void> => {
-      if (!isRunning || before.some((event) => event.type === 'turn.started')) {
-        terminal.write(await renderHistory(before, {
+    const renderBefore = async (): Promise<string> =>
+      !isRunning || before.some((event) => event.type === 'turn.started')
+        ? renderHistory(before, {
           agentName: thread.agentId,
           title: thread.title || 'Untitled thread',
           updatedAt: attached.thread.updatedAt,
@@ -867,27 +1045,57 @@ export class AgentSession {
           home: this.host.home,
           width: terminal.size.cols,
           colorDepth,
-        }));
-      }
-    };
+        })
+        : '';
     if (!isRunning) {
-      await this.printBelow(open, '/threads', printHistory);
+      await this.printBelow(open, '/threads', renderBefore);
       return;
     }
     // The history, then the running turn live: the view takes over the terminal from here.
+    const hold = this.take(open);
+    if (!hold) {
+      return;
+    }
     this.inputGeneration++;
     overlay.close();
-    this.host.claim(() => false);
+    const interrupted = this.interruptible(hold);
     try {
       terminal.write(echoText(open.trigger, '/threads', 'agent', colorDepth));
-      await printHistory().catch((error: unknown) => terminal.write(errorText(this.describeError(error), colorDepth)));
+      const history = await renderBefore().catch((error: unknown) => errorText(this.describeError(error), colorDepth));
+      if (interrupted()) {
+        // Ctrl-C while the history came: the prompt is back already; the turn goes on, out of sight.
+        return;
+      }
+      terminal.write(history);
       const live: LiveTurn = { ...newTracker(running.text, running.seq - 1), threadId: thread.id, agentId: thread.agentId, view: undefined };
       terminal.write(echoText(open.trigger, running.text, 'agent', colorDepth, 'watching'));
-      await this.watch(undefined, live, running.seq - 1);
+      await this.watch(hold, live, running.seq - 1);
     } catch (error) {
-      terminal.write(errorText(this.describeError(error), colorDepth));
-      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+      if (!hold.released) {
+        terminal.write(errorText(this.describeError(error), colorDepth));
+      }
+      this.giveBack(hold);
     }
+  }
+
+  /**
+   * While Shelly prints under `hold`, Ctrl-C gives the prompt back at once
+   * (what was still to come is dropped). Returns whether it did.
+   */
+  private interruptible(hold: Hold): () => boolean {
+    let interrupted = false;
+    hold.keys = (data) => {
+      if (!data.includes('\u0003')) {
+        return false;
+      }
+      if (!interrupted) {
+        interrupted = true;
+        // Not from inside the key handler: Shelly is still dispatching this read.
+        setImmediate(() => this.giveBack(hold));
+      }
+      return true;
+    };
+    return () => interrupted;
   }
 
   private async pickAgent(): Promise<void> {
@@ -1037,31 +1245,37 @@ export class AgentSession {
 
   /**
    * Print below the prompt, closing the input first. Whatever happens while
-   * printing (an error included, shown inline), the prompt comes back: the
-   * terminal is never left with Shelly.
+   * rendering (an error included, shown inline), the prompt comes back: the
+   * terminal is never left with Shelly. Ctrl-C meanwhile gives it back at once.
    */
-  private async printBelow(open: OpenInput, echo: string, print: () => Promise<void> | void): Promise<void> {
+  private async printBelow(open: OpenInput, echo: string, render: () => Promise<string> | string): Promise<void> {
     const { overlay, terminal, colorDepth } = this.host;
+    const hold = this.take(open);
+    if (!hold) {
+      return;
+    }
     this.inputGeneration++;
     overlay.close();
-    this.host.claim(() => false);
+    const interrupted = this.interruptible(hold);
+    terminal.write(echoText(open.trigger, echo, 'agent', colorDepth));
+    let text: string;
     try {
-      terminal.write(echoText(open.trigger, echo, 'agent', colorDepth));
-      await print();
+      text = await render();
     } catch (error) {
-      terminal.write(errorText(this.describeError(error), colorDepth));
-    } finally {
-      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+      text = errorText(this.describeError(error), colorDepth);
+    }
+    if (!interrupted()) {
+      terminal.write(text);
+      this.giveBack(hold);
     }
   }
 
   /** What the agent gets with the next message: where the shell is, and the commands it has not heard about. */
   private showContext(open: OpenInput): Promise<void> {
-    const { terminal, colorDepth } = this.host;
+    const { colorDepth } = this.host;
     return this.printBelow(open, '/context', async () => {
       if (!this.host.recordsCommands) {
-        terminal.write(plainText("This shell doesn't report its commands to Shelly; Shelly hooks into zsh, bash and fish.", colorDepth, 'muted'));
-        return;
+        return plainText("This shell doesn't report its commands to Shelly; Shelly hooks into zsh, bash and fish.", colorDepth, 'muted');
       }
       const thread = this.next.newThread ? undefined : this.thread;
       const context = await this.contextFor(thread?.id ?? '');
@@ -1078,12 +1292,12 @@ export class AgentSession {
       while (lines.at(-1) === '') {
         lines.pop();
       }
-      terminal.write(plainText(lines.join('\n'), colorDepth));
+      return plainText(lines.join('\n'), colorDepth);
     });
   }
 
   private showHelp(open: OpenInput): Promise<void> {
-    const { terminal, colorDepth } = this.host;
+    const { colorDepth } = this.host;
     return this.printBelow(open, '/help', () => {
       const key = (name: string, text: string): Line => [seg(`  ${name.padEnd(10)}`, 'accent', { bold: true }), seg(text)];
       const lines: Line[] = [
@@ -1096,7 +1310,7 @@ export class AgentSession {
         [seg('  While the agent works: ', 'muted'), seg('esc', 'accent'), seg(' background · ', 'muted'), seg('ctrl+c', 'accent'),
           seg(' stop · ', 'muted'), seg('y n 1-9', 'accent'), seg(' answer a permission', 'muted')],
       ];
-      terminal.write(linesText(lines, colorDepth));
+      return linesText(lines, colorDepth);
     });
   }
 
@@ -1133,6 +1347,13 @@ export class AgentSession {
   /** Detach on exit, so another terminal can take the thread without asking. */
   goodbye(client: DaemonClient): Promise<unknown> {
     return this.thread ? client.detachThread(this.thread.id) : Promise.resolve();
+  }
+
+  /** Shelly is exiting: nothing draws to the terminal after this, and no flow takes it again. */
+  dispose(): void {
+    this.inputGeneration++;
+    this.view?.destroy();
+    this.view = undefined;
   }
 
   /** A turn's view is on screen. */

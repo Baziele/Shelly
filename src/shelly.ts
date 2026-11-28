@@ -116,6 +116,29 @@ export const printableOnly = (text: string): string =>
     .replace(/\u001b\[[0-9;?<>=]*[ -/]*[@-~]|\u001bO.|\u001b[\s\S]?/g, '')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
 
+const PASTE_START = '\u001b[200~';
+const PASTE_END = '\u001b[201~';
+
+/**
+ * Keys typed while Shelly had the terminal, as they may reach the shell:
+ * printable text, and bracketed pastes whole (the shell inserts a paste,
+ * newlines included, without running it). Never a key that acts: Enter,
+ * arrows, control keys.
+ */
+export const replayable = (text: string): string => {
+  let kept = '';
+  let rest = text;
+  for (;;) {
+    const start = rest.indexOf(PASTE_START);
+    const end = start < 0 ? -1 : rest.indexOf(PASTE_END, start + PASTE_START.length);
+    if (start < 0 || end < 0) {
+      return kept + printableOnly(rest);
+    }
+    kept += printableOnly(rest.slice(0, start)) + rest.slice(start, end + PASTE_END.length);
+    rest = rest.slice(end + PASTE_END.length);
+  }
+};
+
 /**
  * Where keystrokes go.
  * - shell:   straight to the shell, watching for a trigger.
@@ -188,6 +211,9 @@ export class Shelly {
   private watchdog: NodeJS.Timeout | undefined;
   /** A resize that came while Shelly drew: the shell gets it once it has its line back. */
   private pendingShellSize: TerminalSize | undefined;
+  private resizedWhileOpening = false;
+  /** Bumped by every claim: a release names the claim it gives back. */
+  private claimToken = 0;
   /** Waiting for the shell to draw the prompt Shelly asked for: then this runs. */
   private promptWait: {
     sawCwd: boolean;
@@ -318,8 +344,8 @@ export class Shelly {
       recordsCommands: this.markers !== undefined,
       cwd: () => this.commands.cwd ?? this.initialCwd,
       environment: () => (this.environment ??= describeEnvironment(this.shellPath, this.env)),
-      claim: (onKeys) => this.claim(onKeys),
-      release: (options) => this.release(options),
+      claim: (open, onKeys) => this.claim(open, onKeys),
+      release: (options, claim) => this.release(options, claim),
     };
   }
 
@@ -588,24 +614,29 @@ export class Shelly {
 
     const flows = this.flows;
     if (!overlay || !flows || !cursor || this.disposed) {
-      // Nowhere to draw: the keystrokes belong to the shell after all.
+      // Nowhere to draw: what was typed belongs to the shell after all, as
+      // text on its line, never run (an Enter typed for Shelly is not one for the shell).
       const typed = this.queuedInput;
       this.queuedInput = '';
       this.mode = 'shell';
+      this.resizedWhileOpening = false;
       this.flushHeldShellOutput();
-      if (this.open?.rewrite) {
-        this.putLineBack(this.open.rewrite);
-        this.open = undefined;
-        this.handleInput(typed);
+      const rewrite = this.open?.rewrite;
+      this.open = undefined;
+      if (rewrite) {
+        void this.putLineBack(rewrite).then(() => this.replayTyped(typed));
       } else {
-        this.open = undefined;
-        this.writeToShell(trigger + typed);
+        this.replayTyped(typed, trigger);
       }
       return;
     }
 
     this.mode = 'overlay';
     const open = this.open!;
+    if (this.resizedWhileOpening) {
+      this.resizedWhileOpening = false;
+      this.scheduleRelayout();
+    }
     overlay.open(cursor, trigger, this.queuedInput, flows.openOptions(open));
     this.queuedInput = '';
     flows.opened(open);
@@ -647,8 +678,25 @@ export class Shelly {
     }
     const typed = this.queuedInput;
     this.queuedInput = '';
-    if (typed) {
-      this.handleInput(typed);
+    // Typed for Shelly's input, which never opened: text on the line at most, never an Enter.
+    this.replayTyped(typed);
+  }
+
+  /**
+   * Keys typed for Shelly during a transition that came to nothing, now for
+   * the shell: Ctrl-C still interrupts; after it, or without it, only the
+   * text goes (see replayable), straight to the line, unexecuted.
+   */
+  private replayTyped(typed: string, prefix = ''): void {
+    const interrupt = typed.lastIndexOf(INTERRUPT);
+    if (interrupt >= 0) {
+      this.shell.write(INTERRUPT);
+      this.detector.markLineEmpty();
+    }
+    const text = (interrupt >= 0 ? '' : prefix) + replayable(typed.slice(interrupt + 1));
+    if (text) {
+      this.detector.markLineUnknown();
+      this.writeToShell(text);
     }
   }
 
@@ -749,18 +797,31 @@ export class Shelly {
   }
 
   /** Put back the line a rewrite took, if it took one. */
-  private putLineBack(rewrite: NonNullable<OpenInput['rewrite']>): void {
-    if (rewrite.captured.buffer) {
-      this.lineEditor?.restore(rewrite.captured).catch(() => undefined);
-      this.detector.markLineUnknown();
+  private putLineBack(rewrite: NonNullable<OpenInput['rewrite']>): Promise<void> {
+    if (!rewrite.captured.buffer) {
+      return Promise.resolve();
     }
+    this.detector.markLineUnknown();
+    return this.lineEditor?.restore(rewrite.captured).catch(() => undefined) ?? Promise.resolve();
   }
 
-  /** Shelly draws below the prompt: keys go to `onKeys`, shell output waits. */
-  private claim(onKeys: (data: string) => boolean): void {
+  /**
+   * Shelly draws below the prompt: keys go to `onKeys`, shell output waits.
+   * Only from the input on screen, the one the flow started from: a flow
+   * that finishes after the user closed it and went back to the shell (or
+   * opened another) must not take the terminal, or its hand-back's Enter
+   * would run what they have typed since. Returns the claim, for
+   * `release`, or undefined.
+   */
+  private claim(open: OpenInput, onKeys: (data: string) => boolean): number | undefined {
+    if (this.disposed || this.mode !== 'overlay' || this.open !== open) {
+      return undefined;
+    }
+    this.claimToken++;
     this.mode = 'busy';
     this.busyKeys = onKeys;
     this.armWatchdog();
+    return this.claimToken;
   }
 
   /**
@@ -781,7 +842,7 @@ export class Shelly {
         return;
       }
       this.host.write(`\r\n\u001b[2m(Shelly lost its place; your prompt is back.)\u001b[0m\r\n`);
-      this.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+      this.release({ cursor: 'fresh-line', line: { type: 'as-before' } }, this.claimToken);
     }, BUSY_WATCHDOG_MS);
     this.watchdog.unref?.();
   }
@@ -791,10 +852,13 @@ export class Shelly {
    * below the old one, the line as it should be, then whatever arrived
    * meanwhile (held output, typed keys) in order.
    */
-  private release({ cursor, line }: ReleaseOptions): void {
-    // Only what Shelly holds can be given back: a second release (an error
-    // path after the first) must not draw another prompt.
-    if (this.disposed || (this.mode !== 'busy' && this.mode !== 'overlay')) {
+  private release({ cursor, line }: ReleaseOptions, claim?: number): void {
+    // Only what Shelly holds can be given back, by whoever holds it: the
+    // claim that took the terminal, or (no claim) the open input. A second
+    // or late release (an error path, a view that outlived its turn) must
+    // not draw another prompt, let alone give away a claim made since.
+    const holds = this.mode === 'busy' ? claim === this.claimToken : this.mode === 'overlay' && claim === undefined;
+    if (this.disposed || !holds) {
       return;
     }
     clearTimeout(this.watchdog);
@@ -818,12 +882,12 @@ export class Shelly {
     }
 
     const finish = (): void => {
-      this.mode = 'shell';
       if (this.pendingShellSize) {
         this.shell.resize(this.pendingShellSize);
         this.pendingShellSize = undefined;
       }
       this.detector.markLineEmpty();
+      let lineSet: Promise<void> | undefined;
       if (line.type === 'set') {
         // Set exactly, cursor at the end; a multi-line command is beyond what the detector follows.
         if (line.text.includes('\n')) {
@@ -831,15 +895,25 @@ export class Shelly {
         } else {
           this.detector.markLineTyped([...line.text].length);
         }
-        this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
+        lineSet = this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
       } else if (rewrite) {
-        this.putLineBack(rewrite);
+        lineSet = this.putLineBack(rewrite);
       }
       this.flushHeldShellOutput();
-      const typed = printableOnly(this.queuedInput);
-      this.queuedInput = '';
-      if (typed) {
-        this.handleInput(typed);
+      const replay = (): void => {
+        this.mode = 'shell';
+        const typed = replayable(this.queuedInput);
+        this.queuedInput = '';
+        if (typed) {
+          this.handleInput(typed);
+        }
+      };
+      if (lineSet) {
+        // Keys typed meanwhile go after the line is set, not under it (where the set would overwrite them).
+        this.mode = 'returning';
+        void lineSet.then(replay);
+      } else {
+        replay();
       }
     };
 
@@ -927,10 +1001,18 @@ export class Shelly {
     } else {
       this.shell.resize(size);
     }
+    if (this.mode === 'opening') {
+      // The input is about to open at a position taken before the resize: re-anchor it once open.
+      this.resizedWhileOpening = true;
+      return;
+    }
     if (this.mode !== 'overlay' && this.mode !== 'busy') {
       return;
     }
+    this.scheduleRelayout();
+  }
 
+  private scheduleRelayout(): void {
     // Terminals send a burst of resizes while the window is dragged; re-anchor once it settles.
     clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
@@ -956,6 +1038,8 @@ export class Shelly {
     clearTimeout(this.markerHoldTimer);
     clearTimeout(this.promptWait?.timer);
     clearTimeout(this.watchdog);
+    // Nothing draws once the terminal is given back: a turn's view goes first.
+    this.flows?.dispose();
     this.lineEditor?.dispose();
     this.overlay?.destroy();
     this.host.stop();

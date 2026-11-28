@@ -70,6 +70,11 @@ export class Flows {
     void this.agent.connected(client).catch(() => undefined);
   }
 
+  /** Shelly is exiting: stop drawing at once. */
+  dispose(): void {
+    this.agent.dispose();
+  }
+
   goodbye(client: DaemonClient): Promise<unknown> {
     return this.agent.goodbye(client);
   }

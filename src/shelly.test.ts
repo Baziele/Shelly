@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { after, describe, it } from 'node:test';
 import type { DaemonLink } from './client/daemon-link.js';
-import type { ReleaseOptions } from './client/flow-host.js';
+import type { OpenInput, ReleaseOptions } from './client/flow-host.js';
 import type { ShellSessionOptions } from './shell/shell-session.js';
 import { LINE_KEYS } from './shell/line-editor.js';
 import type { HostTerminal } from './terminal/host-terminal.js';
@@ -18,7 +18,7 @@ import type { HostTerminal } from './terminal/host-terminal.js';
 
 process.env.SHELLY_BUSY_WATCHDOG_MS = '200';
 process.env.SHELLY_PROMPT_WAIT_MS = '300';
-const { Shelly, printableOnly, withoutDrawing } = await import('./shelly.js');
+const { Shelly, printableOnly, replayable, withoutDrawing } = await import('./shelly.js');
 
 const home = mkdtempSync(join(tmpdir(), 'shelly-unit-'));
 after(() => rmSync(home, { recursive: true, force: true }));
@@ -26,9 +26,20 @@ after(() => rmSync(home, { recursive: true, force: true }));
 interface Internals {
   mode: string;
   overlayLoad: Promise<unknown> | undefined;
-  claim(onKeys: (data: string) => boolean): void;
-  release(options: ReleaseOptions): void;
+  open: OpenInput | undefined;
+  claim(open: OpenInput, onKeys: (data: string) => boolean): number | undefined;
+  release(options: ReleaseOptions, claim?: number): void;
 }
+
+/** As a flow does: from an open input (no overlay here, so a stand-in for one), take the terminal. */
+const take = (internals: Internals, onKeys: (data: string) => boolean = () => false): number => {
+  const open: OpenInput = { trigger: '::', mode: 'agent', rewrite: undefined };
+  internals.mode = 'overlay';
+  internals.open = open;
+  const claim = internals.claim(open, onKeys);
+  assert.ok(claim !== undefined, 'the claim was taken');
+  return claim;
+};
 
 interface SetupOptions {
   /** Where the terminal says the cursor is, asked each time. */
@@ -233,7 +244,7 @@ describe('Shelly hands the terminal back', () => {
   it('gives the prompt back on its own when busy with nothing drawing (an error lost on the way)', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    take(t.internals);
     t.type('ls');
     assert.equal(t.internals.mode, 'busy');
     await sleep(350);
@@ -249,9 +260,9 @@ describe('Shelly hands the terminal back', () => {
   it('carries on after the prompt wait, replaying only printable text', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    const claim = take(t.internals);
     t.type('ls\u001b[A -la\r');
-    t.internals.release(freshLine);
+    t.internals.release(freshLine, claim);
     assert.equal(t.internals.mode, 'returning');
     // The shell never reports its prompt.
     await sleep(400);
@@ -264,9 +275,9 @@ describe('Shelly hands the terminal back', () => {
   it('drops what the idle shell drew meanwhile, and what it writes before the new prompt, but not its queries', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    const claim = take(t.internals);
     t.shellOutput('\u001b[2A$ REPAINT\u001b[?2004h');
-    t.internals.release(freshLine);
+    t.internals.release(freshLine, claim);
     // fish 4 asks where the cursor is and waits for the answer: the question must reach the terminal.
     t.shellOutput('\r\nLATE-REPAINT\u001b[6n');
     t.prompt();
@@ -282,8 +293,8 @@ describe('Shelly hands the terminal back', () => {
   it('sends Ctrl-C on at once while the prompt comes back, never later', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
-    t.internals.release(freshLine);
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
     t.type('\u0003x\u0004');
     assert.equal(t.toShell.at(-1), '\u0003', 'Ctrl-C at once');
     t.prompt();
@@ -297,11 +308,11 @@ describe('Shelly hands the terminal back', () => {
   it('resizes the shell only once it has its new prompt, so it never repaints under Shelly\'s output', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    const claim = take(t.internals);
     t.resize({ cols: 70, rows: 20 });
     t.resize({ cols: 84, rows: 22 });
     assert.deepEqual(t.resizes, [], 'not while Shelly draws');
-    t.internals.release(freshLine);
+    t.internals.release(freshLine, claim);
     assert.deepEqual(t.resizes, [], 'nor while the prompt comes back');
     t.prompt();
     await sleep(20);
@@ -314,9 +325,9 @@ describe('Shelly hands the terminal back', () => {
   it('ignores a second release, so an error path cannot draw another prompt', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
-    t.internals.release(freshLine);
-    t.internals.release(freshLine);
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
+    t.internals.release(freshLine, claim);
     assert.equal(t.toShell.filter((data) => data === '\r').length, 1);
     await t.stop();
   });
@@ -499,5 +510,15 @@ describe('withoutDrawing', () => {
 describe('printableOnly', () => {
   it('keeps text, drops keys and escape sequences', () => {
     assert.equal(printableOnly('git st\u001b[Datus\r\u0003\u001bOA ok'), 'git status ok');
+  });
+});
+
+describe('replayable', () => {
+  it('keeps a bracketed paste whole, newlines and all, and only the text around it', () => {
+    assert.equal(replayable('a\r\u001b[200~cd /tmp\nls\u001b[201~\u001b[Ab\r'), 'a\u001b[200~cd /tmp\nls\u001b[201~b');
+  });
+
+  it('treats a paste that has not ended as typed text', () => {
+    assert.equal(replayable('\u001b[200~rm -rf\n'), 'rm -rf');
   });
 });

@@ -59,9 +59,19 @@ export interface FlowHost {
   /**
    * Shelly draws below the prompt from now on: keys go to `onKeys` (which
    * says whether it used them; unused keys wait for the shell), and shell
-   * output is held until `release`.
+   * output is held until `release`. Only from `open` while it is the input on
+   * screen: returns the claim, to give back with `release`, or
+   * undefined, taking nothing, once the user has gone back to the shell.
+   * Check it before drawing anything.
    */
-  claim(onKeys: (data: string) => boolean): void;
-  /** Give the terminal back to the shell, then replay what was typed meanwhile. */
-  release(options: ReleaseOptions): void;
+  claim(open: OpenInput, onKeys: (data: string) => boolean): Claim | undefined;
+  /**
+   * Give the terminal back to the shell, then replay what was typed
+   * meanwhile. With a claim: only while it is the one holding the terminal
+   * (a later claim replaces it). Without: only from the open input.
+   */
+  release(options: ReleaseOptions, claim?: Claim): void;
 }
+
+/** A hold on the terminal, from `claim`. */
+export type Claim = number;
