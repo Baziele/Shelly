@@ -84,8 +84,6 @@ afterEach(() => {
 
 interface SetupOptions {
   readonly reflow?: boolean;
-  /** Replace the terminal's cursor query, e.g. with one that fails. */
-  readonly query?: () => Promise<{ row: number; col: number }>;
 }
 
 const setup = async (cols: number, rows: number, options: SetupOptions & { depth?: 'ansi256' | 'none' } = {}) => {
@@ -93,10 +91,7 @@ const setup = async (cols: number, rows: number, options: SetupOptions & { depth
   useModernWidths(term.terminal);
   term.write('~/acme $ :: question\r\n');
   const timers = new FakeTimers();
-  const host = options.query
-    ? { get size() { return term.size; }, write: term.write, queryCursorPosition: options.query }
-    : term;
-  view = new AgentView(host, options.depth ?? 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
+  view = new AgentView(term, options.depth ?? 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
   const actions: AgentAction[] = [];
   view.onAction((action) => actions.push(action));
   view.start(await term.cursor());
@@ -213,13 +208,22 @@ describe('a resize mid-stream', () => {
     await view.finish();
   };
 
-  const assertWhole = (lines: string[]): void => {
+  /**
+   * The invariants after a resize: every paragraph and the committed tool
+   * row are there, whole; at most `liveRows` rows (those live at the
+   * resize: the running tool, the status line) show twice, as a copy or the
+   * start of one; the status line is never left behind.
+   */
+  const assertWhole = (lines: string[], liveRows = 2): void => {
+    const text = lines.join(' ').replace(/\s+/g, ' ');
     for (const n of [1, 2, 3]) {
-      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost or doubled:\n${lines.join('\n')}`);
+      assert.ok(text.includes(`Paragraph ${n} explains a part of the change in a sentence long enough to wrap.`), `Paragraph ${n} lost or cut:\n${lines.join('\n')}`);
     }
-    assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
-    assert.ok(!lines.some((line) => /esc background|Running/.test(line)), `live rows stranded:\n${lines.join('\n')}`);
-    assert.ok(!lines.some((line, index) => line === '' && lines[index + 1] === ''), `a doubled blank row:\n${lines.join('\n')}`);
+    assert.equal(lines.filter((line) => line.includes('$ pnpm test')).length, 1, lines.join('\n'));
+    assert.ok(lines.some((line) => line.includes('$ sleep 10')), lines.join('\n'));
+    const twice = lines.filter((line, index) => line.trim() !== '' && lines.some((other, at) => at !== index && other.startsWith(line) && (other !== line || at < index)));
+    assert.ok(twice.length <= liveRows, `more than the live rows show twice:\n${lines.join('\n')}`);
+    assert.ok(!lines.some((line) => /esc background/.test(line)), `the status line left behind:\n${lines.join('\n')}`);
   };
 
   it('paints nothing between the resize and relayout(), then keeps committed text whole', async () => {
@@ -284,85 +288,16 @@ describe('a resize mid-stream', () => {
     assert.ok(!lines.some((line, index) => line === '' && lines[index + 1] === ''), `a doubled blank row:\n${lines.join('\n')}`);
   });
 
-  it('asks again when the first cursor report never comes (a busy terminal), so no stale rows stay behind', async () => {
-    let asked = 0;
-    let term!: EmulatedTerminal;
-    const context = await setup(90, 16, {
-      query: () => (++asked === 1 ? Promise.reject(new Error('timed out')) : term.cursor()),
-    });
-    term = context.term;
-    const { view } = context;
-    await streamWithLiveTool(term, view);
-    term.resize(50, 16);
-    await view.relayout();
-    assert.equal(asked, 2);
-    await endTurn(view);
-    assertWhole(await term.logicalLines());
-  });
-
-  it('asks again when the terminal was resized while it waited for the report', async () => {
-    let asked = 0;
-    let term!: EmulatedTerminal;
-    const context = await setup(90, 16, {
-      query: async () => {
-        asked++;
-        if (asked === 1) {
-          // The report describes the terminal at 60 columns; by the time it lands, it is 50.
-          term.resize(60, 16);
-          const report = await term.cursor();
-          term.resize(50, 16);
-          return report;
-        }
-        return term.cursor();
-      },
-    });
-    term = context.term;
-    const { view } = context;
-    await streamWithLiveTool(term, view);
-    term.resize(60, 16);
-    await view.relayout();
-    assert.equal(asked, 2);
-    await endTurn(view);
-    assertWhole(await term.logicalLines());
-  });
-
-  it('runs one relayout at a time: a second call while one runs makes it ask again, not re-anchor twice', async () => {
-    let asked = 0;
-    let term!: EmulatedTerminal;
-    const context = await setup(90, 16, { query: () => (asked++, term.cursor()) });
-    term = context.term;
-    const { view } = context;
-    await streamWithLiveTool(term, view);
-    term.resize(50, 16);
-    await Promise.all([view.relayout(), view.relayout()]);
-    assert.equal(asked, 2);
-    await endTurn(view);
-    assertWhole(await term.logicalLines());
-  });
-
-  it('never paints over committed text when the cursor query fails', async () => {
-    const { term, view } = await setup(90, 16, { query: () => Promise.reject(new Error('no answer')) });
-    await streamWithLiveTool(term, view);
-    term.resize(50, 16);
-    await view.relayout();
-    await endTurn(view);
-    const lines = await term.logicalLines();
-    for (const n of [1, 2, 3]) {
-      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost:\n${lines.join('\n')}`);
-    }
-    assert.ok(lines.includes('● $ pnpm test'), lines.join('\n'));
-  });
-
   it('keeps committed text whole in a terminal that does not reflow', async () => {
     const { term, view } = await setup(90, 16, { reflow: false });
     await streamWithLiveTool(term, view);
     term.resize(50, 16);
     await view.relayout();
     await endTurn(view);
-    // Rows are cut at the new width rather than rewrapped; each paragraph's start is still there once.
+    // Rows on screen are cut at the new width rather than rewrapped; nothing shows twice, nothing is lost.
     const lines = await term.allLines();
     for (const n of [1, 2, 3]) {
-      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost:\n${lines.join('\n')}`);
+      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${n} `)).length, 1, `Paragraph ${n} lost or doubled:\n${lines.join('\n')}`);
     }
     assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
     assert.ok(!lines.some((line) => /esc background|Running/.test(line)), lines.join('\n'));
@@ -379,9 +314,9 @@ describe('a resize mid-stream', () => {
     await view.relayout();
     await endTurn(view);
     const lines = await term.logicalLines();
-    assert.equal(lines.filter((line) => line.startsWith('漢字漢字')).length, 1, lines.join('\n'));
-    assert.equal(lines.filter((line) => line.includes('$ sleep 10')).length, 1, lines.join('\n'));
-    assert.ok(!lines.some((line) => /esc background|Running/.test(line)), lines.join('\n'));
+    assert.equal(lines.filter((line) => line.startsWith('漢字漢字')).length, 1, `committed before the resize, so never twice:\n${lines.join('\n')}`);
+    assert.ok(lines.some((line) => line.includes('$ sleep 10')), lines.join('\n'));
+    assert.ok(!lines.some((line) => /esc background/.test(line)), lines.join('\n'));
   });
 });
 
@@ -430,22 +365,6 @@ describe('cost after big output', { timeout: 60_000 }, () => {
 });
 
 describe('teardown and early finish', () => {
-  it('finish() stops cleanly when destroy() runs while its relayout waits for the cursor', async () => {
-    let answer: (position: { row: number; col: number }) => void = () => {};
-    const { term, view } = await setup(90, 16, { query: () => new Promise((resolve) => { answer = resolve; }) });
-    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'streaming' }));
-    await waitForScreen(term, (lines) => lines.some((line) => line.includes('esc background')));
-    await settle(term);
-    term.resize(60, 16);
-    const finishing = view.finish();
-    view.destroy();
-    const writtenAtDestroy = term.output().length;
-    answer({ row: 3, col: 1 });
-    const outcome = await Promise.race([finishing.then(() => 'done'), sleep(1500).then(() => 'stalled')]);
-    assert.equal(outcome, 'done', 'finish() waited out its timeout on a destroyed view');
-    assert.equal(term.output().length, writtenAtDestroy, 'wrote to the terminal after destroy()');
-  });
-
   it('finish() writes nothing more when destroy() runs while it waits for the last frames', async () => {
     const { term, view } = await setup(80, 12);
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'streaming' }));
@@ -522,201 +441,67 @@ describe('without colour', () => {
   });
 });
 
-describe('a frame on its way to the terminal when it resizes', () => {
+describe('a long paragraph streaming', () => {
   /*
-   * The terminal narrows and reflows while a frame drawn for the old width is
-   * still on its way, and the view hears of the resize only later (SIGWINCH).
-   * Each frame is confirmed before the next, so the view knows the terminal
-   * reflowed the frame before; a commit goes in two steps, so a resize never
-   * leaves stale live rows above committed text.
+   * Its finished rows go to scrollback as they are written, so the live
+   * region holds its last row and the status line: a resize, however it
+   * meets the output, can disturb no more than those.
    */
-  const first = 'The first paragraph streams in with enough words to wrap at fifty columns, and more.';
-  const second = 'The second paragraph starts once the first is done, which commits the first one.';
-  for (const [label, more] of [
-    ['the frame only repaints', ' Still the first paragraph, growing past the edge of the narrowed screen.'],
-    ['the frame commits', `\n\n${second}`],
-  ] as const) {
-    it(`leaves nothing stale and loses nothing when ${label}`, async () => {
-      const term = new EmulatedTerminal(90, 16);
+  const sentence = 'Each sentence of this paragraph adds a few more words, so the paragraph keeps growing as it streams.';
+  const stream = async (term: EmulatedTerminal, agent: AgentView, count: number) => {
+    for (let index = 0; index < count; index++) {
+      agent.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `${index === 0 ? '' : ' '}${sentence}` }));
+      await settle(term);
+    }
+  };
+
+  it('keeps only its last row live, and commits the rest whole', async () => {
+    const { term, view: agent } = await setup(60, 20);
+    await stream(term, agent, 8);
+    assert.ok(agent.liveRowCount <= 4, `${agent.liveRowCount} live rows`);
+    agent.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
+    await agent.finish();
+    const text = (await term.logicalLines()).join(' ').replace(/\s+/g, ' ');
+    assert.ok(text.includes(Array.from({ length: 8 }, () => sentence).join(' ')), text);
+  });
+
+  for (const [label, reflow] of [['a terminal that rewraps', true], ['a terminal that does not', false]] as const) {
+    it(`loses nothing through a resize mid-paragraph, with a frame on its way, in ${label}`, async () => {
+      const term = new EmulatedTerminal(80, 20, { reflow });
       useModernWidths(term.terminal);
       term.write('~/acme $ :: question\r\n');
-      let known = { cols: 90, rows: 16 };
-      const host = {
-        get size() { return known; },
-        write: term.write,
-        queryCursorPosition: () => term.cursor(),
-        queryWidth: (timeoutMs?: number, output?: string) => term.queryWidth(timeoutMs, output),
-      };
+      // The view hears of the resize late, as from SIGWINCH: one frame written for 80 columns lands at 40.
+      let known = { cols: 80, rows: 20 };
+      const host = { get size() { return known; }, write: term.write };
       const timers = new FakeTimers();
       view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
       view.start(await term.cursor());
       view.apply(event({ type: 'turn.started', text: 'q', at: timers.now }));
-      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: first }));
-      await waitForScreen(term, (lines) => lines.some((line) => line.startsWith('The first')));
-      await settle(term);
+      await stream(term, view, 5);
+      const liveAtResize = view.liveRowCount;
 
-      term.resize(50, 16);
-      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: more }));
+      term.resize(40, 20);
+      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: ` ${sentence}` }));
       await settle(term);
-      known = { cols: 50, rows: 16 };
+      known = { cols: 40, rows: 20 };
       await view.relayout();
-      view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 3000 }));
+      await stream(term, view, 0);
+      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: ` ${sentence}` }));
+      await settle(term);
+      view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
       await view.finish();
 
-      const lines = await term.logicalLines();
-      const text = lines.join(' ').replace(/\s+/g, ' ');
+      const lines = reflow ? await term.logicalLines() : await term.allLines();
       assert.equal(lines.filter((line) => line.startsWith('~/acme $ :: question')).length, 1, lines.join('\n'));
-      assert.equal(text.split('The first paragraph').length - 1, 1, `the first paragraph lost or doubled:\n${lines.join('\n')}`);
-      assert.ok(text.includes(first.replace(/\s+/g, ' ')), `the first paragraph cut:\n${lines.join('\n')}`);
-      if (label === 'the frame commits') {
-        assert.equal(text.split('The second paragraph').length - 1, 1, `the second paragraph lost or doubled:\n${lines.join('\n')}`);
+      // Nothing lost: every sentence is there in order (the rows cut at the narrower width aside, in a
+      // terminal that does not rewrap: there the rows on screen at the resize lose their ends).
+      const text = lines.join(' ').replace(/\s+/g, ' ');
+      if (reflow) {
+        assert.ok(text.includes(Array.from({ length: 7 }, () => sentence).join(' ')) || text.split(sentence).length - 1 >= 7, `a sentence lost:\n${lines.join('\n')}`);
       }
+      assert.ok(text.endsWith(`${sentence} ✓ 1s`) || text.includes(`${sentence} ✓`), `the end lost:\n${lines.join('\n')}`);
+      const starts = lines.filter((line) => line.startsWith('Each sentence of this paragraph'));
+      assert.ok(starts.length <= 1 + liveAtResize, `more than the live rows show twice:\n${lines.join('\n')}`);
     });
   }
-});
-
-describe('frame confirmation', () => {
-  /** A host over an emulated terminal whose width replies the test scripts, and which tracks synchronized output. */
-  const scriptedHost = (term: EmulatedTerminal, reply: (call: number, syncOpen: boolean) => 'answer' | 'miss' | 'withhold') => {
-    let syncOpen = false;
-    let calls = 0;
-    const host = {
-      get size() { return term.size; },
-      write: (data: string) => {
-        term.write(data);
-        for (const [, mode] of data.matchAll(/\u001b\[\?2026([hl])/g)) {
-          syncOpen = mode === 'h';
-        }
-      },
-      queryCursorPosition: () => term.cursor(),
-      queryWidth: async (_timeoutMs?: number, output = ''): Promise<{ row: number; cols: number }> => {
-        calls++;
-        // The frame goes out with the query, as HostTerminal writes it.
-        host.write(output);
-        const answer = reply(calls, syncOpen);
-        if (answer === 'withhold') {
-          // A terminal that holds replies while synchronized output is open: none comes in time.
-          return new Promise((_, reject) => setTimeout(() => reject(new Error('no answer')), 300));
-        }
-        if (answer === 'miss') {
-          throw new Error('no answer');
-        }
-        return term.queryWidth();
-      },
-    };
-    return { host, calls: () => calls, syncOpen: () => syncOpen };
-  };
-
-  const begin = async (host: ConstructorParameters<typeof AgentView>[0], term: EmulatedTerminal, timers: FakeTimers) => {
-    useModernWidths(term.terminal);
-    term.write('~/acme $ :: question\r\n');
-    view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
-    view.start(await term.cursor());
-    view.apply(event({ type: 'turn.started', text: 'q', at: timers.now }));
-    return view;
-  };
-
-  const chunk = (agent: AgentView, index: number) =>
-    agent.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `Paragraph ${index} has a few words in it.\n\n` }));
-
-  it('keeps confirming after a missed reply, and confirms the next frames once the terminal answers again', async () => {
-    const term = new EmulatedTerminal(80, 20);
-    const timers = new FakeTimers();
-    const { host, calls } = scriptedHost(term, (call) => (call === 2 ? 'miss' : 'answer'));
-    const agent = await begin(host, term, timers);
-    for (let index = 1; index <= 5; index++) {
-      chunk(agent, index);
-      await settle(term);
-    }
-    // One confirmation per frame written, the missed one included: confirmation did not stop.
-    assert.ok(calls() >= 5, `${calls()} confirmations`);
-    agent.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
-    await agent.finish();
-    const lines = await term.logicalLines();
-    for (let index = 1; index <= 5; index++) {
-      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${index} `)).length, 1, lines.join('\n'));
-    }
-  });
-
-  it('stops waiting on a terminal that misses twice in a row, and asks it again (without waiting) every ten seconds', async () => {
-    const term = new EmulatedTerminal(80, 20);
-    const timers = new FakeTimers();
-    let answering = false;
-    const { host, calls } = scriptedHost(term, () => (answering ? 'answer' : 'miss'));
-    const agent = await begin(host, term, timers);
-    for (let index = 1; index <= 4; index++) {
-      chunk(agent, index);
-      await settle(term);
-    }
-    const afterMisses = calls();
-    assert.equal(afterMisses, 2, 'asked past two misses in a row');
-    // Frames keep coming without confirmations.
-    chunk(agent, 5);
-    await settle(term);
-    assert.equal(calls(), afterMisses);
-    // Ten seconds on, the next frame asks again; the terminal answers, and confirmation is back.
-    answering = true;
-    timers.now += 10_000;
-    chunk(agent, 6);
-    await settle(term);
-    assert.equal(calls(), afterMisses + 1, 'probed once');
-    await sleep(20);
-    chunk(agent, 7);
-    await settle(term);
-    assert.ok(calls() >= afterMisses + 2, 'confirming again');
-  });
-
-  it('never asks while synchronized output is open, so a terminal that holds replies meanwhile costs nothing', async () => {
-    const term = new EmulatedTerminal(80, 12);
-    const timers = new FakeTimers();
-    let askedInSync = 0;
-    const { host } = scriptedHost(term, (_, syncOpen) => {
-      if (syncOpen) {
-        askedInSync++;
-        return 'withhold';
-      }
-      return 'answer';
-    });
-    // The live region must never show empty between frames (a commit drawn as clear, then rows).
-    let emptyShown = 0;
-    let statusSeen = false;
-    let ending = false;
-    const watched = {
-      ...host,
-      // The frame that comes with a query goes through the watch too.
-      queryWidth: (timeoutMs?: number, output = '') => {
-        watched.write(output);
-        return host.queryWidth(timeoutMs, '');
-      },
-      write: (data: string) => {
-        host.write(data);
-        term.terminal.write('', () => {
-          const buffer = term.terminal.buffer.active;
-          const screen = Array.from({ length: term.terminal.rows }, (_, row) => buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '');
-          const status = screen.some((line) => line.includes('esc background'));
-          statusSeen ||= status;
-          if (statusSeen && !status && !ending) {
-            emptyShown++;
-          }
-        });
-      },
-    };
-    const agent = await begin(watched, term, timers);
-    const started = Date.now();
-    for (let index = 1; index <= 6; index++) {
-      chunk(agent, index);
-      await settle(term);
-    }
-    await term.flush();
-    ending = true;
-    agent.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
-    await agent.finish();
-    assert.equal(askedInSync, 0, 'asked for a width while synchronized output was open');
-    assert.equal(emptyShown, 0, 'the live region showed empty between frames');
-    assert.ok(Date.now() - started < 3_000, `took ${Date.now() - started} ms`);
-    const lines = await term.logicalLines();
-    for (let index = 1; index <= 6; index++) {
-      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${index} `)).length, 1, lines.join('\n'));
-    }
-  });
 });

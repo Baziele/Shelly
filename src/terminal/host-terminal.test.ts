@@ -274,41 +274,14 @@ describe('HostTerminal teardown', () => {
   }
 });
 
-describe('HostTerminal width queries', () => {
-  it('pushes the cursor to the right edge, asks where it is, and goes back to column 1', async () => {
-    const { host, typed, answer, written } = fakeTerminal();
-    const width = host.queryWidth();
-    await sleep(1);
-    assert.ok(written().endsWith('\u001b[9999C\u001b[?6n\u001b[6n\r'), JSON.stringify(written()));
-    await answer('\u001b[?7;60R\u001b[7;60R');
-    assert.deepEqual(await width, { row: 7, cols: 60 });
-    host.stop();
-    assert.deepEqual(typed, []);
-  });
-
-  it('asks only once a query in flight is answered, instead of sharing its answer', async () => {
-    const { host, answer, written } = fakeTerminal();
-    const position = host.queryCursorPosition();
-    const width = host.queryWidth();
-    await sleep(1);
-    assert.ok(!written().includes('9999C'), 'asked while another query was in flight');
-    await answer('\u001b[?3;1R\u001b[3;1R');
-    assert.deepEqual(await position, { row: 3, col: 1 });
-    await sleep(1);
-    await answer('\u001b[?3;80R\u001b[3;80R');
-    assert.deepEqual(await width, { row: 3, cols: 80 });
-    host.stop();
-  });
-});
-
 describe('HostTerminal input while a query waits', () => {
   it('passes keystrokes on at once, Ctrl-C included, instead of holding them for the reply', async () => {
     const { host, typed, answer } = fakeTerminal();
-    const width = host.queryWidth();
+    const position = host.queryCursorPosition();
     await answer('ab\u0003');
     assert.deepEqual(typed, ['ab\u0003'], 'typing waited for the reply');
     await answer('c\u001b[?4;80R\u001b[4;80R');
-    assert.deepEqual(await width, { row: 4, cols: 80 });
+    assert.deepEqual(await position, { row: 4, col: 80 });
     host.stop();
     assert.deepEqual(typed.join(''), 'ab\u0003c');
   });
@@ -323,68 +296,36 @@ describe('HostTerminal input while a query waits', () => {
     host.stop();
     assert.deepEqual(typed.join(''), 'xy');
   });
+
+  it('keeps keys in order behind a Shift+F3 that may be the reply, whichever it turns out to be', async () => {
+    const asKey = fakeTerminal();
+    const first = asKey.host.queryCursorPosition();
+    await asKey.answer('\u001b[1;2Ra');
+    await asKey.answer('b\u001b[9;9R');
+    assert.deepEqual(await first, { row: 9, col: 9 });
+    asKey.host.stop();
+    assert.equal(asKey.typed.join(''), '\u001b[1;2Rab', 'Shift+F3 and the keys after it, in order');
+
+    const asReply = fakeTerminal();
+    const second = asReply.host.queryCursorPosition();
+    await asReply.answer('\u001b[1;2Ra');
+    assert.deepEqual(await second, { row: 1, col: 2 });
+    await sleep(10);
+    asReply.host.stop();
+    assert.equal(asReply.typed.join(''), 'a', 'the key after the reply');
+  });
 });
 
-describe('HostTerminal queries one after another', () => {
-  it('fails a query queued behind one the terminal never answered at once, instead of stacking a second timeout', async () => {
-    const { host } = fakeTerminal();
-    const width = host.queryWidth(40);
+describe('HostTerminal callers asking at once', () => {
+  it('share one query, so a terminal that never answers costs one timeout, not one per caller', async () => {
+    const { host, written } = fakeTerminal();
     const started = Date.now();
-    await assert.rejects(width);
-    const queued = host.queryWidth(40);
-    const position = host.queryCursorPosition(5_000);
-    await assert.rejects(queued);
-    await assert.rejects(position);
-    assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
-    host.stop();
-  });
-
-  it('counts the wait for the query ahead towards the timeout of the one behind it', async () => {
-    const { host, answer } = fakeTerminal();
-    const first = host.queryWidth(500);
-    const second = assert.rejects(host.queryCursorPosition(60), 'waited for the first, then its own full time out');
-    await sleep(80);
-    await answer('\u001b[?2;80R\u001b[2;80R');
-    assert.deepEqual(await first, { row: 2, cols: 80 });
-    await second;
-    host.stop();
-  });
-});
-
-describe('HostTerminal frames sent with their width query', () => {
-  const recordWrites = () => {
-    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() { return this; } });
-    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80, rows: 24 });
-    const writes: string[] = [];
-    const write = output.write.bind(output);
-    output.write = ((chunk: string) => {
-      writes.push(String(chunk));
-      return write(chunk);
-    }) as typeof output.write;
-    const host = new HostTerminal(input as never, output as never);
-    host.start(() => {});
-    return { host, writes, answer: (data: string) => input.write(data) };
-  };
-
-  it('writes the frame and the query in one write, so a resize cannot fall between them', async () => {
-    const { host, writes, answer } = recordWrites();
-    const width = host.queryWidth(500, 'FRAME');
-    assert.deepEqual(writes, ['FRAME\u001b[9999C\u001b[?6n\u001b[6n\r']);
-    answer('\u001b[?3;80R\u001b[3;80R');
-    assert.deepEqual(await width, { row: 3, cols: 80 });
-    host.stop();
-  });
-
-  it('writes the frame at once, on its own, when another query is in flight', async () => {
-    const { host, writes, answer } = recordWrites();
-    const position = host.queryCursorPosition();
-    const width = host.queryWidth(500, 'FRAME');
-    assert.equal(writes.at(-1), 'FRAME', 'the frame waited for the query in flight');
-    answer('\u001b[?3;1R\u001b[3;1R');
-    await position;
-    await sleep(5);
-    answer('\u001b[?3;80R\u001b[3;80R');
-    assert.deepEqual(await width, { row: 3, cols: 80 });
+    const asks = [host.queryCursorPosition(60), host.queryCursorPosition(60), host.queryCursorPosition(60)];
+    for (const ask of asks) {
+      await assert.rejects(ask);
+    }
+    assert.ok(Date.now() - started < 500, `took ${Date.now() - started} ms`);
+    assert.equal(written().split('\u001b[?6n').length - 1, 1, 'asked more than once');
     host.stop();
   });
 });

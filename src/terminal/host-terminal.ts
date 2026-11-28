@@ -6,21 +6,17 @@ export interface TerminalSize {
   readonly rows: number;
 }
 
-/** Where the cursor was pushed against the right edge: its row, and the terminal's width (see queryWidth). */
-export interface WidthReport {
-  readonly row: number;
-  readonly cols: number;
-}
-
 interface PendingCursorQuery {
-  /** `width`: asked at the right edge, after a frame (see queryWidth); `position`: where the cursor is. */
-  readonly kind: 'position' | 'width';
   readonly promise: Promise<CursorPosition>;
   readonly resolve: (position: CursorPosition) => void;
   readonly reject: (error: Error) => void;
   readonly timer: NodeJS.Timeout;
-  /** A plain report that may be Shift+F3 and friends, waiting to see whether a real one follows. */
-  held?: { readonly text: string; readonly position: CursorPosition; readonly timer: NodeJS.Timeout };
+  /**
+   * A plain report that may be Shift+F3 and friends, waiting to see whether
+   * a real one follows; input that comes meanwhile waits behind it (`after`),
+   * so keys keep their order.
+   */
+  held?: { readonly text: string; readonly position: CursorPosition; readonly timer: NodeJS.Timeout; after: string };
 }
 
 /** How long an ambiguous plain report waits for a clearer one before it counts as the answer. */
@@ -31,32 +27,6 @@ const LATE_REPLY_WINDOW_MS = 3000;
 const PARTIAL_REPORT_WAIT_MS = 50;
 /** The start of a cursor position report, cut off: ESC, ESC [, ESC [ ?, then digits and semicolons. */
 const PARTIAL_REPORT = /\u001b(?:\[\??(?:\d+(?:;\d*(?:;\d*)?)?)?)?$/;
-
-/** Terminals (by TERM_PROGRAM) that rewrap their rows when resized. */
-const REFLOWING_PROGRAMS = new Set(['iTerm.app', 'Apple_Terminal', 'vscode', 'WezTerm', 'ghostty', 'Hyper', 'WarpTerminal', 'tmux', 'rio', 'Tabby']);
-
-/**
- * Whether the terminal Shelly runs in rewraps rows when it is resized, as
- * far as its environment tells: true for the terminals known to (and tmux,
- * whatever runs it), false inside GNU screen (which does not), undefined
- * when there is no telling.
- */
-export const terminalReflows = (env: NodeJS.ProcessEnv): boolean | undefined => {
-  if (env.STY) {
-    return false;
-  }
-  if (env.TMUX) {
-    return true;
-  }
-  if (env.TERM_PROGRAM && REFLOWING_PROGRAMS.has(env.TERM_PROGRAM)) {
-    return true;
-  }
-  if (env.KITTY_WINDOW_ID || env.WT_SESSION || env.ALACRITTY_WINDOW_ID || env.VTE_VERSION || env.KONSOLE_VERSION
-    || /^xterm-(?:kitty|ghostty)$/.test(env.TERM ?? '')) {
-    return true;
-  }
-  return undefined;
-};
 
 /**
  * The real terminal Shelly runs in. Owns raw mode on stdin and is the only
@@ -80,9 +50,6 @@ export class HostTerminal {
     private readonly input: NodeJS.ReadStream = process.stdin,
     private readonly output: NodeJS.WriteStream = process.stdout,
   ) {}
-
-  /** Whether the terminal rewraps rows when resized, when its environment tells (see terminalReflows). */
-  readonly reflows: boolean | undefined = terminalReflows(process.env);
 
   get isInteractive(): boolean {
     return Boolean(this.input.isTTY && this.output.isTTY);
@@ -163,58 +130,12 @@ export class HostTerminal {
   /**
    * Ask the terminal where the cursor is. Keystrokes that arrive while
    * waiting go on at once; only what may be the reply is held. Callers that
-   * ask while a position query is in flight share its answer; one asked
-   * while a width query is in flight is sent after it (see ask()).
+   * ask while a query is in flight share its answer, so a stalled terminal
+   * costs one timeout, not one per caller.
    */
   queryCursorPosition(timeoutMs = 500): Promise<CursorPosition> {
-    if (this.pendingCursorQuery?.kind === 'position') {
+    if (this.pendingCursorQuery) {
       return this.pendingCursorQuery.promise;
-    }
-    return this.ask('position', '', '', timeoutMs);
-  }
-
-  /**
-   * The terminal's width as of this point in the output, and the row the
-   * cursor is on: the cursor is pushed against the right edge, its position
-   * asked for, then sent back to column 1. Everything written before the call
-   * was drawn at that width, which tells a view whether its last frame
-   * reached the terminal before or after a resize.
-   *
-   * `output` (a frame) is written in the same write as the query, so a
-   * resize can hardly fall between the two: the answer then tells when the
-   * frame itself arrived, not just when the query did. (With a query in
-   * flight, it is written at once, on its own, to keep output in order.)
-   */
-  async queryWidth(timeoutMs = 500, output = ''): Promise<WidthReport> {
-    let frame = output;
-    if (frame && this.pendingCursorQuery) {
-      this.write(frame);
-      frame = '';
-    }
-    const { row, col } = await this.ask('width', ansi.cursorForward(9999), '\r', timeoutMs, frame);
-    return { row, cols: col };
-  }
-
-  /**
-   * Send one query, after the one in flight (whose answer was asked for at
-   * another point in the output). The wait for that one counts towards this
-   * one's `timeoutMs`, and if it went unanswered this one fails at once
-   * instead of waiting its own time out too: a stalled terminal costs one
-   * timeout, not one per query.
-   */
-  private async ask(kind: PendingCursorQuery['kind'], before: string, after: string, timeoutMs: number, output = ''): Promise<CursorPosition> {
-    const deadline = Date.now() + timeoutMs;
-    // Written right away (see queryWidth): only when nothing is in flight, so nothing is waited for.
-    let lead = output;
-    while (this.pendingCursorQuery) {
-      this.write(lead);
-      lead = '';
-      await this.pendingCursorQuery.promise;
-    }
-    const left = deadline - Date.now();
-    if (left <= 0) {
-      this.write(lead);
-      throw new Error('The terminal did not report its cursor position.');
     }
     let resolve!: (position: CursorPosition) => void;
     let reject!: (error: Error) => void;
@@ -226,10 +147,10 @@ export class HostTerminal {
     promise.catch(() => undefined);
     const timer = setTimeout(() => {
       this.failPendingQuery(new Error('The terminal did not report its cursor position.'));
-    }, left);
-    this.pendingCursorQuery = { kind, promise, resolve, reject, timer };
+    }, timeoutMs);
+    this.pendingCursorQuery = { promise, resolve, reject, timer };
     // Both forms: the DEC answer cannot be mistaken for a key; the plain one works everywhere.
-    this.write(lead + before + ansi.requestDecCursorPosition + ansi.requestCursorPosition + after);
+    this.write(ansi.requestDecCursorPosition + ansi.requestCursorPosition);
     return promise;
   }
 
@@ -256,21 +177,23 @@ export class HostTerminal {
         break;
       }
       if (report.kind === 'plain' && report.ambiguous && !query.held) {
-        // Maybe Shift+F3: hold just that and see whether a clearer report follows.
+        // Maybe Shift+F3: hold it (and what follows, to keep keys in order) and see whether a clearer
+        // report follows.
         this.deliver(report.before);
         const held = report.position;
         query.held = {
           text: `\u001b[${held.row};${held.col}R`,
           position: held,
           timer: setTimeout(() => this.settleQuery(held), AMBIGUOUS_REPORT_WAIT_MS),
+          after: '',
         };
         text = report.after;
         continue;
       }
       if (query.held) {
-        // A held report followed by another one was a key after all.
+        // A held report followed by another one was a key after all: it goes on, in order.
         clearTimeout(query.held.timer);
-        this.deliver(query.held.text);
+        this.deliver(query.held.text + query.held.after);
         query.held = undefined;
       }
       this.deliver(report.before);
@@ -280,6 +203,11 @@ export class HostTerminal {
       }
       this.settleQuery(report.position);
       text = this.dropLateReplies(report.after);
+    }
+    const held = this.pendingCursorQuery?.held;
+    if (held) {
+      held.after += text;
+      return;
     }
     this.passOn(text);
   };
@@ -291,11 +219,16 @@ export class HostTerminal {
       return;
     }
     clearTimeout(query.timer);
+    const after = query.held?.after ?? '';
     if (query.held) {
       clearTimeout(query.held.timer);
     }
     this.pendingCursorQuery = undefined;
     query.resolve(position);
+    // Input that waited behind a held report that turned out to be the answer.
+    if (after) {
+      this.passOn(after);
+    }
   }
 
   private expectLateReplies(count: number, position?: CursorPosition): void {

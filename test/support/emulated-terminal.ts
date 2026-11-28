@@ -10,12 +10,6 @@ export class EmulatedTerminal {
   readonly terminal: xterm.Terminal;
   private written = '';
 
-  /**
-   * Whether hosts tell the view this terminal reflows (see AgentViewHost.reflows). Unset by default,
-   * so the view goes by cursor reports, as for a terminal it does not know.
-   */
-  reflows: boolean | undefined;
-
   /** `reflow: false` behaves like a terminal that truncates rows on narrowing instead of rewrapping them. */
   constructor(cols: number, rows: number, { reflow = true }: { reflow?: boolean } = {}) {
     // xterm.js does not reflow in its (deprecated) Windows mode.
@@ -33,14 +27,6 @@ export class EmulatedTerminal {
 
   async queryCursorPosition(): Promise<CursorPosition> {
     return this.cursor();
-  }
-
-  /** As HostTerminal.queryWidth: the width the terminal drew everything written so far at, and the cursor's row. */
-  async queryWidth(_timeoutMs?: number, output = ''): Promise<{ row: number; cols: number }> {
-    this.write(`${output}\u001b[9999C`);
-    const { row, col } = await this.cursor();
-    this.write('\r');
-    return { row, cols: col };
   }
 
   /** Everything written so far. */

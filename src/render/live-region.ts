@@ -15,55 +15,39 @@ export interface LiveRegionScreen {
 export interface LiveRegionOptions {
   /** Rows kept free above the live region so the user always sees some context. */
   readonly marginRows?: number;
-  /**
-   * Whether the terminal rewraps rows when it is resized, when that is known
-   * (see terminalReflows). Known, relayout() needs no guess about whether
-   * the rows above the cursor grew; unknown, it guesses from the cursor
-   * report, on the side that never reaches committed text.
-   */
-  readonly reflows?: boolean;
 }
 
 /**
- * Output that grows downwards from an anchor on the main screen, the way a
- * command's output does. Committed rows are written as ordinary lines, so the
- * terminal scrolls them into its scrollback and they are never touched again.
- * Below them, a live region repaints in place.
+ * Output that grows downwards from where it starts on the main screen, the
+ * way a command's output does. Committed rows are written as ordinary lines,
+ * so the terminal scrolls them into its scrollback, and nothing ever moves
+ * onto them again. Below them, a small live region repaints in place.
  *
  * The live region owns every row from its first to the bottom of the screen.
  * Between updates the (hidden) cursor is parked in column 1 of its last row,
- * and every move is relative to it: up to the first row that changed, then
- * down only by writing rows. No absolute position is ever used, because the
- * terminal may have resized and reflowed the screen before an update written
- * for the old size reaches it: such an update then lands inside the live
- * region (whose rows only got taller) and never on committed text. After a
- * resize, relayout() moves up from the parked row by the height the rows
- * above it reflowed to, and clears from there. Which rows those were
- * depends on whether the last update reached the terminal before the resize
- * or after: see acknowledge().
+ * and every move is relative to it: up by at most the rows the region
+ * printed above it, then down only by writing rows. No absolute position is
+ * ever used and no answer from the terminal is waited for.
+ *
+ * Why that never reaches committed text: a terminal that is resized
+ * rewraps rows (most do) or leaves them as they are; either way the rows
+ * above the cursor take at least as many rows as were printed, and the
+ * cursor stays on its row. So moving up by the printed count always lands
+ * inside the live region, even for an update written before a resize and
+ * drawn after it. Live rows are written without autowrap, so each takes
+ * exactly one row however wide the terminal turns out to be.
+ *
+ * The price: where a terminal rewrapped live rows, the top of the taller
+ * rows can stay behind above the region after a resize (a fragment of a
+ * row that was live then). The caller keeps the region small, so that is a
+ * row or two at most.
  */
 export class LiveRegion {
-  private anchorRow = 1;
-  /** The text of each live row above the parked one, for working out where they went after a reflow. */
-  private textAbovePark: string[] = [];
-  /** The same for the update before, which is what a terminal reflowed if the last one reached it after a resize. */
-  private previousTextAbovePark: string[] = [];
-  /** The width the last update was drawn for. */
-  private writtenCols = 0;
-  /** The terminal reached the last update only after it was resized (see acknowledge()). */
-  private lastArrivedLate = false;
-  /** The last update was written and not acknowledged yet. */
-  private unacknowledged = false;
-  /** The width the terminal had when the last update reached it, when that was after a resize. */
-  private arrivedCols = 0;
-  /** How many rows the last update moved up from the parked row before writing. */
-  private lastMoveUp = 0;
-  /** The screen row the cursor was parked on. */
-  private parkedRow = 1;
+  /** The number of live rows above the parked one, as printed. */
+  private rowsAbove = 0;
   private painted: string[] = [];
   private started = false;
   private readonly marginRows: number;
-  private readonly reflows: boolean | undefined;
 
   constructor(
     private readonly screen: LiveRegionScreen,
@@ -71,12 +55,6 @@ export class LiveRegion {
     options: LiveRegionOptions = {},
   ) {
     this.marginRows = options.marginRows ?? 2;
-    this.reflows = options.reflows;
-  }
-
-  /** The screen row the live region starts on. */
-  get anchor(): CursorPosition {
-    return { row: this.anchorRow, col: 1 };
   }
 
   /** Tallest the live region may get; taller content must be clipped by the caller. */
@@ -89,11 +67,6 @@ export class LiveRegion {
     return this.painted.length;
   }
 
-  /** Live rows above the one the cursor is parked on: what a reflow can make taller. */
-  get rowsAbovePark(): number {
-    return this.textAbovePark.length;
-  }
-
   /**
    * Begin at `cursor`. Output starts on that row when the cursor is in the
    * first column, otherwise on the row below it.
@@ -102,48 +75,40 @@ export class LiveRegion {
     const { rows } = this.screen.size;
     this.started = true;
     this.painted = [];
-    if (cursor.col <= 1) {
-      this.anchorRow = Math.min(cursor.row, rows);
-      this.parkedRow = this.anchorRow;
-      return;
+    this.rowsAbove = 0;
+    if (cursor.col > 1) {
+      // A line feed on the bottom row scrolls, which is what a fresh line there needs.
+      this.screen.write(ansi.cursorTo(Math.min(cursor.row, rows), cursor.col) + ansi.resetStyle + '\r\n');
     }
-    // A line feed on the bottom row scrolls, which is what a fresh line there needs.
-    this.screen.write(ansi.cursorTo(Math.min(cursor.row, rows), cursor.col) + ansi.resetStyle + '\r\n');
-    this.anchorRow = Math.min(cursor.row + 1, rows);
-    this.parkedRow = this.anchorRow;
   }
 
   /**
    * Commit `commit` to scrollback, then show `live` below it, in one
    * synchronized update. `live` taller than `maxLiveRows` keeps its tail.
-   * Returns whether anything was written: nothing is when nothing changed.
    */
-  update(commit: readonly PaintRow[], live: readonly PaintRow[]): boolean {
+  update(commit: readonly PaintRow[], live: readonly PaintRow[]): void {
     if (!this.started) {
-      return false;
+      return;
     }
-    const { rows } = this.screen.size;
     const shown = live.length > this.maxLiveRows ? live.slice(live.length - this.maxLiveRows) : live;
     const encoded = shown.map((row) => encodeRow(row, this.colorDepth));
 
     // The first live row to write: the top when committing, else the first that changed. Every row
-    // from there down is written again, so the cursor only ever moves down by writing (see the class
-    // comment).
+    // from there down is written again, so the cursor only ever moves down by writing.
     let first = 0;
     if (commit.length === 0) {
       while (first < encoded.length && first < this.painted.length && encoded[first] === this.painted[first]) {
         first++;
       }
       if (first === encoded.length && encoded.length === this.painted.length) {
-        return false;
+        return;
       }
-      first = Math.min(first, Math.max(0, encoded.length - 1));
+      // No further down than the parked row: the cursor is there, and rows are only written downwards.
+      first = Math.min(first, Math.max(0, encoded.length - 1), this.rowsAbove);
     }
 
-    const parkIndex = Math.max(0, this.painted.length - 1);
-    const top = this.parkedRow - parkIndex;
     let output = ansi.beginSynchronizedUpdate + ansi.hideCursor;
-    const up = parkIndex - first;
+    const up = this.rowsAbove - first;
     if (up > 0) {
       output += ansi.cursorUp(up);
     }
@@ -154,8 +119,8 @@ export class LiveRegion {
     }
     // Live rows are written without autowrap: one written for a wider terminal than it lands in (the
     // terminal was resized while it was on its way) is cut at the edge instead of wrapping, so each
-    // live row is one terminal row and the parked cursor is where relayout() expects. It is drawn
-    // again at the new width moments later. Committed rows keep autowrap: they are never cut.
+    // live row is one terminal row, as the next update counts it. It is drawn again at the new width
+    // moments later. Committed rows keep autowrap: they are never cut.
     output += ansi.autowrapOff;
     encoded.slice(first).forEach((content, index, written) => {
       output += content + ansi.resetStyle + (index < written.length - 1 ? '\r\n' : '');
@@ -163,150 +128,27 @@ export class LiveRegion {
     // Parked in column 1 of the last live row (or on the fresh line after the committed rows).
     output += '\r' + ansi.autowrapOn + ansi.endSynchronizedUpdate;
     this.screen.write(output);
-
-    // Where that left things on screen, for re-anchoring after a resize. Writing past the bottom row
-    // scrolls the screen, so the top is wherever the rows written end, counted up from there.
-    const newTop = top + commit.length;
-    const bottom = newTop + Math.max(0, encoded.length - 1);
-    this.anchorRow = Math.max(1, newTop - Math.max(0, bottom - rows));
     this.painted = encoded;
-    const last = Math.max(0, shown.length - 1);
-    this.previousTextAbovePark = this.textAbovePark;
-    this.textAbovePark = shown.slice(0, last).map(rowText);
-    this.parkedRow = this.anchorRow + last;
-    this.writtenCols = this.screen.size.cols;
-    this.lastArrivedLate = false;
-    this.lastMoveUp = up;
-    this.unacknowledged = true;
-    return true;
-  }
-
-  /** The last update written has been acknowledged (see acknowledge()), so a resize now meets nothing on its way. */
-  get acknowledged(): boolean {
-    return !this.unacknowledged;
+    this.rowsAbove = Math.max(0, encoded.length - 1);
   }
 
   /**
-   * Take the first `rows` live rows out of the live region as they stand on
-   * screen: committed without writing anything. For rows the terminal has
-   * confirmed it drew at the current width (see acknowledge()), this commits
-   * with nothing on its way to the terminal, so no resize can catch it
-   * half done. The row the cursor is parked on stays live.
+   * After a resize: clear the live region so the caller repaints it at the
+   * new width. Moves up by the live rows above the cursor as they were
+   * printed, the fewest rows they can take now, so committed text is never
+   * reached; if the terminal rewrapped them taller, the top of them stays
+   * behind (see the class comment). Needs nothing from the terminal.
    */
-  promote(rows: number): void {
-    const count = Math.min(rows, this.painted.length - 1);
-    if (!this.started || count <= 0) {
-      return;
-    }
-    this.painted = this.painted.slice(count);
-    this.textAbovePark = this.textAbovePark.slice(count);
-    this.previousTextAbovePark = [];
-    this.anchorRow += count;
-  }
-
-  /**
-   * The terminal reports it drew the last update at `cols` columns (or
-   * never answered: `undefined`). Another
-   * width than it was written for means the update reached the terminal
-   * after a resize (it was on its way when the terminal reflowed): what the
-   * terminal reflowed was then the update before, and relayout() counts that
-   * one's rows. A caller that waits for this before each next update knows,
-   * at any resize, exactly which update the terminal reflowed. Only the
-   * first acknowledgement after an update counts.
-   */
-  acknowledge(cols: number | undefined): void {
-    // Only the first acknowledgement after an update says when that update arrived. A later one
-    // arrives after it whatever it says. `undefined`: the terminal never answered, so when the update
-    // arrived is not known, and relayout() goes by the cursor report alone.
-    if (this.started && this.unacknowledged) {
-      this.lastArrivedLate = cols !== undefined && cols !== this.writtenCols;
-      this.arrivedCols = cols ?? 0;
-      this.unacknowledged = false;
-    }
-  }
-
-  /**
-   * Re-anchor after a resize. `cursor` is where the terminal now reports the
-   * cursor, which was parked in column 1 of the live region's last row; the
-   * old live rows are erased and the caller repaints at the new width.
-   *
-   * A terminal that reflows rewraps the live rows above the parked one, and
-   * the cursor moves down with them; one that does not reflow leaves the
-   * cursor where it was. Only when the cursor moved down at least as far as
-   * those rows grew (or sits on the bottom row, where content scrolls
-   * instead) is the rewrap counted; otherwise the rows above count one row
-   * each, which may leave stale rows but never paints over committed text.
-   * (A terminal that does not reflow, with the region on the bottom row, is
-   * the one case still taken as reflowing.) A terminal known to reflow (or
-   * not, see LiveRegionOptions.reflows) needs no guess: the cursor follows
-   * its row through a reflow, so moving up by the rewrapped height from
-   * wherever it is lands on the live region's first row, report or not.
-   *
-   * Without a report (`undefined`), the live region restarts at the row the
-   * cursor was parked on: it may leave stale rows above, but it never moves
-   * up onto committed text.
-   */
-  relayout(cursor: CursorPosition | undefined): void {
+  relayout(): void {
     if (!this.started) {
       return;
     }
-    const { cols, rows } = this.screen.size;
-    // The rows the terminal reflowed: the last update's, or the one before when the last arrived
-    // after the resize. That one moved up from where the reflow left the cursor by its own count of
-    // rows and drew one row each (without autowrap), so the rows above the cursor are its own plus
-    // however much the reflow grew the earlier ones. Either way: this update's rows plus that growth.
-    const grown = this.lastArrivedLate
-      ? this.rowsAboveAfterLateUpdate(cols) - this.textAbovePark.length
-      : this.textAbovePark.reduce((sum, text) => sum + rowsNeeded(text, cols), 0) - this.textAbovePark.length;
-    // Rewrapping pushes the cursor down at least as far as the rows above it grew, unless it is on
-    // the bottom row (where the terminal scrolls content up instead). Anything less, or no report,
-    // is ambiguous, and then the count that cannot reach committed text wins: at worst it leaves
-    // stale rows above.
-    const reflowed = this.reflows ?? (cursor !== undefined && (grown === 0 || cursor.row - this.parkedRow >= grown || cursor.row >= rows));
-    const above = this.textAbovePark.length + (reflowed ? grown : 0);
-    // Up from where the terminal kept the cursor (the parked row, wherever its reflow put it), not to
-    // a computed row: a frame drawn before the resize reached the terminal may have moved things.
-    // Ends a synchronized update an update may have left open (see update()).
-    this.screen.write((above > 0 ? ansi.cursorUp(above) : '') + '\r' + ansi.resetStyle + ansi.eraseDown + ansi.endSynchronizedUpdate);
-    this.anchorRow = Math.min(Math.max(1, (cursor?.row ?? this.parkedRow) - above), rows);
-    this.parkedRow = this.anchorRow;
-    this.textAbovePark = [];
-    this.previousTextAbovePark = [];
-    this.lastArrivedLate = false;
-    this.unacknowledged = false;
+    this.screen.write(
+      (this.rowsAbove > 0 ? ansi.cursorUp(this.rowsAbove) : '') + '\r' + ansi.resetStyle + ansi.eraseDown
+        + ansi.autowrapOn + ansi.endSynchronizedUpdate,
+    );
+    this.rowsAbove = 0;
     this.painted = [];
-  }
-
-  /**
-   * The rows above the parked cursor, at `cols` columns, after the last
-   * update reached the terminal late. The terminal had reflowed the update
-   * before it at `arrivedCols`; the late one moved up its own count of rows
-   * from where that left the cursor, cleared down and drew its rows without
-   * autowrap (cut at `arrivedCols`). So above the cursor are: the top of the
-   * earlier layout, down to where the late update started (its first rows,
-   * unchanged, and above them whatever it left of rows it rewrote), then the
-   * late update's own rows. A terminal resized again since (before any
-   * relayout) has reflowed those, so each is measured at `cols`.
-   */
-  private rowsAboveAfterLateUpdate(cols: number): number {
-    const at = this.arrivedCols;
-    const before = this.previousTextAbovePark.map((text) => wrapRows(text, at));
-    const height = before.reduce((sum, parts) => sum + parts.length, 0);
-    let left = Math.max(0, height - this.lastMoveUp);
-    let kept = 0;
-    for (const parts of before) {
-      if (left <= 0) {
-        break;
-      }
-      const take = Math.min(left, parts.length);
-      kept += rowsNeeded(parts.slice(0, take).join(''), cols);
-      left -= take;
-    }
-    // The late update rewrote from row (earlier rows above the cursor - its move up) on.
-    const firstWritten = Math.max(0, this.previousTextAbovePark.length - this.lastMoveUp);
-    const drawn = this.textAbovePark.slice(firstWritten)
-      .reduce((sum, text) => sum + rowsNeeded(wrapRows(text, at)[0] ?? '', cols), 0);
-    return kept + drawn;
   }
 
   /** Erase the live region and leave a visible cursor at its start: a fresh line below everything committed. */
@@ -315,17 +157,15 @@ export class LiveRegion {
       return;
     }
     this.started = false;
-    const up = Math.max(0, this.painted.length - 1);
+    const up = this.rowsAbove;
     this.painted = [];
+    this.rowsAbove = 0;
     this.screen.write(
       ansi.beginSynchronizedUpdate + (up > 0 ? ansi.cursorUp(up) : '') + '\r' + ansi.resetStyle + ansi.eraseDown
         + ansi.showCursor + ansi.endSynchronizedUpdate,
     );
   }
 }
-
-/** A row's text, trailing blanks left out: what a terminal rewraps. */
-const rowText = (row: PaintRow): string => row.map((span) => span.text).join('').replace(/ +$/, '');
 
 /**
  * Rows `text` takes when a terminal wraps it at `cols`, counting cells as
@@ -350,19 +190,3 @@ export const rowsNeeded = (text: string, cols: number): number => {
 };
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-
-/** `text` cut into the rows a terminal wraps it into at `cols` (see rowsNeeded). */
-const wrapRows = (text: string, cols: number): string[] => {
-  const rows = [''];
-  let col = 0;
-  for (const { segment } of graphemes.segment(text)) {
-    const width = graphemeWidth(segment);
-    if (width > 0 && col + width > cols) {
-      rows.push('');
-      col = 0;
-    }
-    rows[rows.length - 1] += segment;
-    col += width;
-  }
-  return rows;
-};
