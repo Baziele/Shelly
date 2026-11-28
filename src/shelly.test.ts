@@ -25,6 +25,7 @@ after(() => rmSync(home, { recursive: true, force: true }));
 
 interface Internals {
   mode: string;
+  overlayLoad: Promise<unknown> | undefined;
   claim(onKeys: (data: string) => boolean): void;
   release(options: ReleaseOptions): void;
 }
@@ -77,9 +78,16 @@ const setup = (fakes: SetupOptions = {}) => {
       isShellInForeground: () => true,
     };
   };
+  const calls = { startDaemon: 0, get: 0 };
   const link = {
-    startDaemon: () => Promise.reject(new Error('no daemon here')),
-    get: () => Promise.reject(new Error('no daemon here')),
+    startDaemon: () => {
+      calls.startDaemon++;
+      return Promise.reject(new Error('no daemon here'));
+    },
+    get: () => {
+      calls.get++;
+      return Promise.reject(new Error('no daemon here'));
+    },
     dispose: () => Promise.resolve(),
     loaded: undefined,
     lastError: undefined,
@@ -95,6 +103,7 @@ const setup = (fakes: SetupOptions = {}) => {
     internals,
     marker,
     events,
+    calls,
     written: () => written,
     toShell,
     resizes,
@@ -111,6 +120,34 @@ const setup = (fakes: SetupOptions = {}) => {
 };
 
 const freshLine: ReleaseOptions = { cursor: 'fresh-line', line: { type: 'as-before' } };
+
+describe('Shelly loads on first use', () => {
+  it('starts the daemon at the first prompt, but loads neither the UI nor the connection', async () => {
+    const t = setup();
+    t.prompt();
+    await sleep(400);
+    assert.equal(t.calls.startDaemon, 1);
+    assert.equal(t.calls.get, 0);
+    assert.equal(t.internals.overlayLoad, undefined);
+    t.type('ls -la:');
+    await sleep(20);
+    assert.equal(t.internals.overlayLoad, undefined, 'a colon in a command is no trigger');
+    await t.stop();
+  });
+
+  it('loads both from the first character of a trigger at an empty prompt', async () => {
+    const t = setup();
+    t.prompt();
+    t.type(':');
+    assert.notEqual(t.internals.overlayLoad, undefined);
+    await t.internals.overlayLoad;
+    assert.equal(t.calls.get, 1);
+    // Nothing followed: the colon goes to the shell.
+    await sleep(450);
+    assert.ok(t.toShell.includes(':'), JSON.stringify(t.toShell));
+    await t.stop();
+  });
+});
 
 describe('Shelly hands the terminal back', () => {
   it('gives the prompt back on its own when busy with nothing drawing (an error lost on the way)', async () => {
