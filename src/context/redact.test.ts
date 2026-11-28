@@ -19,12 +19,22 @@ describe('redactSecrets', () => {
     it(`masks ${input.split('\n')[0]}`, () => assert.equal(redactSecrets(input), expected));
   }
 
-  it('stays fast on long runs of word characters', () => {
-    const started = performance.now();
-    for (const run of ['a.'.repeat(32_000), '1.2.3.'.repeat(10_000), '0123abcd-'.repeat(7000), 'x'.repeat(64_000)]) {
-      redactSecrets(run);
-    }
-    assert.ok(performance.now() - started < 500, `took ${Math.round(performance.now() - started)}ms`);
+  it('stays linear on long runs of word characters', () => {
+    // Compare growth rather than wall time, so a busy machine cannot fail it:
+    // 8x the input must cost well under 64x (what backtracking would cost).
+    const runs = (scale: number): string[] =>
+      ['a.'.repeat(4000 * scale), '1.2.3.'.repeat(1250 * scale), '0123abcd-'.repeat(875 * scale), 'x'.repeat(8000 * scale)];
+    const time = (inputs: string[]): number => {
+      const started = performance.now();
+      for (const input of inputs) {
+        redactSecrets(input);
+      }
+      return performance.now() - started;
+    };
+    time(runs(1)); // warm up the regex engine
+    const small = Math.max(time(runs(1)), 1);
+    const large = time(runs(8));
+    assert.ok(large < 500 || large / small < 24, `8x the input took ${Math.round(large / small)}x as long (${Math.round(large)}ms)`);
   });
 
   it('leaves ordinary text alone', () => {
