@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { shellyPaths } from '../../src/protocol/paths.js';
+import { probeSocket } from '../../src/protocol/probe.js';
 import { afterEach, describe, it } from 'node:test';
 import { lastPromptRow, startShelly, type ShellyHarness } from './harness.js';
 
@@ -91,6 +94,24 @@ describe('Shelly in a real terminal', { timeout: 90_000 }, () => {
       await shelly?.close();
       shelly = undefined;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('exits with the shell at once, even while its background service is still starting', async () => {
+    // The daemon holds off for 4 s (a test hook), so the connection :: asked for is still being made.
+    shelly = await startShelly({ shell: '/bin/zsh', env: { SHELLY_DAEMON_TEST_LOCK_AT: String(Date.now() + 4000) } });
+    await shelly.type('::');
+    await shelly.waitFor((rows) => rows.some((row) => row.includes(':: Ask Shelly')), 'the input');
+    await shelly.type(ESCAPE);
+    await shelly.waitFor((rows) => rows[lastPromptRow(rows)]?.trimEnd() === '$', 'the prompt back');
+    const started = Date.now();
+    await shelly.type('exit 4\r');
+    assert.equal(await shelly.driver.waitForExit({ timeoutMs: 5000 }), 4);
+    assert.ok(Date.now() - started < 3000, `exited after ${Date.now() - started} ms`);
+    // Let the held daemon come up, so closing the harness stops it rather than leaving it behind.
+    const socket = shellyPaths({ SHELLY_HOME: shelly.driver.shellyHome }).socket;
+    for (let waited = 0; waited < 15_000 && !(await probeSocket(socket)); waited += 100) {
+      await sleep(100);
     }
   });
 

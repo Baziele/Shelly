@@ -30,4 +30,7 @@ for (const signal of ['SIGHUP', 'SIGTERM'] as const) {
   process.on(signal, () => shelly.terminate());
 }
 
-process.exitCode = await shelly.run();
+// Exit with the shell. run() has already said goodbye to the daemon (bounded
+// in time); a daemon connection still being made (a slow start, or one that
+// never comes) must not keep the terminal waiting.
+process.exit(await shelly.run());
