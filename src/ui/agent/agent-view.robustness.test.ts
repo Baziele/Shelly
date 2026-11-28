@@ -3,8 +3,10 @@ import { afterEach, describe, it } from 'node:test';
 import { EmulatedTerminal } from '../../../test/support/emulated-terminal.js';
 import { useModernWidths } from '../../../test/tools/unicode.js';
 import type { ThreadEvent } from '../../protocol/schema.js';
-import { AgentView, type AgentAction, type ViewTimers } from './agent-view.js';
+import { AgentView, redrawForWidth, type AgentAction, type ViewTimers } from './agent-view.js';
 import { diffOf } from './diff.js';
+import { seg } from './lines.js';
+import { lineToPaintRow } from './paint-line.js';
 import { renderHistory } from './history.js';
 
 /*
@@ -504,4 +506,48 @@ describe('a long paragraph streaming', () => {
       assert.ok(starts.length <= 1 + liveAtResize, `more than the live rows show twice:\n${lines.join('\n')}`);
     });
   }
+});
+
+describe('frames at another width than the terminal', () => {
+  it('are drawn again only when they have a width, and at most twice for a size', () => {
+    assert.equal(redrawForWidth(120, 60, 0), true, 'the frame after a resize, at the old width');
+    assert.equal(redrawForWidth(0, 60, 0), false, 'an empty frame has no width to go by');
+    assert.equal(redrawForWidth(58, 60, 2), false, 'still off after two redraws: painted as it is');
+    assert.equal(redrawForWidth(60, 60, 0), false);
+  });
+
+  /** Feed the view frames as OpenTUI would hand them over, and count the redraws it asks for. */
+  const feed = async (width: number, rowsOf: (cols: number) => number, frames: number) => {
+    const { term, view: agent } = await setup(60, 16);
+    await settle(term);
+    const internals = agent as unknown as {
+      processFrame(snapshot: unknown): void;
+      headless: { resize(size: { width: number; height: number }): void };
+    };
+    let redraws = 0;
+    const resize = internals.headless.resize.bind(internals.headless);
+    internals.headless.resize = (size) => {
+      redraws++;
+      resize(size);
+    };
+    const paintedBefore = agent.renderStats.frames;
+    for (let frame = 0; frame < frames; frame++) {
+      const rows = rowsOf(width) > 0 ? [lineToPaintRow([seg('x'.repeat(width))])] : [];
+      (internals as unknown as { awaitingFrame: boolean }).awaitingFrame = true;
+      internals.processFrame({ rows, width, height: rows.length, blocks: [] });
+    }
+    return { redraws, painted: agent.renderStats.frames - paintedBefore };
+  };
+
+  it('paints an empty frame without drawing it again', async () => {
+    const { redraws, painted } = await feed(0, () => 0, 3);
+    assert.equal(redraws, 0);
+    assert.equal(painted, 3);
+  });
+
+  it('settles on frames whose rows come out narrower (trailing spans trimmed): two redraws, then painted', async () => {
+    const { redraws, painted } = await feed(52, () => 1, 5);
+    assert.equal(redraws, 2, 'drew again without end');
+    assert.equal(painted, 3);
+  });
 });

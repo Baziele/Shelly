@@ -74,6 +74,20 @@ const ESCAPE_WAIT_MS = 40;
 const WAITING_REDRAW_MS = 1000;
 /** A resize nobody passed on to relayout() is handled after the size has held still this long. */
 const AUTO_RELAYOUT_MS = 150;
+/** Frames drawn again because they came out at another width than the terminal's, at most, for one terminal width. */
+const MAX_WIDTH_REDRAWS = 2;
+
+/**
+ * Whether a frame `frameWidth` cells wide should be drawn again for a
+ * terminal `cols` wide: OpenTUI applies a resize only after the frame it is
+ * drawing, so the first frame after one can still be at the old width.
+ * Not for an empty frame (no width to go by), and not more than
+ * MAX_WIDTH_REDRAWS times for one terminal width: a frame that keeps coming out at
+ * another width is painted as it is (its rows are cut at the edge, never
+ * wrapped), so drawing never stalls.
+ */
+export const redrawForWidth = (frameWidth: number, cols: number, redrawsSoFar: number): boolean =>
+  frameWidth > 0 && frameWidth !== cols && redrawsSoFar < MAX_WIDTH_REDRAWS;
 /** Longest finish() waits for the last frames before giving the terminal back anyway. */
 const FINISH_TIMEOUT_MS = 2000;
 
@@ -144,6 +158,8 @@ export class AgentView {
   private awaitingFrame = false;
   /** Something changed while a frame was in flight. */
   private dirty = false;
+  /** Frames drawn again for their width since the terminal became `cols` wide (see redrawForWidth). */
+  private widthRedraws = { cols: 0, count: 0 };
   private selectedOption = 0;
   private shownRequestId: string | undefined;
   /** When the prompt on screen first showed; keys before PROMPT_ARM_MS after it are ignored. */
@@ -694,11 +710,14 @@ export class AgentView {
       this.dirty = true;
       return;
     }
-    if (snapshot.width !== this.host.size.cols) {
-      // Drawn at another width: OpenTUI applies a resize only after the frame it is drawing, so the
-      // first frame after one can still be at the old width. Its rows would wrap in the terminal, put
-      // committed text where the live region thinks it is not, and get painted over. Draw again.
-      this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
+    const { cols } = this.host.size;
+    if (this.widthRedraws.cols !== cols) {
+      this.widthRedraws = { cols, count: 0 };
+    }
+    if (redrawForWidth(snapshot.width, cols, this.widthRedraws.count)) {
+      // Drawn at the old width (see redrawForWidth): draw it again at the terminal's.
+      this.widthRedraws.count++;
+      this.headless.resize({ width: cols, height: this.bufferRows });
       this.dirty = true;
       this.afterFrame();
       return;
