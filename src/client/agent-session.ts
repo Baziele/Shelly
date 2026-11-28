@@ -19,7 +19,7 @@ import { truncateEnd } from '../render/text-width.js';
 import type { DaemonClient } from './daemon-client.js';
 import type { FlowHost, OpenInput } from './flow-host.js';
 import { buildPromptContext, newestCommandId } from './prompt-context.js';
-import { echoText, linesText, plainText } from './terminal-text.js';
+import { echoText, errorText, linesText, plainText } from './terminal-text.js';
 
 /*
  * Agent mode (`::`): one current thread per terminal, prompts and their
@@ -79,6 +79,14 @@ interface UnseenTurn {
 
 type Outcome = 'ended' | 'lost';
 
+/** What the next prompt does about threads: start a new one, where, and in which mode. */
+interface NextThread {
+  readonly newThread: boolean;
+  readonly here: boolean;
+  /** Picked with /mode before the thread existed: set when it is created. */
+  readonly modeId?: string;
+}
+
 const TITLE_IN_HINT = 32;
 /** How stale the agent list may get before opening :: refreshes it (in the background). */
 const AGENTS_REFRESH_MS = 30_000;
@@ -96,7 +104,9 @@ const synthetic = (event: Record<string, unknown>): ThreadEvent => ({ seq: -1, .
 export class AgentSession {
   private thread: CurrentThread | undefined;
   /** What the next prompt does about threads: start a new one, and where. */
-  private next: { newThread: boolean; here: boolean } = { newThread: false, here: false };
+  private next: NextThread = { newThread: false, here: false };
+  /** The modes each agent offers, as this terminal last saw them: /mode for a new thread needs no thread to show them. */
+  private readonly agentModes = new Map<string, ModeState>();
   private agents: readonly AgentInfo[] = [];
   private agentsAt = 0;
   /** The daemon (by pid) this terminal attached the current thread on; a new daemon needs it attached again. */
@@ -221,16 +231,20 @@ export class AgentSession {
     if (!agent) {
       return undefined;
     }
-    return `${agent} · new thread${this.next.here ? ' here' : ''}`;
+    const known = this.agentModes.get(agent);
+    const mode = this.next.modeId && known ? labelOf({ ...known, currentModeId: this.next.modeId }) : undefined;
+    return `${agent}${mode ? ` · ${mode}` : ''} · new thread${this.next.here ? ' here' : ''}`;
   }
 
   /** The thread's mode, when it is not the agent's first (usual) one. */
   private modeLabel(threadId: string): string | undefined {
-    const modes = this.modes.get(threadId);
-    if (!modes || modes.availableModes[0]?.id === modes.currentModeId) {
-      return undefined;
-    }
-    return modes.availableModes.find((mode) => mode.id === modes.currentModeId)?.name ?? modes.currentModeId;
+    return labelOf(this.modes.get(threadId));
+  }
+
+  private rememberModes(threadId: string, agentId: string, modes: ModeState): void {
+    this.modes.set(threadId, modes);
+    // The agent's modes, with its usual one current: what a new thread starts in.
+    this.agentModes.set(agentId, { ...modes, currentModeId: this.agentModes.get(agentId)?.currentModeId ?? modes.availableModes[0]?.id ?? modes.currentModeId });
   }
 
   private refreshHint(): void {
@@ -428,7 +442,7 @@ export class AgentSession {
         this.refreshHint();
         return;
       case 'mode.changed':
-        this.modes.set(live.threadId, { currentModeId: event.currentModeId, availableModes: event.availableModes });
+        this.rememberModes(live.threadId, live.agentId, { currentModeId: event.currentModeId, availableModes: event.availableModes });
         return;
       case 'turn.ended':
         if (event.turnId === tracker.turnId) {
@@ -478,8 +492,11 @@ export class AgentSession {
       if (tracker.status === 'ended') {
         this.settled(live);
       }
-      await view.finish();
-      this.releaseView(view);
+      try {
+        await view.finish();
+      } finally {
+        this.releaseView(view);
+      }
       return;
     }
     if (live.view === undefined && tracker.status === 'ended') {
@@ -505,15 +522,18 @@ export class AgentSession {
 
   /** End a view that never got a turn (the request failed), with the reason as its summary. */
   private async endView(view: AgentView, reason: string, startedAt: number, turnId?: string): Promise<void> {
-    view.apply(synthetic({
-      type: 'turn.ended',
-      turnId: turnId ?? 'failed',
-      stopReason: 'error' satisfies StopReason,
-      error: reason,
-      durationMs: Date.now() - startedAt,
-    }));
-    await view.finish();
-    this.releaseView(view);
+    try {
+      view.apply(synthetic({
+        type: 'turn.ended',
+        turnId: turnId ?? 'failed',
+        stopReason: 'error' satisfies StopReason,
+        error: reason,
+        durationMs: Date.now() - startedAt,
+      }));
+      await view.finish();
+    } finally {
+      this.releaseView(view);
+    }
   }
 
   /** The view left the cursor on a fresh line below its output: the shell's prompt goes there. */
@@ -662,7 +682,20 @@ export class AgentSession {
     }
     this.thread = fromSummary(summary);
     this.attachedOn = hello.pid;
+    const modeId = this.next.modeId;
     this.next = { newThread: false, here: false };
+    if (modeId) {
+      // The mode picked before the thread existed. Should the agent refuse it, the thread still starts.
+      await client.setMode(summary.id, modeId).then(
+        () => {
+          const modes = this.agentModes.get(summary.agentId);
+          if (modes) {
+            this.rememberModes(summary.id, summary.agentId, { ...modes, currentModeId: modeId });
+          }
+        },
+        () => undefined,
+      );
+    }
     return this.thread;
   }
 
@@ -690,12 +723,12 @@ export class AgentSession {
     const overlay = this.host.overlay;
     switch (name) {
       case 'new':
-        this.next = { newThread: true, here: false };
+        this.next = { newThread: true, here: false, ...(this.next.modeId ? { modeId: this.next.modeId } : {}) };
         overlay.clearInput();
         this.refreshHint();
         return;
       case 'here':
-        this.next = { newThread: true, here: true };
+        this.next = { newThread: true, here: true, ...(this.next.modeId ? { modeId: this.next.modeId } : {}) };
         overlay.clearInput();
         this.refreshHint();
         return;
@@ -715,7 +748,7 @@ export class AgentSession {
         await this.showContext(open);
         return;
       case 'help':
-        this.showHelp(open);
+        await this.showHelp(open);
         return;
     }
   }
@@ -813,7 +846,7 @@ export class AgentSession {
     }
     for (const event of attached.history) {
       if (event.type === 'mode.changed') {
-        this.modes.set(thread.id, { currentModeId: event.currentModeId, availableModes: event.availableModes });
+        this.rememberModes(thread.id, thread.agentId, { currentModeId: event.currentModeId, availableModes: event.availableModes });
       }
     }
 
@@ -823,30 +856,38 @@ export class AgentSession {
     const isRunning = thread.status !== 'idle' && running !== undefined && !runningEnded;
     const before = isRunning ? attached.history.filter((event) => event.seq < running.seq) : attached.history;
 
+    const { terminal, colorDepth } = this.host;
+    const printHistory = async (): Promise<void> => {
+      if (!isRunning || before.some((event) => event.type === 'turn.started')) {
+        terminal.write(await renderHistory(before, {
+          agentName: thread.agentId,
+          title: thread.title || 'Untitled thread',
+          updatedAt: attached.thread.updatedAt,
+          cwd: this.host.cwd(),
+          home: this.host.home,
+          width: terminal.size.cols,
+          colorDepth,
+        }));
+      }
+    };
+    if (!isRunning) {
+      await this.printBelow(open, '/threads', printHistory);
+      return;
+    }
+    // The history, then the running turn live: the view takes over the terminal from here.
     this.inputGeneration++;
     overlay.close();
     this.host.claim(() => false);
-    const { terminal, colorDepth } = this.host;
-    terminal.write(echoText(open.trigger, '/threads', 'agent', colorDepth));
-    const hasEarlier = before.some((event) => event.type === 'turn.started');
-    if (!isRunning || hasEarlier) {
-      terminal.write(await renderHistory(before, {
-        agentName: thread.agentId,
-        title: thread.title || 'Untitled thread',
-        updatedAt: attached.thread.updatedAt,
-        cwd: this.host.cwd(),
-        home: this.host.home,
-        width: terminal.size.cols,
-        colorDepth,
-      }));
-    }
-    if (isRunning) {
+    try {
+      terminal.write(echoText(open.trigger, '/threads', 'agent', colorDepth));
+      await printHistory().catch((error: unknown) => terminal.write(errorText(this.describeError(error), colorDepth)));
       const live: LiveTurn = { ...newTracker(running.text, running.seq - 1), threadId: thread.id, agentId: thread.agentId, view: undefined };
       terminal.write(echoText(open.trigger, running.text, 'agent', colorDepth, 'watching'));
       await this.watch(undefined, live, running.seq - 1);
-      return;
+    } catch (error) {
+      terminal.write(errorText(this.describeError(error), colorDepth));
+      this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
     }
-    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
   }
 
   private async pickAgent(): Promise<void> {
@@ -890,39 +931,58 @@ export class AgentSession {
     });
   }
 
+  /**
+   * The current thread's modes, or, for the thread the next message starts,
+   * the agent's: picked now, set when the thread is created. Looking never
+   * leaves a thread behind.
+   */
   private async pickMode(): Promise<void> {
     const loaded = await this.busy(async () => {
       const client = await this.host.link.get();
       if (this.agents.length === 0) {
         await this.refreshAgents(client);
       }
-      // Modes belong to a thread's session; with none yet, this starts the thread the next message goes to.
-      const thread = await this.ensureThread(client);
-      const modes = await client.threadModes(thread.id);
-      if (modes) {
-        this.modes.set(thread.id, modes);
+      const thread = this.next.newThread ? undefined : this.thread;
+      if (thread) {
+        if (this.attachedOn !== (await client.connect()).pid) {
+          await client.attachThread(thread.id, { historyTurns: 0 });
+        }
+        const modes = await client.threadModes(thread.id);
+        if (modes) {
+          this.rememberModes(thread.id, thread.agentId, modes);
+        }
+        return { client, agentId: thread.agentId, thread, modes };
       }
-      return { client, thread, modes };
+      const agentId = this.nextAgentId() ?? 'agent';
+      const modes = this.agentModes.get(agentId) ?? await this.learnAgentModes(client);
+      return { client, agentId, thread: undefined, modes };
     });
     if (!loaded) {
       return;
     }
-    const { client, thread, modes } = loaded;
+    const { client, agentId, thread, modes } = loaded;
     const overlay = this.host.overlay;
     this.refreshHint();
     if (!modes || modes.availableModes.length === 0) {
       overlay.clearInput();
-      overlay.setError(`${thread.agentId} has no modes to choose from.`);
+      overlay.setError(`${agentId} has no modes to choose from.`);
       return;
     }
+    const current = thread ? modes.currentModeId : this.next.modeId ?? modes.currentModeId;
     overlay.openPicker({
-      items: modePickerItems(modes.availableModes, modes.currentModeId),
-      placeholder: `Pick a mode for ${thread.agentId} · type to filter`,
+      items: modePickerItems(modes.availableModes, current),
+      placeholder: `Pick a mode for ${agentId} · type to filter`,
       onPick: (item) => {
         overlay.closePicker();
+        if (!thread) {
+          // Kept for the thread the next message starts.
+          this.next = { ...this.next, modeId: item.id };
+          this.refreshHint();
+          return;
+        }
         void client.setMode(thread.id, item.id).then(
           () => {
-            this.modes.set(thread.id, { ...modes, currentModeId: item.id });
+            this.rememberModes(thread.id, thread.agentId, { ...modes, currentModeId: item.id });
             this.refreshHint();
           },
           (error: unknown) => this.failInInput(error),
@@ -930,6 +990,26 @@ export class AgentSession {
       },
       onClose: () => undefined,
     });
+  }
+
+  /**
+   * The modes the next thread's agent offers. ACP reports modes with a
+   * session, so this opens one in a thread made for the purpose, and
+   * deletes that thread at once.
+   */
+  private async learnAgentModes(client: DaemonClient): Promise<ModeState | null> {
+    const agentId = this.nextAgentId();
+    const probe = await client.createThread({ ...(agentId ? { agentId } : {}), location: 'home', cwd: this.host.cwd() });
+    try {
+      await client.attachThread(probe.id, { historyTurns: 0 });
+      const modes = await client.threadModes(probe.id);
+      if (modes) {
+        this.agentModes.set(probe.agentId, modes);
+      }
+      return modes;
+    } finally {
+      await client.deleteThread(probe.id).catch(() => undefined);
+    }
   }
 
   private async rename(title: string): Promise<void> {
@@ -955,56 +1035,69 @@ export class AgentSession {
     }
   }
 
-  /** What the agent gets with the next message: where the shell is, and the commands it has not heard about. */
-  private async showContext(open: OpenInput): Promise<void> {
+  /**
+   * Print below the prompt, closing the input first. Whatever happens while
+   * printing (an error included, shown inline), the prompt comes back: the
+   * terminal is never left with Shelly.
+   */
+  private async printBelow(open: OpenInput, echo: string, print: () => Promise<void> | void): Promise<void> {
     const { overlay, terminal, colorDepth } = this.host;
     this.inputGeneration++;
     overlay.close();
     this.host.claim(() => false);
-    terminal.write(echoText(open.trigger, '/context', 'agent', colorDepth));
-    if (!this.host.recordsCommands) {
-      terminal.write(plainText("This shell doesn't report its commands to Shelly; Shelly hooks into zsh, bash and fish.", colorDepth, 'muted'));
+    try {
+      terminal.write(echoText(open.trigger, echo, 'agent', colorDepth));
+      await print();
+    } catch (error) {
+      terminal.write(errorText(this.describeError(error), colorDepth));
+    } finally {
       this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
-      return;
     }
-    const thread = this.next.newThread ? undefined : this.thread;
-    const context = await this.contextFor(thread?.id ?? '');
-    const target = thread ? `${thread.agentId} · “${oneLine(thread.title) || 'this thread'}”` : `${this.nextAgentId() ?? 'the agent'} · new thread`;
-    const lines = [
-      `With your next message (${target}):`,
-      '',
-      ...formatEnvironmentLines(context.environment, context.cwd),
-      '',
-      ...(context.commands.length === 0
-        ? [thread ? 'No new commands since your last message.' : 'No commands run yet.']
-        : formatCommandLines(context.commands)),
-    ];
-    while (lines.at(-1) === '') {
-      lines.pop();
-    }
-    terminal.write(plainText(lines.join('\n'), colorDepth));
-    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
   }
 
-  private showHelp(open: OpenInput): void {
-    const { overlay, terminal, colorDepth } = this.host;
-    this.inputGeneration++;
-    overlay.close();
-    this.host.claim(() => false);
-    terminal.write(echoText(open.trigger, '/help', 'agent', colorDepth));
-    const key = (name: string, text: string): Line => [seg(`  ${name.padEnd(10)}`, 'accent', { bold: true }), seg(text)];
-    const lines: Line[] = [
-      key('::', 'ask your agent, or hand it a task (in a thread you can come back to)'),
-      key('__', 'describe a command; it lands on your prompt, ready to edit or run'),
-      key('ctrl+]', 'rewrite the command you are typing'),
-      [],
-      ...BUILTIN_COMMANDS.map((command) => key(`/${command.name}`, command.description)),
-      [],
-      [seg('  While the agent works: ', 'muted'), seg('esc', 'accent'), seg(' background · ', 'muted'), seg('ctrl+c', 'accent'),
-        seg(' stop · ', 'muted'), seg('y n 1-9', 'accent'), seg(' answer a permission', 'muted')],
-    ];
-    terminal.write(linesText(lines, colorDepth));
-    this.host.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+  /** What the agent gets with the next message: where the shell is, and the commands it has not heard about. */
+  private showContext(open: OpenInput): Promise<void> {
+    const { terminal, colorDepth } = this.host;
+    return this.printBelow(open, '/context', async () => {
+      if (!this.host.recordsCommands) {
+        terminal.write(plainText("This shell doesn't report its commands to Shelly; Shelly hooks into zsh, bash and fish.", colorDepth, 'muted'));
+        return;
+      }
+      const thread = this.next.newThread ? undefined : this.thread;
+      const context = await this.contextFor(thread?.id ?? '');
+      const target = thread ? `${thread.agentId} · “${oneLine(thread.title) || 'this thread'}”` : `${this.nextAgentId() ?? 'the agent'} · new thread`;
+      const lines = [
+        `With your next message (${target}):`,
+        '',
+        ...formatEnvironmentLines(context.environment, context.cwd),
+        '',
+        ...(context.commands.length === 0
+          ? [thread ? 'No new commands since your last message.' : 'No commands run yet.']
+          : formatCommandLines(context.commands)),
+      ];
+      while (lines.at(-1) === '') {
+        lines.pop();
+      }
+      terminal.write(plainText(lines.join('\n'), colorDepth));
+    });
+  }
+
+  private showHelp(open: OpenInput): Promise<void> {
+    const { terminal, colorDepth } = this.host;
+    return this.printBelow(open, '/help', () => {
+      const key = (name: string, text: string): Line => [seg(`  ${name.padEnd(10)}`, 'accent', { bold: true }), seg(text)];
+      const lines: Line[] = [
+        key('::', 'ask your agent, or hand it a task (in a thread you can come back to)'),
+        key('__', 'describe a command; it lands on your prompt, ready to edit or run'),
+        key('ctrl+]', 'rewrite the command you are typing'),
+        [],
+        ...BUILTIN_COMMANDS.map((command) => key(`/${command.name}`, command.description)),
+        [],
+        [seg('  While the agent works: ', 'muted'), seg('esc', 'accent'), seg(' background · ', 'muted'), seg('ctrl+c', 'accent'),
+          seg(' stop · ', 'muted'), seg('y n 1-9', 'accent'), seg(' answer a permission', 'muted')],
+      ];
+      terminal.write(linesText(lines, colorDepth));
+    });
   }
 
   // ─── Errors and leaving ───────────────────────────────────────────────────
@@ -1042,11 +1135,24 @@ export class AgentSession {
     return this.thread ? client.detachThread(this.thread.id) : Promise.resolve();
   }
 
+  /** A turn's view is on screen. */
+  isDrawing(): boolean {
+    return this.view !== undefined;
+  }
+
   /** The terminal was resized (and has settled) while Shelly draws below the prompt. */
   relayout(): void {
     void this.view?.relayout();
   }
 }
+
+/** A mode's name, when it is not the agent's first (usual) one. */
+const labelOf = (modes: ModeState | undefined): string | undefined => {
+  if (!modes || modes.availableModes[0]?.id === modes.currentModeId) {
+    return undefined;
+  }
+  return modes.availableModes.find((mode) => mode.id === modes.currentModeId)?.name ?? modes.currentModeId;
+};
 
 const fromSummary = (summary: ThreadSummary): CurrentThread => ({
   id: summary.id,

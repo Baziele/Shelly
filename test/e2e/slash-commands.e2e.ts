@@ -94,7 +94,7 @@ for (const shell of E2E_SHELLS) {
       stack = await startStack({ shell, cols: 110, rows: 30 });
       const driver = stack.driver;
 
-      // /mode before any message: the thread starts so its modes can be listed.
+      // /mode before any message: the agent's modes, and only looking leaves no thread behind.
       await open(driver, /fake · new thread/);
       await driver.type('/mode\r');
       await driver.waitForText('Pick a mode for fake', { timeoutMs: TURN_MS });
@@ -102,6 +102,14 @@ for (const shell of E2E_SHELLS) {
       for (const mode of ['Default', 'Accept edits', 'Plan']) {
         assert.ok(lines.some((line) => line.includes(mode)), `${mode} is offered:\n${lines.join('\n')}`);
       }
+      await driver.press('esc');
+      await driver.waitFor((rows) => !rows.some((row) => row.includes('Pick a mode')), 'the picker closed');
+      await driver.type('/threads\r');
+      await driver.waitForText('No threads yet', { timeoutMs: TURN_MS });
+
+      // Picked now (the input is still open), the mode is set on the thread the next message starts.
+      await driver.type('/mode\r');
+      await driver.waitForText('Pick a mode for fake', { timeoutMs: TURN_MS });
       await driver.type('plan\r');
       await driver.waitForText(/fake · Plan · new thread/);
 
@@ -117,12 +125,12 @@ for (const shell of E2E_SHELLS) {
       // /here: the next thread lives in the shell's folder.
       await open(driver);
       await driver.type('/here\r');
-      await driver.waitForText(/fake · new thread here/);
+      await driver.waitForText(/fake · Plan · new thread here/);
       await close(driver);
       await driver.type('echo early-command\r');
       await driver.waitForText(/^early-command$/m);
       await ask(driver, 'echo where am i');
-      await open(driver);
+      await open(driver, /fake · Plan · “echo where am i”/);
       await driver.type('/threads\r');
       await driver.waitForText('Pick a thread');
       lines = await driver.lines();
