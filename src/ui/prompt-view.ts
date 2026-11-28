@@ -33,11 +33,21 @@ const HINT_GAP = 3;
 const MIN_HINT_TITLE_CELLS = 6;
 
 /**
- * `hint` in `cells`: its quoted thread title (`“…”`) cut short, else its
- * last ` · ` parts left off (`✓ Claude Code finished · enter to see` keeps
- * `✓ Claude Code finished`); undefined when not even its first part fits.
+ * `hint` in `cells`: whole; or (`title`) with its quoted thread title
+ * (`“…”`) cut short; or (`parts`) also with its last ` · ` parts left off
+ * (`✓ Claude Code finished · enter to see` keeps `✓ Claude Code finished`).
+ * Undefined when it does not fit that way.
  */
-export const shortenHint = (hint: string, cells: number): string | undefined => {
+export const fitHint = (hint: string, cells: number, step: 'whole' | 'title' | 'parts'): string | undefined => {
+  if (displayWidth(hint) <= cells) {
+    return hint;
+  }
+  if (step === 'whole') {
+    return undefined;
+  }
+  if (step === 'title') {
+    return shortenTitle(hint, cells);
+  }
   const parts = hint.split(' · ');
   for (let count = parts.length; count >= 1; count--) {
     const candidate = parts.slice(0, count).join(' · ');
@@ -572,12 +582,14 @@ export class PromptView {
       // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
       const roomFor = (text: string): number => room - displayWidth(text) - HINT_GAP - 1;
       const beside = typed > 0 ? this.input.value : placeholder;
-      // The whole hint, with the shorter placeholder if need be; then with its title shortened.
-      for (const [withPlaceholder, shorten] of [[beside, false], [short, false], [beside, true], [short, true]] as const) {
+      // The whole hint, with the shorter placeholder if need be; then with its title shortened;
+      // then with its last parts left off. Each before the next gives up anything more.
+      const steps = (['whole', 'title', 'parts'] as const).flatMap((step) => [[beside, step], [short, step]] as const);
+      for (const [withPlaceholder, step] of steps) {
         if (withPlaceholder !== beside && typed > 0) {
           continue;
         }
-        shown = shorten ? shortenHint(hint, roomFor(withPlaceholder)) : displayWidth(hint) <= roomFor(withPlaceholder) ? hint : undefined;
+        shown = fitHint(hint, roomFor(withPlaceholder), step);
         if (shown !== undefined) {
           if (typed === 0) {
             placeholder = withPlaceholder;

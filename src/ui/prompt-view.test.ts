@@ -66,6 +66,11 @@ describe('PromptView', { timeout: 20_000 }, () => {
     assert.match(row!, /^~\/acme-web \$ :: Ask anything\s+Fake Agent · “A rather lo…”$/);
     assert.ok(row!.length <= 59);
     overlay?.destroy();
+    // Where the long placeholder would leave room only for the agent, the short one keeps a title.
+    const middle = await open(71, '::', '', { hint });
+    const [between] = await middle.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
+    assert.match(between!, /:: Ask anything\s+Fake Agent · “A rather long thread t…”$/);
+    overlay?.destroy();
     // Beside typed text, the title gets whatever the text leaves.
     const typing = await open(60, '::', 'why', { hint });
     const [typed] = await typing.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
