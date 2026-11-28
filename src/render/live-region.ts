@@ -54,6 +54,10 @@ export class LiveRegion {
   private lastArrivedLate = false;
   /** The last update was written and not acknowledged yet. */
   private unacknowledged = false;
+  /** The width the terminal had when the last update reached it, when that was after a resize. */
+  private arrivedCols = 0;
+  /** How many rows the last update moved up from the parked row before writing. */
+  private lastMoveUp = 0;
   /** The screen row the cursor was parked on. */
   private parkedRow = 1;
   private painted: string[] = [];
@@ -172,6 +176,7 @@ export class LiveRegion {
     this.parkedRow = this.anchorRow + last;
     this.writtenCols = this.screen.size.cols;
     this.lastArrivedLate = false;
+    this.lastMoveUp = up;
     this.unacknowledged = true;
     return true;
   }
@@ -215,6 +220,7 @@ export class LiveRegion {
     // arrived is not known, and relayout() goes by the cursor report alone.
     if (this.started && this.unacknowledged) {
       this.lastArrivedLate = cols !== undefined && cols !== this.writtenCols;
+      this.arrivedCols = cols ?? 0;
       this.unacknowledged = false;
     }
   }
@@ -249,8 +255,9 @@ export class LiveRegion {
     // after the resize. That one moved up from where the reflow left the cursor by its own count of
     // rows and drew one row each (without autowrap), so the rows above the cursor are its own plus
     // however much the reflow grew the earlier ones. Either way: this update's rows plus that growth.
-    const reflowedRows = this.lastArrivedLate ? this.previousTextAbovePark : this.textAbovePark;
-    const grown = reflowedRows.reduce((sum, text) => sum + rowsNeeded(text, cols), 0) - reflowedRows.length;
+    const grown = this.lastArrivedLate
+      ? this.rowsAboveAfterLateUpdate(cols) - this.textAbovePark.length
+      : this.textAbovePark.reduce((sum, text) => sum + rowsNeeded(text, cols), 0) - this.textAbovePark.length;
     // Rewrapping pushes the cursor down at least as far as the rows above it grew, unless it is on
     // the bottom row (where the terminal scrolls content up instead). Anything less, or no report,
     // is ambiguous, and then the count that cannot reach committed text wins: at worst it leaves
@@ -268,6 +275,38 @@ export class LiveRegion {
     this.lastArrivedLate = false;
     this.unacknowledged = false;
     this.painted = [];
+  }
+
+  /**
+   * The rows above the parked cursor, at `cols` columns, after the last
+   * update reached the terminal late. The terminal had reflowed the update
+   * before it at `arrivedCols`; the late one moved up its own count of rows
+   * from where that left the cursor, cleared down and drew its rows without
+   * autowrap (cut at `arrivedCols`). So above the cursor are: the top of the
+   * earlier layout, down to where the late update started (its first rows,
+   * unchanged, and above them whatever it left of rows it rewrote), then the
+   * late update's own rows. A terminal resized again since (before any
+   * relayout) has reflowed those, so each is measured at `cols`.
+   */
+  private rowsAboveAfterLateUpdate(cols: number): number {
+    const at = this.arrivedCols;
+    const before = this.previousTextAbovePark.map((text) => wrapRows(text, at));
+    const height = before.reduce((sum, parts) => sum + parts.length, 0);
+    let left = Math.max(0, height - this.lastMoveUp);
+    let kept = 0;
+    for (const parts of before) {
+      if (left <= 0) {
+        break;
+      }
+      const take = Math.min(left, parts.length);
+      kept += rowsNeeded(parts.slice(0, take).join(''), cols);
+      left -= take;
+    }
+    // The late update rewrote from row (earlier rows above the cursor - its move up) on.
+    const firstWritten = Math.max(0, this.previousTextAbovePark.length - this.lastMoveUp);
+    const drawn = this.textAbovePark.slice(firstWritten)
+      .reduce((sum, text) => sum + rowsNeeded(wrapRows(text, at)[0] ?? '', cols), 0);
+    return kept + drawn;
   }
 
   /** Erase the live region and leave a visible cursor at its start: a fresh line below everything committed. */
@@ -311,3 +350,19 @@ export const rowsNeeded = (text: string, cols: number): number => {
 };
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** `text` cut into the rows a terminal wraps it into at `cols` (see rowsNeeded). */
+const wrapRows = (text: string, cols: number): string[] => {
+  const rows = [''];
+  let col = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    const width = graphemeWidth(segment);
+    if (width > 0 && col + width > cols) {
+      rows.push('');
+      col = 0;
+    }
+    rows[rows.length - 1] += segment;
+    col += width;
+  }
+  return rows;
+};

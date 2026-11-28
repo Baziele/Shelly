@@ -278,6 +278,33 @@ describe('LiveRegion with an update that reaches the terminal after a resize', (
     assert.deepEqual((await term.lines()).filter((line) => line !== ''), ['committed', 'First', 'status', 'hint']);
   });
 
+  it('counts what the late update left stale at the width it arrived at, when the terminal was resized again before relayout()', async () => {
+    const term = emulate(80, 20);
+    let known = { cols: 80, rows: 20 };
+    const screen = { get size() { return known; }, write: term.screen.write };
+    const region = new LiveRegion(screen, 'truecolor', { marginRows: 1 });
+    region.start({ row: 1, col: 1 });
+    const long = (word: string) => `${word} ${'lorem ipsum '.repeat(5).trim()}`;
+    region.update(rows('committed one', 'committed two'), rows(long('First'), 'status', 'hint'));
+    region.acknowledge(80);
+    await term.flush();
+
+    // Narrowed: the update on its way arrives at 40 columns, then the terminal is widened back
+    // before the view lays out for either resize.
+    // The update rewrites the first row too (the streaming line grew), so it starts on that row.
+    term.terminal.resize(40, 20);
+    region.update([], rows(`${long('First')} more`, long('Second'), 'hint'));
+    region.acknowledge(40);
+    await term.flush();
+    term.terminal.resize(80, 20);
+
+    region.relayout(await term.cursor());
+    region.update([], rows('First', 'Second', 'hint'));
+    region.update(rows('First', 'Second', 'hint'), []);
+    region.finish();
+    assert.deepEqual((await term.lines()).filter((line) => line !== ''), ['committed one', 'committed two', 'First', 'Second', 'hint']);
+  });
+
   it('leaves nothing stale above the live region and keeps committed text', async () => {
     assert.deepEqual(await lateUpdate('First'), ['committed one', 'committed two', 'First', 'Second', 'hint']);
   });
