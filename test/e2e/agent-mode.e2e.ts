@@ -217,6 +217,26 @@ for (const shell of E2E_SHELLS) {
       promptRightAfter(lines, /\S/);
     });
 
+    it('says with ✗ when the agent is signed out, and retries in the same thread', async () => {
+      const driver = await start();
+      const signedOut = /^✗ Fake Agent isn't signed in\. Sign in to it, then try again\./;
+      for (const text of ['pretend signed out', 'pretend signed out again']) {
+        await driver.type(`::${text}\r`);
+        const lines = await waitForTurnEnd(driver, text, signedOut);
+        const echo = lines.findLastIndex((line) => line.startsWith(`$ :: ${text}`));
+        assert.ok(!lines.slice(echo).some((line) => /^✓ /.test(line)), lines.join('\n'));
+      }
+      await driver.type('::/threads\r');
+      await driver.waitForText('Pick a thread', { timeoutMs: TURN_MS });
+      const lines = await driver.lines();
+      assert.equal(lines.filter((line) => /pretend signed out\s+Fake Agent/.test(line)).length, 1, lines.join('\n'));
+      assert.ok(!lines.some((line) => line.includes('Untitled thread')), lines.join('\n'));
+      await driver.press('esc');
+      await sleep(300);
+      await driver.press('esc');
+      await driver.waitFor(atPrompt, 'the prompt back');
+    });
+
     it('reflows when the terminal is resized mid-turn', async () => {
       const driver = await start(100, 24);
       await driver.type('::slow resize\r');

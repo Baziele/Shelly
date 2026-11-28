@@ -37,6 +37,8 @@ export default defineScenario({
     { match: 'long', script: [{ type: 'message', text: `Here it is:\n\n${longLines}\n\nThat was all of it.`, charsPerTick: 400, tickMs: 20 }] },
     { match: 'slow', script: slowWork },
     { match: 'marathon', script: work(7000) },
+    // Refuses the prompt as ACP's authRequired, as a signed-out agent does.
+    { match: 'pretend signed out', script: [{ type: 'error', code: -32000, message: 'Authentication required' }] },
     // Ends the turn having said nothing, as an agent that cannot work may.
     { match: 'say nothing', script: [{ type: 'end', stopReason: 'end_turn' }] },
     {
