@@ -13,6 +13,7 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  * in shell-integration/ bind them to widgets that answer with a marker:
  *
  *   capture  report `line;<request>;<buffer>;<cursor>`, then clear the line
+ *   query    report `query;<request>;<buffer>;<cursor>`, leaving the line alone
  *   set      replace the line with the line file, delete it, report `line-set;<request>`
  *   notice   show the line file's one-line notice below the line, delete it,
  *            report `line-set;<request>`
@@ -38,8 +39,8 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  * interpreted by the line editor, let alone run.
  *
  * What each shell gets:
- *   zsh, fish, bash 4+  capture, set and notice
- *   bash 3.2            no READLINE_LINE, so no capture; replace clears the
+ *   zsh, fish, bash 4+  capture, query, set and notice
+ *   bash 3.2            no READLINE_LINE, so no capture or query; replace clears the
  *                       line and types the text: as a bracketed paste when
  *                       the shell has turned that on, otherwise only single
  *                       lines, with control characters removed; jump
@@ -63,6 +64,8 @@ export const LINE_KEYS = {
   end: '\u001b[15;16~',
   /** Ctrl+Alt+Shift+Meta+F4. */
   back: '\u001b[1;16S',
+  /** Ctrl+Alt+Shift+Meta+F9. */
+  query: '\u001b[20;16~',
 } as const;
 
 const LINE_KEY_PATTERN = new RegExp(
@@ -114,6 +117,11 @@ export interface LineEditorOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 1000;
+/**
+ * A query holds back a keystroke, so it gives up soon. A shell at its prompt
+ * answers in a few milliseconds; one this slow is busy, and the key goes on.
+ */
+const DEFAULT_QUERY_TIMEOUT_MS = 100;
 const DEFAULT_SETTLE_MS = 30;
 /**
  * A shell reports a command (`exec`) as soon as it takes the line, so after
@@ -165,6 +173,13 @@ interface PendingMove {
   timer?: NodeJS.Timeout;
 }
 
+interface PendingQuery {
+  readonly request: number;
+  /** Undefined when the shell did not answer in time. */
+  readonly resolve: (answer: { readonly line: ShellInputLine | undefined } | undefined) => void;
+  readonly timer: NodeJS.Timeout;
+}
+
 interface PendingSet {
   readonly request: number;
   readonly resolve: () => void;
@@ -193,9 +208,12 @@ export class LineEditor {
    * a history search leaves the shell at the same prompt, with no marker.
    */
   private enterTimer: NodeJS.Timeout | undefined;
+  /** Waiting for the shell to say what the Enter did; see `decided`. */
+  private decidedWaiters: (() => void)[] = [];
   private bracketedPaste = false;
   private pendingCapture: PendingCapture | undefined;
   private pendingSet: PendingSet | undefined;
+  private pendingQuery: PendingQuery | undefined;
   private nextRequest = 1;
   private readonly abandoned = new Set<number>();
   /** Inside a bracketed paste the user is sending, which may span chunks. */
@@ -236,6 +254,11 @@ export class LineEditor {
     return this.features.has('jump');
   }
 
+  /** The shell can report its line and leave it as it is. */
+  get canQuery(): boolean {
+    return this.features.has('query') && this.lineFile !== undefined;
+  }
+
   /** The shell can show a notice below its line, leaving the line alone. */
   get canNotify(): boolean {
     return this.features.has('notice') && this.lineFile !== undefined;
@@ -253,6 +276,26 @@ export class LineEditor {
    */
   get isAtPrompt(): boolean {
     return this.atPrompt && this.enterTimer === undefined && !this.disposed && this.isShellInForeground();
+  }
+
+  /**
+   * The shell has taken an Enter at its prompt and not yet said what it did:
+   * started a command, drawn a new prompt, or (by staying quiet) neither.
+   */
+  get isDeciding(): boolean {
+    return this.atPrompt && this.enterTimer !== undefined && !this.disposed;
+  }
+
+  /**
+   * Resolves once the shell has said what an Enter did (at once if there is
+   * none pending), so a key that needs to know can wait for it rather than
+   * for the clock.
+   */
+  decided(): Promise<void> {
+    if (!this.isDeciding) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.decidedWaiters.push(resolve));
   }
 
   private get canSet(): boolean {
@@ -275,6 +318,14 @@ export class LineEditor {
         break;
       case 'line':
         this.handleLine(event.request, event.line);
+        break;
+      case 'line-query':
+        // A late answer is of no use to anyone, and the line was left alone.
+        if (this.pendingQuery && event.request === this.pendingQuery.request) {
+          clearTimeout(this.pendingQuery.timer);
+          this.pendingQuery.resolve({ line: event.line });
+          this.pendingQuery = undefined;
+        }
         break;
       case 'line-set':
         if (this.pendingSet && event.request === this.pendingSet.request) {
@@ -329,7 +380,7 @@ export class LineEditor {
       // meanwhile: whatever the shell starts, nothing it runs needs them.
       clearTimeout(this.enterTimer);
       this.enterTimer = setTimeout(() => {
-        this.enterTimer = undefined;
+        this.clearEnter();
       }, this.enterQuietMs);
       this.enterTimer.unref();
     }
@@ -365,6 +416,40 @@ export class LineEditor {
         this.write(LINE_KEYS.capture);
       });
       // The hooks remove it once read; this covers a shell that never did.
+      removeFile(file);
+      if (!answer) {
+        return { status: 'failed', reason: 'no-answer' };
+      }
+      if (!answer.line) {
+        return { status: 'failed', reason: 'too-long' };
+      }
+      const { buffer, cursor } = answer.line;
+      return { status: 'captured', line: { buffer, cursor: codePointsToIndex(buffer, cursor) } };
+    });
+  }
+
+  /**
+   * Ask for the shell's input line and cursor, leaving both as they are (to
+   * learn whether the line is empty, say). Gives up quickly: see
+   * DEFAULT_QUERY_TIMEOUT_MS.
+   */
+  query(options: { readonly timeoutMs?: number } = {}): Promise<CaptureResult> {
+    return this.enqueue(async (): Promise<CaptureResult> => {
+      if (!this.canQuery || !this.isAtPrompt) {
+        return { status: 'unsupported' };
+      }
+      const file = this.lineFile!;
+      const request = this.nextRequest++;
+      writeRequest(file, `query ${request}\n`);
+      const answer = await new Promise<{ readonly line: ShellInputLine | undefined } | undefined>((resolve) => {
+        const timer = setTimeout(() => {
+          this.pendingQuery = undefined;
+          resolve(undefined);
+        }, options.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS);
+        this.pendingQuery = { request, resolve, timer };
+        this.write(LINE_KEYS.query);
+      });
+      // The hooks remove it once read; this withdraws it from a shell that has not.
       removeFile(file);
       if (!answer) {
         return { status: 'failed', reason: 'no-answer' };
@@ -443,6 +528,11 @@ export class LineEditor {
       this.pendingSet.resolve();
       this.pendingSet = undefined;
     }
+    if (this.pendingQuery) {
+      clearTimeout(this.pendingQuery.timer);
+      this.pendingQuery.resolve(undefined);
+      this.pendingQuery = undefined;
+    }
     if (this.lineDir) {
       liveDirs.delete(this.lineDir);
       rmSync(this.lineDir, { recursive: true, force: true });
@@ -483,6 +573,11 @@ export class LineEditor {
   private clearEnter(): void {
     clearTimeout(this.enterTimer);
     this.enterTimer = undefined;
+    const waiters = this.decidedWaiters;
+    this.decidedWaiters = [];
+    for (const resolve of waiters) {
+      resolve();
+    }
   }
 
   private abandon(request: number): void {

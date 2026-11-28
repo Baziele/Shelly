@@ -78,6 +78,26 @@ __shelly_line_capture() {
   __shelly_emit "line;$request;$__shelly_encoded;$cursor"
 }
 
+# Report the line and the cursor (in characters), leaving both as they are,
+# to the request Shelly left in the line file (`query <n>`). With none there,
+# Shelly has stopped waiting, so nothing is reported.
+__shelly_line_query() {
+  'builtin' 'emulate' -L zsh
+  local file=$__shelly_line_file request=''
+  [[ -n $file && -f $file && ! -L $file ]] || return 0
+  IFS= 'builtin' 'read' -r request < $file
+  # Any other request belongs to another key.
+  [[ $request == 'query '<-> ]] || return 0
+  # Shelly withdraws the request once answered.
+  request=${request#query }
+  __shelly_encode "$BUFFER" ${#BUFFER}
+  if (( ${#__shelly_encoded} > 60000 )); then
+    __shelly_emit "query;$request;;-1"
+  else
+    __shelly_emit "query;$request;$__shelly_encoded;$CURSOR"
+  fi
+}
+
 # Replace the line with the file Shelly wrote: `set <request> <cursor>` (the
 # cursor in characters) on the first line, the text after it. The file is
 # removed once read.
@@ -130,13 +150,15 @@ __shelly_bind_line_keys() {
   'builtin' 'zle' -N __shelly_line_capture || return 0
   'builtin' 'zle' -N __shelly_line_set || return 0
   'builtin' 'zle' -N __shelly_line_notice || return 0
+  'builtin' 'zle' -N __shelly_line_query || return 0
   local keymap
   for keymap in main emacs viins vicmd; do
     'builtin' 'bindkey' -M $keymap '^[[24;16~' __shelly_line_capture 2>/dev/null || return 0
     'builtin' 'bindkey' -M $keymap '^[[23;16~' __shelly_line_set 2>/dev/null || return 0
     'builtin' 'bindkey' -M $keymap '^[[19;16~' __shelly_line_notice 2>/dev/null || return 0
+    'builtin' 'bindkey' -M $keymap '^[[20;16~' __shelly_line_query 2>/dev/null || return 0
   done
-  __shelly_emit 'line-editor;capture,set,notice'
+  __shelly_emit 'line-editor;capture,set,notice,query'
 }
 
 # Runs once, at the first prompt, after every startup file: put Shelly's

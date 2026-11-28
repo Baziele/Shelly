@@ -201,6 +201,30 @@ if [[ -n "$__shelly_nonce" ]]; then
       __shelly_emit "line;$request;$__shelly_encoded;$point"
     }
 
+    # Report the line and the cursor (in characters), leaving both as they
+    # are, to the request Shelly left in the line file (`query <n>`). With
+    # none there, Shelly has stopped waiting, so nothing is reported.
+    __shelly_line_query() {
+      local line=$READLINE_LINE point=$READLINE_POINT file=${__shelly_line_file-} request=''
+      [[ -n "$file" && -f "$file" && ! -L "$file" ]] || return 0
+      IFS= builtin read -r request < "$file" || builtin true
+      # Any other request belongs to another key.
+      [[ "$request" == 'query '* ]] && __shelly_is_number "${request#query }" || return 0
+      # Shelly withdraws the request once answered: no rm, which would
+      # cost a process on a keystroke Shelly is holding.
+      request=${request#query }
+      __shelly_encode "$line" "${#line}"
+      if (( ${#__shelly_encoded} > 60000 )); then
+        __shelly_emit "query;$request;;-1"
+        return 0
+      fi
+      if [[ "$__shelly_point_in_bytes" == 1 ]]; then
+        __shelly_byte_prefix "$line" "$point"
+        point=${#__shelly_prefix}
+      fi
+      __shelly_emit "query;$request;$__shelly_encoded;$point"
+    }
+
     # Replace the line with the file Shelly wrote: `set <request> <cursor>`
     # (the cursor in characters) on the first line, the text after it. The
     # file is removed once read.
@@ -255,11 +279,12 @@ if [[ -n "$__shelly_nonce" ]]; then
       __shelly_emit "line-set;$request"
     }
 
-    __shelly_line_features='capture,set,notice'
+    __shelly_line_features='capture,set,notice,query'
     for __shelly_keymap in emacs vi-insert vi-command; do
       builtin bind -m "$__shelly_keymap" -x '"\e[24;16~": __shelly_line_capture' 2>/dev/null \
         && builtin bind -m "$__shelly_keymap" -x '"\e[23;16~": __shelly_line_set' 2>/dev/null \
         && builtin bind -m "$__shelly_keymap" -x '"\e[19;16~": __shelly_line_notice' 2>/dev/null \
+        && builtin bind -m "$__shelly_keymap" -x '"\e[20;16~": __shelly_line_query' 2>/dev/null \
         || __shelly_line_features=''
     done
   else

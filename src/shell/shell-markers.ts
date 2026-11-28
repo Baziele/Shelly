@@ -9,14 +9,17 @@
  *   cwd;<path>      the shell's working directory; sent at every prompt
  *   line-editor;<features>  what the hooks can do with the input line, as a
  *                   comma-separated list: capture, set (read and replace it),
- *                   notice (show a message below it), and for bash 3.2,
- *                   which can do none of those, clear and jump (move the
- *                   cursor to the line's end and back)
+ *                   notice (show a message below it), query (read it,
+ *                   leaving it alone), and for bash 3.2, which can do none
+ *                   of those, clear and jump (move the cursor to the line's
+ *                   end and back)
  *   line;<request>;<buffer>;<cursor>  the input line and its cursor (in
  *                   characters), which the shell has just cleared; a cursor
  *                   of -1 means the line could not be reported and was left
  *                   alone
  *   line-set;<request>  the shell has replaced its input line
+ *   query;<request>;<buffer>;<cursor>  the input line and its cursor, as for
+ *                   `line`, but left as they are
  *
  * <request> is the number Shelly gave the request in the line file, or empty
  * when the shell found none there (Shelly had given up on it).
@@ -42,6 +45,8 @@ export type ShellEvent =
    * is absent when the shell could not report it (it was too long, say).
    */
   | { readonly type: 'line'; readonly request: number | undefined; readonly line: ShellInputLine | undefined }
+  /** As `line`, for a query: the shell left its line as it was. */
+  | { readonly type: 'line-query'; readonly request: number | undefined; readonly line: ShellInputLine | undefined }
   | { readonly type: 'line-set'; readonly request: number | undefined };
 
 /** The shell's input line as the hooks report it. */
@@ -171,11 +176,12 @@ export class ShellMarkerParser {
     }
 
     const raw = rest.join(';');
-    if (kind === 'line') {
+    if (kind === 'line' || kind === 'query') {
+      const type = kind === 'line' ? 'line' : 'line-query';
       const split = raw.indexOf(';');
       return split === -1
-        ? { type: 'line', request: undefined, line: undefined }
-        : { type: 'line', request: parseRequest(raw.slice(0, split)), line: parseLine(raw.slice(split + 1)) };
+        ? { type, request: undefined, line: undefined }
+        : { type, request: parseRequest(raw.slice(0, split)), line: parseLine(raw.slice(split + 1)) };
     }
     const payload = decodePayload(raw);
     switch (kind) {

@@ -51,14 +51,19 @@ interface StayingEnter {
   readonly shells: readonly string[];
   /** Appended to the shell's startup file. */
   readonly startup?: Partial<Record<string, string>>;
-  /** Typed before the Enter, each with what the screen shows once the shell has it (absent: a pause). */
-  readonly before: readonly { readonly keys: string; readonly shown?: (rows: string[]) => boolean }[];
+  /** Typed before the Enter, each with what the screen shows once the shell has it. */
+  readonly before: readonly { readonly keys: string; readonly shown: (rows: string[]) => boolean }[];
+  /** The prompt's row once the shell has taken the Enter (and again once Escape puts the line back). */
+  readonly lineAfter: (row: string) => boolean;
   /** The Enter, when not `\r`. */
   readonly enter?: Partial<Record<string, string>>;
   /** Typed after the hotkey round trip; and what shows the line still works. */
   readonly finish: string;
   readonly finished: (rows: string[]) => boolean;
 }
+
+/** A history search for `found` under way: zsh, bash, fish. */
+const SEARCHING = /^(?:bck-i-search: found|\(reverse-i-search\)`found'|search: found)/;
 
 /**
  * Enters that leave the shell at the same prompt, with no command run and no
@@ -69,6 +74,7 @@ const STAYING_ENTERS: readonly StayingEnter[] = [
     name: 'an open quote, which asks for a continuation line',
     shells: ['zsh', 'bash', 'fish'],
     before: [{ keys: "echo 'a", shown: (rows) => promptRow(rows) === "$ echo 'a" }],
+    lineAfter: (row) => row === "$ echo 'a",
     finish: "b'\r",
     finished: (rows) => rows.includes('a') && rows.includes('b'),
   },
@@ -80,10 +86,11 @@ const STAYING_ENTERS: readonly StayingEnter[] = [
     },
     before: [
       { keys: 'echo ./menu-', shown: (rows) => promptRow(rows) === '$ echo ./menu-' },
-      { keys: '\t' },
+      { keys: '\t', shown: (rows) => rows.some((row) => row.includes('menu-two')) },
       { keys: '\t', shown: (rows) => /^\$ echo \.\/menu-(one|two)/.test(promptRow(rows)) },
     ],
     finish: '\r',
+    lineAfter: (row) => /^\$ echo \.\/menu-(one|two)/.test(row),
     finished: (rows) => rows.some((row) => /^\.\/menu-(one|two)$/.test(row)),
   },
   {
@@ -91,7 +98,11 @@ const STAYING_ENTERS: readonly StayingEnter[] = [
     shells: ['zsh', 'bash', 'fish'],
     // zsh runs the line on Enter unless the user binds it to accept the search.
     startup: { zsh: "bindkey -M isearch '^M' accept-search\n" },
-    before: [{ keys: 'echo found\r', shown: (rows) => rows.includes('found') }, { keys: '\u0012found' }],
+    before: [
+      { keys: 'echo found\r', shown: (rows) => rows.includes('found') && promptRow(rows) === '$' },
+      { keys: '\u0012found', shown: (rows) => rows.some((row) => SEARCHING.test(row)) },
+    ],
+    lineAfter: (row) => row === '$ echo found',
     // readline ends a search on Ctrl+J without running the line; then to
     // the end of it, as bash 3.2 opens the input where the cursor is.
     enter: { bash: '\n\u0005' },
@@ -370,24 +381,19 @@ for (const shell of shells) {
         const session = await start(enter.startup?.[kind]);
         for (const step of enter.before) {
           await session.type(step.keys);
-          if (step.shown) {
-            await session.waitFor(step.shown, JSON.stringify(step.keys));
-          } else {
-            await sleep(400);
-          }
+          await session.waitFor(step.shown, JSON.stringify(step.keys));
         }
-        await session.type(enter.enter?.[kind] ?? '\r');
-        // The shell takes the Enter, and runs nothing.
-        await sleep(600);
-        const line = promptRow(await session.screen());
-
-        await session.type(HOTKEY);
+        // The shell takes the Enter and runs nothing. Ctrl+] with it, in the
+        // same read (as when typed fast): Shelly holds it until the shell has
+        // shown what the Enter did, however slowly its output comes.
+        await session.driver.type(`${enter.enter?.[kind] ?? '\r'}${HOTKEY}`, { perCharDelayMs: 0 });
         if (canCapture) {
-          await session.waitFor(inputOpen, 'the input');
+          const opened = await session.waitFor(inputOpen, 'the input');
+          assert.ok(!opened.some((row) => SEARCHING.test(row)), 'the search was over first');
           await session.type(ESCAPE);
-          await session.waitFor((rows) => !inputOpen(rows) && promptRow(rows) === line, 'the line put back');
+          await session.waitFor((rows) => !inputOpen(rows) && enter.lineAfter(promptRow(rows)), 'the line put back');
         } else {
-          await session.waitFor((rows) => rows.includes(NEEDS_BASH_4) && promptRow(rows) === line, 'the notice, and the line');
+          await session.waitFor((rows) => rows.includes(NEEDS_BASH_4) && enter.lineAfter(promptRow(rows)), 'the notice, and the line');
         }
         await session.type(enter.finish);
         await session.waitFor(enter.finished, 'the line to run as it was');
@@ -400,6 +406,15 @@ for (const shell of shells) {
       await sleep(300);
       await session.type(`${HOTKEY}x\r`);
       await session.waitFor((rows) => rows.includes('^]x'), 'cat to receive the key');
+      await session.type('\u0004');
+      await session.waitFor((rows) => promptRow(rows) === '$', 'the prompt after cat');
+    });
+
+    it('passes through to a program started by the Enter just before it', async () => {
+      const session = await start();
+      // Held until the shell says it ran a command, then the command's.
+      await session.type(`cat\r${HOTKEY}y\r`);
+      await session.driver.waitFor(() => session.raw().includes('\u001dy'), 'cat to receive the key and write it back');
       await session.type('\u0004');
       await session.waitFor((rows) => promptRow(rows) === '$', 'the prompt after cat');
     });
