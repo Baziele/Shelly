@@ -1,4 +1,5 @@
 /* The interactive `shelly`: the user's shell in a pty, with Shelly around it. Loaded by index.ts. */
+import { logClientError } from './client/client-log.js';
 import { defaultShell } from './shell/shell-session.js';
 import { Shelly } from './shelly.js';
 import { HostTerminal } from './terminal/host-terminal.js';
@@ -16,8 +17,29 @@ const crash = (error: unknown): never => {
   process.stderr.write(`\r\nshelly crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\r\n`);
   process.exit(1);
 };
-process.on('uncaughtException', crash);
-process.on('unhandledRejection', crash);
+
+/*
+ * The shell is the user's work: an error in Shelly's own flows (a daemon
+ * call nobody caught, say) is logged and Shelly carries on, the shell
+ * untouched; a terminal Shelly was drawing on comes back by itself (the
+ * busy watchdog). Only errors coming in a storm, which means Shelly itself
+ * is broken, end it: the terminal restored first.
+ */
+const STORM = { errors: 5, withinMs: 10_000 };
+const recent: number[] = [];
+const survive = (what: string) => (error: unknown): void => {
+  logClientError(what, error);
+  const now = Date.now();
+  recent.push(now);
+  while (recent.length > 0 && now - recent[0]! > STORM.withinMs) {
+    recent.shift();
+  }
+  if (recent.length >= STORM.errors) {
+    crash(error);
+  }
+};
+process.on('unhandledRejection', survive('unhandled rejection'));
+process.on('uncaughtException', survive('uncaught exception'));
 
 const shelly = new Shelly({
   host,
