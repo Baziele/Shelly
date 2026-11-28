@@ -1160,8 +1160,11 @@ export class Shelly {
     this.toTerminal(this.takeHeldShellOutput());
   }
 
-  /** The shell's output, on the terminal at last: any query in it now waits for an answer. */
-  /** Shell output for the terminal, whenever and however it gets there. */
+  /**
+   * The shell's output, on the terminal at last (whenever and however it gets
+   * there): any query in it now waits for an answer, and whether it ended a
+   * line is noted for the next note above the prompt.
+   */
   private toTerminal(output: string): void {
     if (output) {
       this.replies.asked(output);
