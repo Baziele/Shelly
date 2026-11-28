@@ -62,6 +62,29 @@ describe('buildAskContext with one long line', () => {
 });
 
 describe('formatAskContext', () => {
+  it('leaves out clear and reset, and gives a directory only when it changes', async () => {
+    const log = createLog();
+    run(log, 'clear', '\u001b[H\u001b[2J');
+    run(log, 'ls', 'a\r\n');
+    run(log, 'git status', 'clean\r\n');
+    log.handle({ type: 'cwd', path: '/repo/sub' });
+    run(log, 'pwd', '/repo/sub\r\n');
+    run(log, 'tput reset', '');
+    run(log, 'clear', 'no terminal\r\n', 1);
+    const text = formatAskContext(await buildAskContext(log, ENVIRONMENT));
+    assert.deepEqual(text.split('\n').filter((line) => line.startsWith('$') || line.startsWith('  [')), [
+      '$ ls',
+      '  [exit 0 · 1.2s · /repo]',
+      '$ git status',
+      '  [exit 0 · 1.2s]',
+      '$ pwd',
+      '  [exit 0 · 1.2s · /repo/sub]',
+      // A clear that failed may matter.
+      '$ clear',
+      '  [exit 1 · 1.2s]',
+    ]);
+  });
+
   it('renders the environment and each command', async () => {
     const log = createLog();
     run(log, 'ls', 'a\r\nb\r\n');

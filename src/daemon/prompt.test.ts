@@ -43,7 +43,8 @@ describe('formatPromptForAgent', () => {
         '  expected 1, got 2',
         '',
         '$ vim a.ts',
-        '  [exit status unknown · 40ms · /work/app]',
+        // The same directory as the command before: said once.
+        '  [exit status unknown · 40ms]',
         '  [full-screen program; its screen is not recorded]',
         '</shelly_context>',
         '',

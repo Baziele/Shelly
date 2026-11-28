@@ -45,7 +45,8 @@ export const buildAskContext = async (
   environment: EnvironmentInfo,
   { maxCommands = 10, maxOutputChars = 4000, maxTotalChars = 20_000 }: AskContextOptions = {},
 ): Promise<AskContext> => {
-  const records = await log.recent(maxCommands);
+  // A few more than asked, so the housekeeping left out does not shorten the list.
+  const records = (await log.recent(maxCommands + HOUSEKEEPING_SLACK)).filter((record) => !isHousekeeping(record)).slice(-maxCommands);
   const commands: AskCommand[] = [];
   let budget = maxTotalChars;
 
@@ -110,6 +111,15 @@ export const formatAskContext = (context: AskContext): string => {
   lines.push(...formatCommandLines(context.commands));
   return lines.join('\n').trimEnd();
 };
+
+const HOUSEKEEPING_SLACK = 5;
+
+/** Commands that only tidy the terminal (`clear`, `reset`): they tell an agent nothing. */
+const HOUSEKEEPING = /^(?:clear(?:\s+-x)?|reset|cls|tput\s+(?:clear|reset))$/;
+
+/** A housekeeping command that worked; a failed one may be worth a look. */
+export const isHousekeeping = (record: Pick<CommandRecord, 'command' | 'exitCode'>): boolean =>
+  HOUSEKEEPING.test(record.command.trim()) && (record.exitCode === 0 || record.exitCode === undefined);
 
 const describe = (record: CommandRecord): ContextCommand => ({
   id: record.id,
