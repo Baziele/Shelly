@@ -409,6 +409,20 @@ describe('Ctrl+] in bash 3.2, which cannot hand its line over', () => {
     await t.stop();
   });
 
+  it('drops an Enter typed before the notice shows, and passes one typed after it to the shell', async () => {
+    const t = bash32([{ row: 5, col: 10 }, { row: 5, col: 12 }]);
+    t.type(`${HOTKEY}a\r`);
+    for (let i = 0; i < 50 && !t.events.some((event) => event.includes(NOTICE)); i++) {
+      await sleep(2);
+    }
+    t.type('\r');
+    await sleep(300);
+    const sent = t.toShell.join('');
+    assert.equal(sent.split('\r').length - 1, 1, `one Enter, the one typed after the notice: ${JSON.stringify(t.toShell)}`);
+    assert.ok(sent.indexOf('a') < sent.indexOf('\r'), 'the text typed before it, as text, first');
+    await t.stop();
+  });
+
   it('erases the notice before shell output that comes while it shows', async () => {
     const t = bash32([{ row: 5, col: 10 }, { row: 5, col: 12 }]);
     t.type(HOTKEY);

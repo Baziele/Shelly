@@ -193,6 +193,8 @@ export class Shelly {
   private open: OpenInput | undefined;
   /** A notice Shelly drew below the shell's line (bash 3.2), erased before the next key. */
   private noticeBelow: BelowLineNotice | undefined;
+  /** How much of `queuedInput` was typed before bash 3.2's notice was on screen: after it, keys are for the shell. */
+  private typedBeforeNotice: number | undefined;
   /** Where keys go in `busy` mode; returns whether they were used. */
   private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
@@ -676,6 +678,7 @@ export class Shelly {
     const editor = this.lineEditor!;
     this.mode = 'capturing';
     this.queuedInput = remainder;
+    this.typedBeforeNotice = undefined;
     // The UI loads only once the line is captured (openOverlay), never
     // before or meanwhile: the capture is of the shell as it is when the key
     // is pressed, and loading keeps the event loop busy, so the capture's
@@ -707,8 +710,15 @@ export class Shelly {
     }
     const typed = this.queuedInput;
     this.queuedInput = '';
-    // Typed for Shelly's input, which never opened: text on the line at most, never an Enter.
-    this.replayTyped(typed);
+    // Typed for Shelly's input, which never opened: text on the line at most,
+    // never an Enter. Once bash 3.2's notice said it would not open, keys are
+    // the shell's again, as typed.
+    const cut = this.typedBeforeNotice ?? typed.length;
+    this.typedBeforeNotice = undefined;
+    this.replayTyped(typed.slice(0, cut));
+    if (typed.length > cut) {
+      this.handleInput(typed.slice(cut));
+    }
   }
 
   /**
@@ -781,6 +791,7 @@ export class Shelly {
     }
     const drawn = drawBelowLine(LINE_NOT_READABLE_HERE, found.end, this.host.size);
     this.host.write(drawn.output);
+    this.typedBeforeNotice = this.queuedInput.length;
     if (found.moved) {
       await editor.jumpBack();
     }
