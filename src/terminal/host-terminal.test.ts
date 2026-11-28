@@ -281,7 +281,7 @@ describe('HostTerminal width queries', () => {
     await sleep(1);
     assert.ok(written().endsWith('\u001b[9999C\u001b[?6n\u001b[6n\r'), JSON.stringify(written()));
     await answer('\u001b[?7;60R\u001b[7;60R');
-    assert.equal(await width, 60);
+    assert.deepEqual(await width, { row: 7, cols: 60 });
     host.stop();
     assert.deepEqual(typed, []);
   });
@@ -296,7 +296,57 @@ describe('HostTerminal width queries', () => {
     assert.deepEqual(await position, { row: 3, col: 1 });
     await sleep(1);
     await answer('\u001b[?3;80R\u001b[3;80R');
-    assert.equal(await width, 80);
+    assert.deepEqual(await width, { row: 3, cols: 80 });
+    host.stop();
+  });
+});
+
+describe('HostTerminal input while a query waits', () => {
+  it('passes keystrokes on at once, Ctrl-C included, instead of holding them for the reply', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const width = host.queryWidth();
+    await answer('ab\u0003');
+    assert.deepEqual(typed, ['ab\u0003'], 'typing waited for the reply');
+    await answer('c\u001b[?4;80R\u001b[4;80R');
+    assert.deepEqual(await width, { row: 4, cols: 80 });
+    host.stop();
+    assert.deepEqual(typed.join(''), 'ab\u0003c');
+  });
+
+  it('holds only the start of a reply cut off at the end of a read, and takes it whole', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    const position = host.queryCursorPosition();
+    await answer('x\u001b[?12;');
+    assert.deepEqual(typed, ['x']);
+    await answer('80R\u001b[12;80Ry');
+    assert.deepEqual(await position, { row: 12, col: 80 });
+    host.stop();
+    assert.deepEqual(typed.join(''), 'xy');
+  });
+});
+
+describe('HostTerminal queries one after another', () => {
+  it('fails a query queued behind one the terminal never answered at once, instead of stacking a second timeout', async () => {
+    const { host } = fakeTerminal();
+    const width = host.queryWidth(40);
+    const started = Date.now();
+    await assert.rejects(width);
+    const queued = host.queryWidth(40);
+    const position = host.queryCursorPosition(5_000);
+    await assert.rejects(queued);
+    await assert.rejects(position);
+    assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+    host.stop();
+  });
+
+  it('counts the wait for the query ahead towards the timeout of the one behind it', async () => {
+    const { host, answer } = fakeTerminal();
+    const first = host.queryWidth(500);
+    const second = assert.rejects(host.queryCursorPosition(60), 'waited for the first, then its own full time out');
+    await sleep(80);
+    await answer('\u001b[?2;80R\u001b[2;80R');
+    assert.deepEqual(await first, { row: 2, cols: 80 });
+    await second;
     host.stop();
   });
 });
