@@ -306,6 +306,24 @@ describe('the daemon failing under the flows', () => {
     return rig.daemon.prompts[1]!;
   };
 
+  it('a daemon that does not echo request ids: the request counts as unsent, even with a turn of its text just now', async () => {
+    const rig = await startRig();
+    try {
+      const second = await firstTurn(rig);
+      const before = rig.written().length;
+      rig.daemon.override.attachThread = (id: never) => Promise.resolve({
+        thread: summary(id),
+        history: [event({ seq: 4, type: 'turn.started', turnId: 'u2', text: 'second', at: Date.now() })],
+      });
+      second.feed.fail(tagged('DaemonDisconnected'));
+      await until(() => rig.mode() === 'returning', 'the hand-back', 4000);
+      assert.equal(rig.daemon.watches.length, 0, 'no guess at which turn is this one');
+      assert.match(plain(rig.written().slice(before)), /may not have your request/);
+    } finally {
+      await rig.stop();
+    }
+  });
+
   it('the same prompt twice, the second lost before the daemon took it: never the first turn shown as its answer', async () => {
     const rig = await startRig();
     try {
@@ -373,13 +391,13 @@ describe('the daemon failing under the flows', () => {
       const second = await firstTurn(rig);
       rig.daemon.override.attachThread = (id: never) => Promise.resolve({
         thread: summary(id),
-        history: [event({ seq: 4, type: 'turn.started', turnId: 'u2', text: 'second', at: Date.now() })],
+        history: [event({ seq: 4, type: 'turn.started', turnId: 'u2', text: 'second', at: Date.now(), clientRequestId: second.clientRequestId })],
       });
       second.feed.fail(tagged('DaemonDisconnected'));
       await until(() => rig.daemon.watches.length === 1, 'the recovery watch');
       assert.equal(rig.daemon.watches[0]!.afterSeq, 3, 'from just before its turn.started');
       const watch = rig.daemon.watches[0]!.feed;
-      watch.push(event({ seq: 4, type: 'turn.started', turnId: 'u2', text: 'second', at: Date.now() }));
+      watch.push(event({ seq: 4, type: 'turn.started', turnId: 'u2', text: 'second', at: Date.now(), clientRequestId: second.clientRequestId }));
       watch.push(event({ seq: 5, type: 'message.chunk', turnId: 'u2', messageId: 'm2', kind: 'text', text: 'NEW ANSWER' }));
       watch.push(event({ seq: 6, type: 'turn.ended', turnId: 'u2', stopReason: 'end_turn', error: null, durationMs: 1 }));
       await until(() => rig.mode() === 'returning', 'the hand-back', 4000);

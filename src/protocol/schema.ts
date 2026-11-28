@@ -178,7 +178,9 @@ export const TurnStarted = Schema.Struct({
    * the client sent it: a client that lost its stream before this event
    * finds its own turn by it, never another one with the same text. Absent
    * when the prompt had none. Added without a protocol version bump: both
-   * sides take it as optional, and ignore it if they do not know it.
+   * sides take it as optional, and ignore it if they do not know it. A
+   * client recovering against a daemon that does not echo it cannot find
+   * its turn, and says the request may not have arrived.
    */
   clientRequestId: Schema.optionalKey(Schema.String),
 });

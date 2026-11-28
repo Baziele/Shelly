@@ -117,12 +117,6 @@ interface NextThread {
 }
 
 const TITLE_IN_HINT = 32;
-/**
- * A daemon that does not echo `clientRequestId` (one from before it): how
- * far its clock may be behind this one when matching a turn to the request
- * that started it by its text.
- */
-const CLOCK_SLACK_MS = 2000;
 /** How stale the agent list may get before opening :: refreshes it (in the background). */
 const AGENTS_REFRESH_MS = 30_000;
 const LIST_LIMIT = 50;
@@ -360,7 +354,6 @@ export class AgentSession {
     const live: LiveTurn = { ...newTracker(text, 0), threadId, agentId: this.thread?.agentId ?? 'agent', view: output.backgrounded ? undefined : view };
     output.target = { client, threadId };
     output.live = live;
-    const sentAt = Date.now();
     // Names this request alone: the turn it starts says so, and a lost stream finds it by that (see recover).
     const requestId = randomUUID();
     const onStarted = (): void => {
@@ -378,7 +371,7 @@ export class AgentSession {
     try {
       const outcome = await this.follow(client.prompt(threadId, text, context, requestId), live, live, view, onStarted);
       if (outcome === 'lost') {
-        await this.recover(live, live, view, { at: sentAt, requestId, onStarted });
+        await this.recover(live, live, view, { requestId, onStarted });
       }
     } catch (error) {
       if (live.view === view && live.status !== 'ended') {
@@ -603,7 +596,7 @@ export class AgentSession {
     tracker: Tracker,
     live: LiveTurn,
     view: AgentView,
-    sent?: { readonly at: number; readonly requestId: string; readonly onStarted: () => void },
+    sent?: { readonly requestId: string; readonly onStarted: () => void },
   ): Promise<void> {
     const shown = (): boolean => live.view === view;
     if (shown()) {
@@ -618,12 +611,9 @@ export class AgentSession {
       this.attachedOn = hello.pid;
       if (lookFor) {
         const newest = history.findLast((event) => event.type === 'turn.started');
-        // By its id, whatever the text and the clocks; a daemon that does not echo ids: the same
-        // text, started no earlier than it was sent (an identical prompt just before could pass).
-        const ours = newest && (newest.clientRequestId !== undefined
-          ? newest.clientRequestId === sent.requestId
-          : newest.text === live.text && newest.at >= sent.at - CLOCK_SLACK_MS);
-        if (!newest || !ours) {
+        // By its id alone. A daemon that does not echo ids cannot say which turn is this one (the
+        // same prompt sent just before looks the same, and the clocks may differ): never guess.
+        if (newest?.clientRequestId === undefined || newest.clientRequestId !== sent.requestId) {
           unsent = true;
         } else {
           await this.follow(client.watch(live.threadId, newest.seq - 1), tracker, live, view, sent.onStarted);
