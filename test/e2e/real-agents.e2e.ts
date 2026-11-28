@@ -97,7 +97,7 @@ describe('Shelly with the real agents', { skip: !enabled && 'set SHELLY_REAL_AGE
       await driver.type('::/agent\r');
       await driver.waitForText('Pick the agent', { timeoutMs: 10_000 });
       await driver.type('opencode\r');
-      await driver.waitForText(/opencode · new thread/, { timeoutMs: 10_000 });
+      await driver.waitForText(/OpenCode · new thread/, { timeoutMs: 10_000 });
       await driver.type('Reply with exactly the word PONG and nothing else.\r');
       lines = await driver.waitFor(
         (rows) => {
