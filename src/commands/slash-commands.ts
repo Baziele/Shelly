@@ -34,6 +34,48 @@ export const parseSlashCommand = (
 };
 
 /**
+ * A line that looks like a command (`/word`, then a space or the end) but
+ * names none: `/renmae typo` → `renmae`, with the command it most likely
+ * meant. Undefined for a known command and for a line that only starts with
+ * a slash (`/etc/hosts is empty?`).
+ */
+export const unknownSlashCommand = (
+  line: string,
+  commands: readonly SlashCommand[] = BUILTIN_COMMANDS,
+): { readonly name: string; readonly suggestion: string | undefined } | undefined => {
+  const match = /^\/([A-Za-z][\w-]*)(?:\s|$)/.exec(line.trim());
+  if (!match || commands.some((command) => command.name === match[1])) {
+    return undefined;
+  }
+  const name = match[1]!;
+  const typed = name.toLowerCase();
+  let best: { name: string; distance: number } | undefined;
+  for (const command of commands) {
+    const distance = command.name.startsWith(typed) ? 0 : editDistance(typed, command.name);
+    if (distance <= Math.min(2, Math.floor(command.name.length / 2)) && (!best || distance < best.distance)) {
+      best = { name: command.name, distance };
+    }
+  }
+  return { name, suggestion: best?.name };
+};
+
+/** Edits (insert, delete, substitute, swap two neighbours) from `a` to `b`. */
+const editDistance = (a: string, b: string): number => {
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(rows[i - 1]![j]! + 1, rows[i]![j - 1]! + 1, rows[i - 1]![j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, rows[i - 2]![j - 2]! + 1);
+      }
+      rows[i]![j] = value;
+    }
+  }
+  return rows[a.length]![b.length]!;
+};
+
+/**
  * The command name being typed, or undefined when the input is not a bare
  * slash command: `/ru` → `ru`, `/` → ``, `/run tests` → undefined.
  */

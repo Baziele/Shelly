@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BUILTIN_COMMANDS, parseSlashCommand } from '../commands/slash-commands.js';
+import { BUILTIN_COMMANDS, parseSlashCommand, unknownSlashCommand } from '../commands/slash-commands.js';
 import { formatCommandLines, formatEnvironmentLines } from '../context/format-context.js';
 import type {
   AgentInfo,
@@ -163,6 +163,8 @@ export class AgentSession {
   private view: AgentView | undefined;
   /** Bumped when the input closes, so a slow slash command's answer is dropped. */
   private inputGeneration = 0;
+  /** A line naming no command, already questioned in this input: Enter again sends it as a message. */
+  private questioned: { readonly text: string; readonly generation: number } | undefined;
 
   constructor(private readonly host: FlowHost) {}
 
@@ -230,6 +232,16 @@ export class AgentSession {
       return;
     }
     const command = parseSlashCommand(text);
+    const unknown = command ? undefined : unknownSlashCommand(text);
+    if (unknown && !(this.questioned?.text === text && this.questioned.generation === this.inputGeneration)) {
+      // Most likely a typo for a command: ask before it goes to the agent as a message.
+      this.questioned = { text, generation: this.inputGeneration };
+      this.host.overlay.setError(
+        `Unknown command /${unknown.name}${unknown.suggestion ? ` · did you mean /${unknown.suggestion}?` : ''} · enter again to send it as a message`,
+      );
+      return;
+    }
+    this.questioned = undefined;
     if (command) {
       void this.runCommand(open, command.name, command.args).catch((error: unknown) => {
         if (this.host.overlay.isOpen) {

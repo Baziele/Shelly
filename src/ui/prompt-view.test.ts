@@ -54,6 +54,17 @@ describe('PromptView', { timeout: 20_000 }, () => {
     assert.deepEqual(await narrow.screenIs(narrowExpected), narrowExpected);
   });
 
+  it('shows an error about a command without the command list over it, and the list again once typing goes on', async () => {
+    const view = await open(80, '::', '/rename');
+    await view.screen((lines) => lines.some((line) => line.includes('Rename this thread')));
+    view.overlay.setError('Give it a name: /rename <title>');
+    const shown = await view.screen((lines) => lines.some((line) => line.includes('✗ Give it a name')) && !lines.some((line) => line.includes('Rename this thread')));
+    assert.ok(!shown.some((line) => line.includes('Rename this thread')), shown.join('\n'));
+    view.overlay.feed('\u007f');
+    const again = await view.screen((lines) => lines.some((line) => line.includes('Rename this thread')));
+    assert.ok(!again.some((line) => line.includes('✗')), again.join('\n'));
+  });
+
   it('keeps the request, spins and streams the reply while busy, then shows an error and lets you retry', async () => {
     const view = await open(80, '__', 'find files over 100MB');
     view.overlay.setBusy(true);

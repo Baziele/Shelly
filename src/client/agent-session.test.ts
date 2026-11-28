@@ -154,6 +154,18 @@ describe('AgentSession', () => {
     assert.match(t.text(), /✗ Fake can't start\. · \/agent to pick another/);
   });
 
+  it('asks about a mistyped command before sending it, and sends it on a second enter', async () => {
+    const t = setup();
+    t.session.submit(t.open, '/renmae typo');
+    await tick();
+    assert.deepEqual(t.calls, ['error Unknown command /renmae · did you mean /rename? · enter again to send it as a message']);
+    t.session.submit(t.open, '/renmae typo');
+    for (let i = 0; i < 50 && t.released.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(t.calls.includes('create t1'), 'sent as a message the second time');
+  });
+
   it('names the agent as the user knows it, not by its id', async () => {
     const t = setup();
     await t.session.connected(await t.client());

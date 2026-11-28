@@ -441,8 +441,9 @@ export class PromptView {
       if (query !== this.dismissedQuery) {
         this.dismissedQuery = undefined;
       }
-      // Slash commands belong to agent mode; fast mode takes the text as it is.
-      if (query === undefined || query === this.dismissedQuery || this.busy || this.mode === 'fast') {
+      // Slash commands belong to agent mode; fast mode takes the text as it is. While an error
+      // shows (about the command typed, say), the list would only cover it: it comes back with typing.
+      if (query === undefined || query === this.dismissedQuery || this.busy || this.mode === 'fast' || this.error !== undefined) {
         this.list.hide();
       } else {
         const items = this.commands.match(query).map((command): PickerItem => ({
