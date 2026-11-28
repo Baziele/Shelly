@@ -17,11 +17,13 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  *   notice   show the line file's one-line notice below the line, delete it,
  *            report `line-set;<request>`
  *   clear    bash 3.2: clear the line, so Shelly can type a new one
- *   mark, end, back
- *            bash 3.2: remember where the cursor is (readline's mark) and
- *            move it to the end of the line, then back to the mark. Nothing
- *            on the line changes; Shelly asks the terminal where the end is,
- *            to show its own notice below the line
+ *   mark, start, end, back
+ *            bash 3.2: remember where the cursor is (readline's mark), move
+ *            it to the start of the line and then its end, and later back to
+ *            the mark. Nothing on the line changes; Shelly asks the terminal
+ *            where the end is, to show its own notice below the line. Going
+ *            by the start means the shell always moves the cursor, so its
+ *            output says it has (unless the line is empty)
  *
  * Each request is numbered in the line file (`capture <n>`, `set <n>
  * <cursor>` and the text, or `notice <n>` and the text), and the hooks echo the number back, so an answer
@@ -55,6 +57,8 @@ export const LINE_KEYS = {
   notice: '\u001b[19;16~',
   /** Ctrl+Alt+Shift+Meta+F7. */
   mark: '\u001b[18;16~',
+  /** Ctrl+Alt+Shift+Meta+F6. */
+  start: '\u001b[17;16~',
   /** Ctrl+Alt+Shift+Meta+F5. */
   end: '\u001b[15;16~',
   /** Ctrl+Alt+Shift+Meta+F4. */
@@ -101,7 +105,11 @@ export interface LineEditorOptions {
    * command before it counts as still at its prompt.
    */
   readonly enterQuietMs?: number;
-  /** After a cursor move (bash 3.2), how long to wait for the shell's output to start; then as `settleMs`. */
+  /**
+   * After the keys that move the cursor to the line's end (bash 3.2), how
+   * long to wait for the shell's output to start; after that, it is done
+   * once the output has been quiet for `settleMs`.
+   */
   readonly moveStartMs?: number;
 }
 
@@ -115,10 +123,14 @@ const DEFAULT_ENTER_QUIET_MS = 300;
 /** However busy the output, a capture is done this long after the shell answered. */
 const MAX_SETTLE_MS = 300;
 /**
- * A cursor move (bash 3.2) has no answer: it is done once the shell's
- * output has been quiet for the settle time, waiting this long for it to start.
+ * A cursor move (bash 3.2) has no answer. The move to the line's end always
+ * makes the shell write something, unless the line is empty: it is done once
+ * that output has been quiet for the settle time, and given up on with no
+ * output after this long.
  */
-const DEFAULT_MOVE_START_MS = 50;
+const DEFAULT_MOVE_START_MS = 500;
+/** However busy the output, a cursor move is done this long after the keys went. */
+const MAX_MOVE_MS = 1000;
 
 const BRACKETED_PASTE_MODE = /\u001b\[\?2004([hl])/g;
 const PASTE_START = '\u001b[200~';
@@ -139,9 +151,17 @@ interface PendingCapture {
   settleTimer?: NodeJS.Timeout;
 }
 
+/**
+ * How a cursor move went: `moved` once the shell's output for it went quiet,
+ * `silent` if the shell wrote nothing (an empty line, or a shell too slow to
+ * tell), `unsupported` if the keys were not sent.
+ */
+export type MoveResult = 'moved' | 'silent' | 'unsupported';
+
 interface PendingMove {
-  readonly resolve: () => void;
+  readonly resolve: (sawOutput: boolean) => void;
   readonly deadline: number;
+  sawOutput: boolean;
   timer?: NodeJS.Timeout;
 }
 
@@ -162,6 +182,7 @@ export class LineEditor {
   private readonly enterQuietMs: number;
   private readonly moveStartMs: number;
   private pendingMove: PendingMove | undefined;
+  private outputs = 0;
   private features = new Set<string>();
   /** The shell has drawn a prompt (`cwd`) and not started a command (`exec`) since. */
   private atPrompt = false;
@@ -280,9 +301,16 @@ export class LineEditor {
     if (capture?.answer) {
       this.settle(capture);
     }
+    this.outputs++;
     if (this.pendingMove) {
+      this.pendingMove.sawOutput = true;
       this.waitForQuiet(this.pendingMove, this.settleMs);
     }
+  }
+
+  /** How many pieces of shell output have come so far: compare two to tell whether any came between. */
+  get outputCount(): number {
+    return this.outputs;
   }
 
   /**
@@ -380,17 +408,19 @@ export class LineEditor {
 
   /**
    * bash 3.2: remember where the shell's cursor is, then move it to the end
-   * of the line. Resolves once the move has reached the screen (the shell's
-   * output has gone quiet); false if the shell cannot move it, or is not at
-   * its prompt.
+   * of the line, by way of its start. Resolves once the move has reached the
+   * screen; see `MoveResult`.
    */
-  jumpToLineEnd(): Promise<boolean> {
-    return this.move(LINE_KEYS.mark + LINE_KEYS.end);
+  jumpToLineEnd(): Promise<MoveResult> {
+    return this.move(LINE_KEYS.mark + LINE_KEYS.start + LINE_KEYS.end, this.moveStartMs);
   }
 
-  /** bash 3.2: move the shell's cursor back to where `jumpToLineEnd` found it; see there. */
-  jumpBack(): Promise<boolean> {
-    return this.move(LINE_KEYS.back);
+  /**
+   * bash 3.2: move the shell's cursor back to where `jumpToLineEnd` found it.
+   * It may already be there (it was at the end), so a short wait for output.
+   */
+  jumpBack(): Promise<MoveResult> {
+    return this.move(LINE_KEYS.back, this.settleMs);
   }
 
   /** Stop waiting for the shell and remove the line file's directory. */
@@ -399,7 +429,7 @@ export class LineEditor {
     this.clearEnter();
     if (this.pendingMove) {
       clearTimeout(this.pendingMove.timer);
-      this.pendingMove.resolve();
+      this.pendingMove.resolve(false);
       this.pendingMove = undefined;
     }
     if (this.pendingCapture) {
@@ -504,20 +534,22 @@ export class LineEditor {
     }, delay);
   }
 
-  /** Send keys that only move the cursor, and wait for the shell's output to go quiet. */
-  private move(keys: string): Promise<boolean> {
-    return this.enqueue(async () => {
+  /**
+   * Send keys that only move the cursor; done once the shell's output for
+   * them has gone quiet, or with none after `startMs`.
+   */
+  private move(keys: string, startMs: number): Promise<MoveResult> {
+    return this.enqueue(async (): Promise<MoveResult> => {
       if (!this.canJump || !this.isAtPrompt) {
-        return false;
+        return 'unsupported';
       }
-      await new Promise<void>((resolve) => {
-        const move: PendingMove = { resolve, deadline: Date.now() + MAX_SETTLE_MS };
+      const sawOutput = await new Promise<boolean>((resolve) => {
+        const move: PendingMove = { resolve, deadline: Date.now() + MAX_MOVE_MS, sawOutput: false };
         this.pendingMove = move;
         this.write(keys);
-        // No output at all means the cursor was there already.
-        this.waitForQuiet(move, this.moveStartMs);
+        this.waitForQuiet(move, startMs);
       });
-      return true;
+      return sawOutput ? 'moved' : 'silent';
     });
   }
 
@@ -528,7 +560,7 @@ export class LineEditor {
       if (this.pendingMove === move) {
         this.pendingMove = undefined;
       }
-      move.resolve();
+      move.resolve(move.sawOutput);
     }, delay);
   }
 

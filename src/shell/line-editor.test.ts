@@ -20,7 +20,7 @@ describe('LineEditor', () => {
   /** Called with each write, as the shell would see it. */
   let shell: (data: string) => void;
 
-  const create = (features: string[], options: { timeoutMs?: number; enterQuietMs?: number } = {}): LineEditor => {
+  const create = (features: string[], options: { timeoutMs?: number; enterQuietMs?: number; moveStartMs?: number } = {}): LineEditor => {
     editor = new LineEditor({ write: (data) => { written.push(data); shell(data); }, runtimeDir, settleMs: 1, ...options });
     editor.handleEvent({ type: 'line-editor', features });
     editor.handleEvent({ type: 'cwd', path: '/' });
@@ -222,7 +222,7 @@ describe('LineEditor', () => {
       await assert.rejects(subject.replace('one\ntwo'), /single-line/);
     });
 
-    it('moves the cursor to the end of the line and back, done once the output goes quiet', async () => {
+    it('moves the cursor to the end of the line by its start, and back, done once the output goes quiet', async () => {
       const subject = create(['clear', 'jump']);
       assert.equal(subject.canJump, true);
       assert.equal(subject.canNotify, false);
@@ -231,22 +231,35 @@ describe('LineEditor', () => {
         done = true;
         return moved;
       });
-      assert.deepEqual(written, [LINE_KEYS.mark + LINE_KEYS.end], 'remembers the cursor first, at once');
+      assert.deepEqual(written, [LINE_KEYS.mark + LINE_KEYS.start + LINE_KEYS.end], 'remembers the cursor first, at once');
       // The shell moves the cursor a piece at a time; quiet for the settle time ends it.
+      const before = subject.outputCount;
       subject.observeOutput('\r');
       subject.observeOutput('\u001b[C\u001b[C');
+      assert.equal(subject.outputCount, before + 2);
       assert.equal(done, false);
-      assert.equal(await end, true);
-      assert.equal(await subject.jumpBack(), true, 'with no output at all, the cursor was there already');
-      assert.deepEqual(written, [LINE_KEYS.mark + LINE_KEYS.end, LINE_KEYS.back]);
+      assert.equal(await end, 'moved');
+      assert.equal(await subject.jumpBack(), 'silent', 'with no output at all, the cursor was there already');
+      assert.deepEqual(written, [LINE_KEYS.mark + LINE_KEYS.start + LINE_KEYS.end, LINE_KEYS.back]);
+    });
+
+    it('waits for a slow shell to start moving the cursor, and says when it never did', async () => {
+      const subject = create(['clear', 'jump'], { moveStartMs: 400 });
+      const started = Date.now();
+      setTimeout(() => subject.observeOutput('\r\u001b[C'), 150);
+      assert.equal(await subject.jumpToLineEnd(), 'moved');
+      assert.ok(Date.now() - started >= 150, 'not done before the shell wrote anything');
+      editor?.dispose();
+      const silent = create(['clear', 'jump'], { moveStartMs: 20 });
+      assert.equal(await silent.jumpToLineEnd(), 'silent');
     });
 
     it('moves nothing without the keys, or away from the prompt', async () => {
-      assert.equal(await create(['clear']).jumpToLineEnd(), false);
+      assert.equal(await create(['clear']).jumpToLineEnd(), 'unsupported');
       editor?.dispose();
       const subject = create(['clear', 'jump']);
       subject.handleEvent({ type: 'exec', command: 'cat' });
-      assert.equal(await subject.jumpToLineEnd(), false);
+      assert.equal(await subject.jumpToLineEnd(), 'unsupported');
       assert.deepEqual(written, []);
     });
   });
@@ -254,7 +267,7 @@ describe('LineEditor', () => {
   it('keeps its private keys from being typed at the prompt, and notes Enter', () => {
     const subject = create(['capture', 'set']);
     assert.equal(subject.filterInput(`a${LINE_KEYS.capture}b${LINE_KEYS.set}\u001b[24~`), 'ab\u001b[24~');
-    assert.equal(subject.filterInput(`a${LINE_KEYS.mark}${LINE_KEYS.end}${LINE_KEYS.back}b`), 'ab', 'bash 3.2 keys too');
+    assert.equal(subject.filterInput(`a${LINE_KEYS.mark}${LINE_KEYS.start}${LINE_KEYS.end}${LINE_KEYS.back}b`), 'ab', 'bash 3.2 keys too');
     assert.equal(subject.filterInput('\u001b[200~x\ny\u001b[201~'), '\u001b[200~x\ny\u001b[201~');
     assert.equal(subject.isAtPrompt, true, 'a pasted newline is not Enter');
     subject.filterInput('ls\r');

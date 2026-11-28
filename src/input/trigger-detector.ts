@@ -171,7 +171,8 @@ export class TriggerDetector {
     this.lineUnknown = true;
   }
 
-  private get isLineEmpty(): boolean {
+  /** The shell's input line is known to be empty: nothing typed on it, or all of it deleted. */
+  get isLineEmpty(): boolean {
     return !this.lineUnknown && this.typedLength === 0;
   }
 
