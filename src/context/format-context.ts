@@ -33,15 +33,21 @@ export const formatEnvironmentLines = (
   ...(cwd ? [`Working directory: ${cwd}`] : []),
 ];
 
-/** One block per command, each followed by a blank line. */
+/**
+ * One block per command, each followed by a blank line. A command's
+ * directory is given with the first command and then only when it changes.
+ */
 export const formatCommandLines = (commands: readonly FormatCommand[]): string[] => {
   const lines: string[] = [];
+  let lastCwd: string | null | undefined;
   for (const command of commands) {
     const status = command.exitCode === undefined || command.exitCode === null
       ? 'exit status unknown'
       : `exit ${command.exitCode}`;
+    const cwd = command.cwd && command.cwd !== lastCwd ? command.cwd : undefined;
+    lastCwd = command.cwd ?? lastCwd;
     lines.push(`$ ${command.command}`);
-    lines.push(`  [${[status, formatDuration(command.durationMs), command.cwd].filter(Boolean).join(' · ')}]`);
+    lines.push(`  [${[status, formatDuration(command.durationMs), cwd].filter(Boolean).join(' · ')}]`);
     if (command.omittedLines > 0) {
       lines.push(`  [… ${command.omittedLines} earlier lines omitted]`);
     }

@@ -28,3 +28,11 @@ export const shellyPaths = (env: NodeJS.ProcessEnv = process.env) => {
   };
 };
 export type ShellyPaths = ReturnType<typeof shellyPaths>;
+
+/** `path` as the user would type it: under their home directory, with `~`. */
+export const displayPath = (path: string, home: string | undefined = homedir()): string =>
+  home && home !== '/' && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
+
+/** Shelly's config file, for messages: `~/.shelly/config.json`, or wherever SHELLY_HOME puts it. */
+export const configPathForDisplay = (env: NodeJS.ProcessEnv = process.env): string =>
+  displayPath(shellyPaths(env).config, env.HOME || homedir());

@@ -109,6 +109,8 @@ export class ListPicker {
   /** First visible match, when there are more matches than rows. */
   private scrollTop = 0;
   private widthLimit = 80;
+  /** Shown when nothing matches; the list hides without it. */
+  private emptyText: string | undefined;
 
   constructor(renderer: CliRenderer, private readonly options: ListPickerOptions) {
     this.root = new BoxRenderable(renderer, { flexDirection: 'column', visible: false, flexShrink: 0 });
@@ -125,7 +127,7 @@ export class ListPicker {
     if (!this.root.visible) {
       return 0;
     }
-    return this.matches.length === 0 ? (this.options.emptyText ? 1 : 0) : Math.min(this.matches.length, this.limit());
+    return this.matches.length === 0 ? (this.emptyText ? 1 : 0) : Math.min(this.matches.length, this.limit());
   }
 
   get selected(): PickerItem | undefined {
@@ -141,8 +143,9 @@ export class ListPicker {
    * list starts at `preferredLeft` (0-based) when it fits there, else at the
    * left edge. The selection resets when the matches change.
    */
-  show(items: readonly PickerItem[], query: string, width: number, preferredLeft = 0): void {
+  show(items: readonly PickerItem[], query: string, width: number, preferredLeft = 0, emptyText?: string): void {
     const changed = items !== this.items || query !== this.query;
+    this.emptyText = emptyText ?? this.options.emptyText;
     this.items = items;
     this.query = query;
     if (changed) {
@@ -155,7 +158,7 @@ export class ListPicker {
         this.scrollTop = 0;
       }
     }
-    this.root.visible = this.matches.length > 0 || Boolean(this.options.emptyText);
+    this.root.visible = this.matches.length > 0 || Boolean(this.emptyText);
     const natural = Math.max(0, ...this.rows(Number.MAX_SAFE_INTEGER).map((row) => displayWidth(row.map((segment) => segment.text).join(''))));
     const left = preferredLeft + natural <= width ? preferredLeft : 0;
     this.root.marginLeft = left;
@@ -206,7 +209,7 @@ export class ListPicker {
 
   private rows(width: number): Line[] {
     const visible = this.visibleMatches();
-    const rows = formatPickerRows(visible, this.selectedIndex - this.scrollTop, width, this.options.emptyText ?? '');
+    const rows = formatPickerRows(visible, this.selectedIndex - this.scrollTop, width, this.emptyText ?? '');
     const hidden = this.matches.length - visible.length;
     return hidden > 0 ? [...rows, [seg(`  … ${hidden} more`, 'muted')]] : rows;
   }

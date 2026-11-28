@@ -11,7 +11,7 @@ export default async (driver: ScenarioDriver): Promise<void> => {
   await driver.type('echo hello from the shell\r');
   await driver.waitForText(/^hello from the shell$/m);
   await driver.type('::');
-  await driver.waitForText(/fake · new thread/, { timeoutMs: 15_000 });
+  await driver.waitForText(/Fake Agent · new thread/, { timeoutMs: 15_000 });
   await driver.screenshot('input-with-hint');
 
   await driver.type('show me markdown');

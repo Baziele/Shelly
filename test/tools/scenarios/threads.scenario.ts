@@ -22,7 +22,7 @@ export default async (driver: ScenarioDriver): Promise<void> => {
   await driver.waitForText('› /new');
   await driver.screenshot('slash-popup');
   await driver.type('new\r');
-  await driver.waitForText('fake · new thread');
+  await driver.waitForText('Fake Agent · new thread');
   await driver.screenshot('after-new');
   await driver.press('esc');
   await closed(driver);

@@ -51,6 +51,10 @@ export interface FlowHost {
   readonly lineEditor: LineEditor | undefined;
   /** The user's home directory, for showing paths with `~`. */
   readonly home: string;
+  /** Shelly's config file as the user would type it: `~/.shelly/config.json`. */
+  readonly configPath: string;
+  /** $SHELLY_HOME, where the client keeps what it last heard about the agents. */
+  readonly shellyHome: string;
   /** The shell's working directory now. */
   cwd(): string;
   environment(): Promise<EnvironmentInfo>;
@@ -65,6 +69,12 @@ export interface FlowHost {
    * Check it before drawing anything.
    */
   claim(open: OpenInput, onKeys: (data: string) => boolean): Claim | undefined;
+  /**
+   * A one-line note for the user at the shell (a turn finished in the
+   * background, say): shown muted below an empty prompt, else above the
+   * next one. Gone once they type.
+   */
+  notice(text: string): void;
   /**
    * Give the terminal back to the shell, then replay what was typed
    * meanwhile. With a claim: only while it is the one holding the terminal

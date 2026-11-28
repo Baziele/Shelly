@@ -1,6 +1,8 @@
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
+import { BUILTIN_AGENT_NAMES } from '../../protocol/agent-names.js';
+import { configPathForDisplay } from '../../protocol/paths.js';
 import type { AgentInfo } from '../../protocol/schema.js';
 import { findClaudeExecutable, withoutHostSession } from '../claude-env.js';
 import type { AgentSettings, ConfigFile } from '../services.js';
@@ -160,7 +162,7 @@ const launchFrom = (
 };
 
 const claude = (settings: AgentSettings, env: NodeJS.ProcessEnv): AgentDefinition => {
-  const name = settings.name ?? 'Claude Code';
+  const name = settings.name ?? BUILTIN_AGENT_NAMES.claude!;
   let launch: AgentDefinition['launch'];
   if (settings.command !== undefined) {
     launch = launchFrom(name, settings.command, settings.args ?? [], env);
@@ -194,7 +196,7 @@ const claude = (settings: AgentSettings, env: NodeJS.ProcessEnv): AgentDefinitio
 };
 
 const opencode = (settings: AgentSettings, env: NodeJS.ProcessEnv): AgentDefinition => {
-  const name = settings.name ?? 'OpenCode';
+  const name = settings.name ?? BUILTIN_AGENT_NAMES.opencode!;
   const launch = launchFrom(name, settings.command ?? 'opencode', settings.args ?? ['acp'], env);
   return {
     id: 'opencode',
@@ -219,7 +221,7 @@ const custom = (id: string, settings: AgentSettings, env: NodeJS.ProcessEnv): Ag
     name,
     enabled: settings.enabled ?? true,
     launch: settings.command === undefined
-      ? { ok: false, reason: `${name} has no \`command\` in Shelly's config.json.` }
+      ? { ok: false, reason: `${name} has no \`command\` in ${configPathForDisplay(env)}.` }
       : launchFrom(name, settings.command, settings.args ?? [], env),
     env: { ...settings.env },
     sessionSetup: modelSetup(settings.model),

@@ -54,6 +54,46 @@ describe('PromptView', { timeout: 20_000 }, () => {
     assert.deepEqual(await narrow.screenIs(narrowExpected), narrowExpected);
   });
 
+  it('shortens a long thread title in the hint rather than drop the hint', async () => {
+    const hint = 'Fake Agent · “A rather long thread title that goes on and on”';
+    const wide = await open(100, '::', '', { hint });
+    const [full] = await wide.screen((lines) => lines[0]?.includes(hint) ?? false);
+    assert.ok(full?.endsWith(hint), full ?? '');
+    overlay?.destroy();
+    // 60 columns: the short placeholder, and the title cut to what is left.
+    const narrow = await open(60, '::', '', { hint });
+    const [row] = await narrow.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
+    assert.match(row!, /^~\/acme-web \$ :: Ask anything\s+Fake Agent · “A rather lo…”$/);
+    assert.ok(row!.length <= 59);
+    overlay?.destroy();
+    // Where the long placeholder would leave room only for the agent, the short one keeps a title.
+    const middle = await open(71, '::', '', { hint });
+    const [between] = await middle.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
+    assert.match(between!, /:: Ask anything\s+Fake Agent · “A rather long thread t…”$/);
+    overlay?.destroy();
+    // Beside typed text, the title gets whatever the text leaves.
+    const typing = await open(60, '::', 'why', { hint });
+    const [typed] = await typing.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
+    assert.match(typed!, /:: why\s+Fake Agent · “A rather long thread…”$/);
+  });
+
+  it('leaves off the end of a status hint that does not fit, rather than drop it', async () => {
+    const view = await open(60, '::', '', { hint: '✓ Fake Agent finished · enter to see' });
+    const [row] = await view.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
+    assert.match(row!, /:: Ask anything\s+✓ Fake Agent finished$/);
+  });
+
+  it('shows an error about a command without the command list over it, and the list again once typing goes on', async () => {
+    const view = await open(80, '::', '/rename');
+    await view.screen((lines) => lines.some((line) => line.includes('Rename this thread')));
+    view.overlay.setError('Give it a name: /rename <title>');
+    const shown = await view.screen((lines) => lines.some((line) => line.includes('✗ Give it a name')) && !lines.some((line) => line.includes('Rename this thread')));
+    assert.ok(!shown.some((line) => line.includes('Rename this thread')), shown.join('\n'));
+    view.overlay.feed('\u007f');
+    const again = await view.screen((lines) => lines.some((line) => line.includes('Rename this thread')));
+    assert.ok(!again.some((line) => line.includes('✗')), again.join('\n'));
+  });
+
   it('keeps the request, spins and streams the reply while busy, then shows an error and lets you retry', async () => {
     const view = await open(80, '__', 'find files over 100MB');
     view.overlay.setBusy(true);

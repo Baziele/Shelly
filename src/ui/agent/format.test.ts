@@ -262,7 +262,7 @@ describe('status and summary', () => {
 
   it('ends a failed turn with its time, a next step and a blank row before the prompt', () => {
     const lines = formatSummary({ stopReason: 'error', error: 'API connection lost', durationMs: 3_100 }, { toolCount: 0, produced: false, noticed: false }, context).map(lineText);
-    assert.deepEqual(lines, ['✗ API connection lost · 3s', '  Try again, or check `claude` on its own.', '']);
+    assert.deepEqual(lines, ['✗ API connection lost · 3s', '  Try again, or check that claude works on its own.', '']);
     const interrupted = formatSummary({ stopReason: 'interrupted', error: null, durationMs: 500 }, { toolCount: 0, produced: true, noticed: false }, context).map(lineText);
     assert.equal(interrupted[0], '✗ Interrupted: claude stopped unexpectedly · <1s');
   });

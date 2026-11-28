@@ -29,6 +29,55 @@ export const FAST_TRIGGER = '__';
 
 /** Below this many cells between the typed text and the edge, the hint is hidden. */
 const HINT_GAP = 3;
+/** A thread title in the hint is shortened to fit, down to this many cells (… included). */
+const MIN_HINT_TITLE_CELLS = 6;
+
+/**
+ * `hint` in `cells`: whole; or (`title`) with its quoted thread title
+ * (`“…”`) cut short; or (`parts`) also with its last ` · ` parts left off
+ * (`✓ Claude Code finished · enter to see` keeps `✓ Claude Code finished`).
+ * Undefined when it does not fit that way.
+ */
+export const fitHint = (hint: string, cells: number, step: 'whole' | 'title' | 'parts'): string | undefined => {
+  if (displayWidth(hint) <= cells) {
+    return hint;
+  }
+  if (step === 'whole') {
+    return undefined;
+  }
+  if (step === 'title') {
+    return shortenTitle(hint, cells);
+  }
+  const parts = hint.split(' · ');
+  for (let count = parts.length; count >= 1; count--) {
+    const candidate = parts.slice(0, count).join(' · ');
+    const fitted = displayWidth(candidate) <= cells ? candidate : shortenTitle(candidate, cells);
+    if (fitted !== undefined) {
+      return fitted;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * `hint` in `cells`, its quoted thread title (`“…”`) cut short to fit;
+ * undefined when even a short title would not fit, or there is none.
+ */
+const shortenTitle = (hint: string, cells: number): string | undefined => {
+  const match = /“([^”]*)”/.exec(hint);
+  if (!match) {
+    return undefined;
+  }
+  const title = match[1]!;
+  const keep = displayWidth(title) - (displayWidth(hint) - cells);
+  if (keep >= displayWidth(title)) {
+    return hint;
+  }
+  if (keep < MIN_HINT_TITLE_CELLS) {
+    return undefined;
+  }
+  return hint.replace(match[0], `“${truncateEnd(title, keep)}”`);
+};
 /** The streamed preview moves to its own row when less room than this is left beside the text. */
 const MIN_PREVIEW_CELLS = 16;
 
@@ -48,7 +97,7 @@ export interface PromptViewPlacement {
   readonly mode?: PromptMode;
   /** Fast mode, opened from a half-typed command: the command being rewritten. */
   readonly rewriting?: string;
-  /** Right-aligned, muted: where `::` will go (`claude · new thread`). */
+  /** Right-aligned, muted: where `::` will go (`Claude Code · new thread`). */
   readonly hint?: string;
   /** Enter on an empty input submits `''` (to watch a running turn) instead of closing. */
   readonly submitEmpty?: boolean;
@@ -60,6 +109,8 @@ export interface PickerRequest {
   readonly placeholder: string;
   /** Shown when nothing matches the filter. */
   readonly emptyText?: string;
+  /** A muted line between the input and the list: what else there is to know (how to add an agent, say). */
+  readonly note?: string;
   readonly onPick: (item: PickerItem) => void;
   /** Escape closes the picker and returns to the input. */
   readonly onClose: () => void;
@@ -253,7 +304,12 @@ export class PromptView {
 
   /** Show a list to pick from; the input becomes its filter. */
   openPicker(request: PickerRequest): void {
-    this.picker = { ...request, placeholder: oneLine(request.placeholder), emptyText: request.emptyText && oneLine(request.emptyText) };
+    this.picker = {
+      ...request,
+      placeholder: oneLine(request.placeholder),
+      emptyText: request.emptyText && oneLine(request.emptyText),
+      note: request.note && oneLine(request.note),
+    };
     this.input.value = '';
     this.refresh();
   }
@@ -428,14 +484,15 @@ export class PromptView {
   private refreshList(): void {
     const width = this.renderer.terminalWidth;
     if (this.picker) {
-      this.list.show(this.picker.items, this.input.value, width, this.textOffset - 2);
+      this.list.show(this.picker.items, this.input.value, width, this.textOffset - 2, this.picker.emptyText);
     } else {
       const query = parseSlashQuery(this.input.value);
       if (query !== this.dismissedQuery) {
         this.dismissedQuery = undefined;
       }
-      // Slash commands belong to agent mode; fast mode takes the text as it is.
-      if (query === undefined || query === this.dismissedQuery || this.busy || this.mode === 'fast') {
+      // Slash commands belong to agent mode; fast mode takes the text as it is. While an error
+      // shows (about the command typed, say), the list would only cover it: it comes back with typing.
+      if (query === undefined || query === this.dismissedQuery || this.busy || this.mode === 'fast' || this.error !== undefined) {
         this.list.hide();
       } else {
         const items = this.commands.match(query).map((command): PickerItem => ({
@@ -492,6 +549,13 @@ export class PromptView {
       this.messageRow.height = rows.length;
       this.messageRow.visible = true;
       this.messageRow.content = toStyledText(rows);
+    } else if (this.picker?.note) {
+      const left = room >= 30 ? this.textOffset : 2;
+      const rows = wrapMessage([seg(' '.repeat(left))], this.picker.note, { tone: 'muted' }, width).slice(0, MAX_MESSAGE_ROWS);
+      this.messageRows = rows.length;
+      this.messageRow.height = rows.length;
+      this.messageRow.visible = true;
+      this.messageRow.content = toStyledText(rows);
     } else if (this.busy && this.preview && this.previewOnOwnRow()) {
       this.messageRows = 1;
       this.messageRow.height = 1;
@@ -511,25 +575,34 @@ export class PromptView {
     const room = this.renderer.terminalWidth - this.textOffset - 1;
     const typed = displayWidth(this.input.value);
     const hint = this.hint && !this.busy && !this.picker ? this.hint : undefined;
-    // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
-    const hintCells = hint ? displayWidth(hint) + HINT_GAP + 1 : 0;
 
     let placeholder: string = displayWidth(full) <= room ? full : short;
-    let showHint = false;
+    let shown: string | undefined;
     if (hint) {
-      const used = typed > 0 ? typed : displayWidth(placeholder);
-      if (used + hintCells <= room) {
-        showHint = true;
-      } else if (typed === 0 && displayWidth(short) + hintCells <= room) {
-        placeholder = short;
-        showHint = true;
+      // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
+      const roomFor = (text: string): number => room - displayWidth(text) - HINT_GAP - 1;
+      const beside = typed > 0 ? this.input.value : placeholder;
+      // The whole hint, with the shorter placeholder if need be; then with its title shortened;
+      // then with its last parts left off. Each before the next gives up anything more.
+      const steps = (['whole', 'title', 'parts'] as const).flatMap((step) => [[beside, step], [short, step]] as const);
+      for (const [withPlaceholder, step] of steps) {
+        if (withPlaceholder !== beside && typed > 0) {
+          continue;
+        }
+        shown = fitHint(hint, roomFor(withPlaceholder), step);
+        if (shown !== undefined) {
+          if (typed === 0) {
+            placeholder = withPlaceholder;
+          }
+          break;
+        }
       }
     }
     this.input.placeholder = placeholder;
-    this.hintText.visible = showHint;
-    if (hint && showHint) {
-      this.hintText.content = toStyledText([[seg(hint, 'muted'), seg(' ')]]);
-      this.hintText.width = displayWidth(hint) + 1;
+    this.hintText.visible = shown !== undefined;
+    if (shown !== undefined) {
+      this.hintText.content = toStyledText([[seg(shown, 'muted'), seg(' ')]]);
+      this.hintText.width = displayWidth(shown) + 1;
     }
   }
 }

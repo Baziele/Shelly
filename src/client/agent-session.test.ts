@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import type { AgentInfo, ModeState, ThreadSummary } from '../protocol/schema.js';
 import type { PickerRequest } from '../ui/prompt-view.js';
@@ -24,7 +27,14 @@ const summary = (id: string): ThreadSummary => ({
   id, title: '', agentId: 'fake', location: 'home', cwd: '/home', createdAt: 0, updatedAt: 0, status: 'idle', turnCount: 0, attachedBy: null,
 });
 
-const setup = (overrides: Partial<FlowHost> = {}) => {
+class DaemonError extends Error {
+  constructor(readonly _tag: string, fields: Record<string, unknown>, message: string) {
+    super(message);
+    Object.assign(this, fields);
+  }
+}
+
+const setup = (overrides: Partial<FlowHost> = {}, daemon: { agents?: AgentInfo[]; createThread?: () => Promise<ThreadSummary>; prompt?: () => AsyncIterable<unknown> } = {}) => {
   const calls: string[] = [];
   const released: ReleaseOptions[] = [];
   let written = '';
@@ -34,9 +44,12 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
   let threads = 0;
   const live = new Set<string>();
   const client = {
-    listAgents: () => Promise.resolve(AGENTS),
+    listAgents: () => Promise.resolve(daemon.agents ?? AGENTS),
     connect: () => Promise.resolve({ protocolVersion: 2, daemonVersion: '0', pid: 1 }),
     createThread: () => {
+      if (daemon.createThread) {
+        return daemon.createThread();
+      }
       const id = `t${++threads}`;
       live.add(id);
       calls.push(`create ${id}`);
@@ -49,6 +62,9 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
       calls.push(`delete ${id}`);
       return Promise.resolve();
     },
+    detachThread: () => Promise.resolve(),
+    listThreads: () => Promise.resolve([]),
+    prompt: () => daemon.prompt?.() ?? (async function* () {})(),
     setMode: (id: string, mode: string) => {
       calls.push(`mode ${id} ${mode}`);
       return Promise.resolve();
@@ -66,13 +82,18 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
     closePicker: () => (picker = undefined),
   };
   const host = {
-    terminal: { write: (data: string) => (written += data), size: { cols: 80, rows: 24 } },
+    terminal: {
+      write: (data: string) => (written += data),
+      size: { cols: 80, rows: 24 },
+      queryCursorPosition: () => Promise.resolve({ row: 1, col: 1 }),
+    },
     colorDepth: 'none',
     overlay,
     link: { get: () => Promise.resolve(client), loaded: client, lastError: undefined },
     commands: { recent: () => Promise.resolve([]), cwd: '/home' },
     lineEditor: undefined,
     home: '/home',
+    configPath: '~/.shelly/config.json',
     recordsCommands: true,
     cwd: () => '/home',
     environment: () => Promise.resolve({ os: 'TestOS', shell: 'zsh', shellVersion: undefined, terminal: undefined }),
@@ -85,10 +106,95 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
   } as unknown as FlowHost;
   const session = new AgentSession(host);
   const open: OpenInput = { trigger: '::', mode: 'agent', rewrite: undefined };
-  return { session, open, calls, released, written: () => written, picker: () => picker, claimed: () => claimed, live, keys: (data: string) => keys?.(data) };
+  return { session, open, calls, released, written: () => written, text: () => written.replace(/\u001b\[[\d;?]*[A-Za-z]/g, ''), picker: () => picker, claimed: () => claimed, live, keys: (data: string) => keys?.(data), client: () => Promise.resolve(client) };
 };
 
 describe('AgentSession', () => {
+  it('says in the hint that the agent for a new thread is not installed, and that there is none', async () => {
+    const opencode: AgentInfo = { id: 'opencode', name: 'OpenCode', available: false, unavailableReason: "OpenCode isn't installed. Install it from opencode.ai, then try again.", supportsFast: true, isDefault: true };
+    const t = setup({}, { agents: [opencode] });
+    await t.session.connected(await t.client());
+    assert.equal(t.session.openOptions().hint, 'OpenCode · not installed');
+
+    const none = setup({}, { agents: [] });
+    assert.equal(none.session.openOptions().hint, undefined, 'nothing is said before the daemon is heard');
+    await none.session.connected(await none.client());
+    assert.equal(none.session.openOptions().hint, 'no agent set up · /agent');
+  });
+
+  it('shows why a prompt was refused, with ✗ and nothing about trying the agent, and keeps no thread', async () => {
+    const reason = "OpenCode isn't installed. Install it from opencode.ai, then try again.";
+    const opencode: AgentInfo = { id: 'opencode', name: 'OpenCode', available: false, unavailableReason: reason, supportsFast: true, isDefault: true };
+    const t = setup({}, { agents: [opencode], createThread: () => Promise.reject(new DaemonError('AgentUnavailable', { agentId: 'opencode', reason }, reason)) });
+    t.session.submit(t.open, 'hello');
+    for (let i = 0; i < 50 && t.released.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(t.released.length, 1, 'the prompt came back');
+    assert.match(t.text(), /✗ OpenCode isn't installed\. Install it from opencode\.ai, then try again\.\r\n/);
+    assert.doesNotMatch(t.text(), /Try again, or check|<1s|✓|\/agent/);
+  });
+
+  it('deletes the thread it made for a prompt that never became a turn, and starts a new one for the retry', async () => {
+    const reason = "Fake can't start.";
+    const other: AgentInfo = { id: 'other', name: 'Other', available: true, unavailableReason: null, supportsFast: false, isDefault: false };
+    const t = setup({}, {
+      agents: [...AGENTS, other],
+      prompt: () => (async function* () {
+        throw new DaemonError('AgentUnavailable', { agentId: 'fake', reason }, reason);
+      })(),
+    });
+    for (const attempt of [1, 2]) {
+      t.session.submit(t.open, 'hello');
+      for (let i = 0; i < 50 && t.released.length < attempt; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.equal(t.released.length, attempt);
+    }
+    assert.deepEqual(t.calls.filter((call) => /^(create|delete)/.test(call)), ['create t1', 'delete t1', 'create t2', 'delete t2']);
+    assert.equal(t.live.size, 0, 'no thread is left behind');
+    // Another agent can be used: the message says where to pick it.
+    assert.match(t.text(), /✗ Fake can't start\. · \/agent to pick another/);
+  });
+
+  it('asks about a mistyped command before sending it, and sends it on a second enter', async () => {
+    const t = setup();
+    t.session.submit(t.open, '/renmae typo');
+    await tick();
+    assert.deepEqual(t.calls, ['error Unknown command /renmae · did you mean /rename? · enter again to send it as a message']);
+    t.session.submit(t.open, '/renmae typo');
+    for (let i = 0; i < 50 && t.released.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(t.calls.includes('create t1'), 'sent as a message the second time');
+  });
+
+  it('shows the hint at once from what the daemon last said, then keeps it for the next terminal', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'shelly-cache-'));
+    try {
+      // Nothing heard yet: the config's default agent, by its name.
+      writeFileSync(join(home, 'config.json'), JSON.stringify({ defaultAgent: 'opencode' }));
+      assert.equal(setup({ shellyHome: home }).session.openOptions().hint, 'OpenCode · new thread');
+
+      // The daemon answers: the hint is put right, and what it said is kept.
+      const t = setup({ shellyHome: home });
+      await t.session.connected(await t.client());
+      assert.equal(t.session.openOptions().hint, 'Fake · new thread');
+      assert.deepEqual(JSON.parse(readFileSync(join(home, 'agents-cache.json'), 'utf8')), { agents: AGENTS });
+
+      // The next terminal shows that before its daemon answers.
+      assert.equal(setup({ shellyHome: home }).session.openOptions().hint, 'Fake · new thread');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('names the agent as the user knows it, not by its id', async () => {
+    const t = setup();
+    await t.session.connected(await t.client());
+    assert.equal(t.session.openOptions().hint, 'Fake · new thread');
+  });
+
   it('gives the terminal back, with the error inline, when printing fails after it took it', async () => {
     const t = setup({ environment: () => Promise.reject(new Error('the environment is gone')) });
     t.session.submit(t.open, '/context');

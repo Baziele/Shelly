@@ -537,10 +537,10 @@ export const formatSummary = (outcome: TurnOutcome, facts: SummaryFacts, context
   const ran = agent !== UNKNOWN_AGENT;
   const error = outcome.error ? oneLine(outcome.error) : undefined;
   const muted = (text: string): Line[] => wrapMessage([], text, { tone: 'muted' }, context.width);
-  const hint = fitLine([seg(`  Try again, or check \`${agent}\` on its own.`, 'muted')], context.width);
+  const hint = wrapMessage([seg('  ')], `Try again, or check that ${agent} works on its own.`, { tone: 'muted' }, context.width);
   const failed = (text: string, withHint: boolean): Line[] => [
     ...wrapMessage([seg('✗ ', 'error', { bold: true })], ran ? `${text} · ${time}` : text, { tone: 'error' }, context.width),
-    ...(withHint && ran ? [hint] : []),
+    ...(withHint && ran ? hint : []),
     [],
   ];
 
@@ -567,7 +567,7 @@ export const formatSummary = (outcome: TurnOutcome, facts: SummaryFacts, context
 
 /** Shown when the user sends a running turn to the background. */
 export const formatBackgrounded = (context: FormatContext): Line =>
-  fitLine([seg('↳ ', 'accent'), seg(`${context.agentName} is still working · `, 'muted'), seg('::', 'accent', { bold: true }), seg(' to check back', 'muted')], context.width);
+  fitLine([seg('↳ ', 'accent'), seg(`${context.agentName} is still working · `, 'muted'), seg('::', 'accent', { bold: true }), seg(' then enter to see', 'muted')], context.width);
 
 /** The tail of `text` that fits in `width`, for previews. */
 export const previewTail = (text: string, width: number): string => truncateStart(oneLine(text), width);

@@ -173,7 +173,7 @@ describe('AgentView', { timeout: 30_000 }, () => {
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'ignored' }));
     await view.finish();
     const lines = await term.allLines();
-    assert.deepEqual(lines.slice(1), ['↳ claude is still working · :: to check back']);
+    assert.deepEqual(lines.slice(1), ['↳ claude is still working · :: then enter to see']);
     assert.deepEqual(await term.cursor(), { row: 3, col: 1 });
     assert.equal(view.handleInput('x'), false, 'keys go back to the shell');
   });

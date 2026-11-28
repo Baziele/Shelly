@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CommandRegistry, parseSlashCommand, parseSlashQuery } from './slash-commands.js';
+import { CommandRegistry, parseSlashCommand, unknownSlashCommand, parseSlashQuery } from './slash-commands.js';
 
 describe('parseSlashQuery', () => {
   it('returns the partial command name while one is being typed', () => {
@@ -37,5 +37,21 @@ describe('parseSlashCommand', () => {
     assert.equal(parseSlashCommand('/etc/hosts is empty?'), undefined);
     assert.equal(parseSlashCommand('/nope'), undefined);
     assert.equal(parseSlashCommand('what does /new do'), undefined);
+  });
+});
+
+describe('unknownSlashCommand', () => {
+  it('catches a mistyped command and says which one was meant', () => {
+    assert.deepEqual(unknownSlashCommand('/renmae typo'), { name: 'renmae', suggestion: 'rename' });
+    assert.deepEqual(unknownSlashCommand('/thread'), { name: 'thread', suggestion: 'threads' });
+    assert.deepEqual(unknownSlashCommand('/hlep'), { name: 'hlep', suggestion: 'help' });
+    assert.deepEqual(unknownSlashCommand('/deploy now'), { name: 'deploy', suggestion: undefined });
+  });
+
+  it('leaves known commands, and lines that only start with a slash, alone', () => {
+    assert.equal(unknownSlashCommand('/rename Fix it'), undefined);
+    assert.equal(unknownSlashCommand('/etc/hosts is empty?'), undefined);
+    assert.equal(unknownSlashCommand('/ is the root'), undefined);
+    assert.equal(unknownSlashCommand('what does /new do'), undefined);
   });
 });
