@@ -33,6 +33,9 @@ const LINE_NOT_READABLE_HERE = 'Ctrl+] needs bash 4+ (brew install bash); __ on 
 /** How long that notice waits for a busy shell to be back at its prompt; after that, a bell. */
 const NOTICE_WAIT_MS = 5000;
 const NOTICE_POLL_MS = 100;
+/** bash 3.2: how many times to ask where the line ends while the shell's output keeps coming, and how long to wait between. */
+const FIND_END_ATTEMPTS = 3;
+const FIND_END_RETRY_MS = 50;
 
 /** How long a possible trigger's first character is held back before it goes to the shell. */
 const TRIGGER_HOLD_MS = 400;
@@ -387,8 +390,12 @@ export class Shelly {
 
   private handleShellOutput(data: string): void {
     this.lastActivityAt = Date.now();
-    // The shell drew: the notice may have moved, or be gone.
-    this.noticeBelow = undefined;
+    if (this.noticeBelow) {
+      // The shell never knows the notice is there, so it can always go
+      // first; left, the shell's drawing would land around it.
+      this.host.write(eraseBelowLine(this.noticeBelow));
+      this.noticeBelow = undefined;
+    }
     if (!this.markers) {
       this.forwardShellOutput(data);
       return;
@@ -563,29 +570,66 @@ export class Shelly {
   }
 
   /**
-   * bash 3.2: draw the notice below the line the shell keeps. The shell
-   * moves its cursor to the line's end (where the terminal says it is) and,
-   * once the notice is drawn, back to where the user left it.
+   * bash 3.2: draw the notice below the line the shell keeps, and keep
+   * track of it until a key or the shell's output erases it. Keys typed
+   * meanwhile wait in `queuedInput`, and reach `handleInput` (which erases
+   * it) only once it is tracked. Unsure where the line ends, Shelly rings
+   * the bell instead: a notice in the wrong row would cover the line.
    */
   private async sayNeedsBash4(editor: LineEditor): Promise<void> {
-    const moved = await editor.jumpToLineEnd();
-    const end = moved ? await this.host.queryCursorPosition().catch((): CursorPosition | undefined => undefined) : undefined;
-    const drawn = end && !this.disposed ? drawBelowLine(LINE_NOT_READABLE_HERE, end, this.host.size) : undefined;
-    if (drawn) {
-      this.host.write(drawn.output);
-    }
-    if (moved) {
-      await editor.jumpBack();
-    }
+    const found = await this.findLineEnd(editor);
     if (this.disposed) {
       return;
     }
-    if (drawn) {
-      // After the shell's own cursor move, which would otherwise drop it.
-      this.noticeBelow = drawn.notice;
-    } else {
+    if (!found.end) {
       this.host.write('\u0007');
+      return;
     }
+    const drawn = drawBelowLine(LINE_NOT_READABLE_HERE, found.end, this.host.size);
+    this.host.write(drawn.output);
+    if (found.moved) {
+      await editor.jumpBack();
+    }
+    if (!this.disposed) {
+      // After the shell's move back, whose output would erase it.
+      this.noticeBelow = drawn.notice;
+    }
+  }
+
+  /**
+   * bash 3.2: where the shell's line ends on screen, with the shell's cursor
+   * moved there (`moved`; it goes back with `jumpBack`). An empty line ends
+   * where the cursor is. The end counts only when the shell wrote something
+   * for the move, nothing more came while the terminal was asked, and it is
+   * not before where the cursor was: a slow shell is not mistaken for one
+   * that has moved. Otherwise there is no `end`, and the cursor is back.
+   */
+  private async findLineEnd(editor: LineEditor): Promise<{ readonly end?: CursorPosition; readonly moved: boolean }> {
+    const query = (): Promise<CursorPosition | undefined> =>
+      this.host.queryCursorPosition().catch((): CursorPosition | undefined => undefined);
+    const origin = await query();
+    if (!origin || this.detector.isLineEmpty) {
+      return { end: origin, moved: false };
+    }
+    const move = await editor.jumpToLineEnd();
+    if (move === 'unsupported') {
+      return { moved: false };
+    }
+    let end: CursorPosition | undefined;
+    for (let attempt = 0; move === 'moved' && !end && attempt < FIND_END_ATTEMPTS && !this.disposed; attempt++) {
+      const before = editor.outputCount;
+      const at = await query();
+      if (at && editor.outputCount === before) {
+        end = at;
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, FIND_END_RETRY_MS));
+      }
+    }
+    if (end && !isBefore(end, origin)) {
+      return { end, moved: true };
+    }
+    await editor.jumpBack();
+    return { moved: false };
   }
 
   /**
@@ -816,3 +860,5 @@ export class Shelly {
     await this.link?.dispose(flows ? (client) => flows.goodbye(client) : undefined);
   }
 }
+
+const isBefore = (a: CursorPosition, b: CursorPosition): boolean => a.row < b.row || (a.row === b.row && a.col < b.col);

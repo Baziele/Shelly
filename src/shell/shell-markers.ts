@@ -9,7 +9,9 @@
  *   cwd;<path>      the shell's working directory; sent at every prompt
  *   line-editor;<features>  what the hooks can do with the input line, as a
  *                   comma-separated list: capture, set (read and replace it),
- *                   clear, redraw (bash 3.2, which can do neither)
+ *                   notice (show a message below it), and for bash 3.2,
+ *                   which can do none of those, clear and jump (move the
+ *                   cursor to the line's end and back)
  *   line;<request>;<buffer>;<cursor>  the input line and its cursor (in
  *                   characters), which the shell has just cleared; a cursor
  *                   of -1 means the line could not be reported and was left

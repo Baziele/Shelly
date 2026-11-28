@@ -267,9 +267,9 @@ if [[ -n "$__shelly_nonce" ]]; then
     # or set. It gets a key that clears the line (Shelly then types the new
     # one; from vi-command mode it enters insert mode first), and keys that
     # move the cursor without touching the line: remember where it is
-    # (readline's mark) and go to the line's end, then back to the mark. With
-    # those Shelly finds where the line ends on screen, to show a notice
-    # below it. (Its bind -x cannot run a command for a key as long as
+    # (readline's mark), go to the line's start, to its end, and back to the
+    # mark. With those Shelly finds where the line ends on screen, to show a
+    # notice below it. (Its bind -x cannot run a command for a key as long as
     # Shelly's, and a notice from the shell would need one.)
     __shelly_line_features='clear,jump'
     for __shelly_keymap in emacs vi-insert vi-command; do
@@ -279,6 +279,7 @@ if [[ -n "$__shelly_nonce" ]]; then
         builtin bind -m "$__shelly_keymap" '"\e[21;16~": kill-whole-line' 2>/dev/null || __shelly_line_features=''
       fi
       builtin bind -m "$__shelly_keymap" '"\e[18;16~": set-mark' 2>/dev/null \
+        && builtin bind -m "$__shelly_keymap" '"\e[17;16~": beginning-of-line' 2>/dev/null \
         && builtin bind -m "$__shelly_keymap" '"\e[15;16~": end-of-line' 2>/dev/null \
         && builtin bind -m "$__shelly_keymap" '"\e[1;16S": exchange-point-and-mark' 2>/dev/null \
         || __shelly_line_features=''

@@ -336,6 +336,24 @@ for (const shell of shells) {
         });
       }
 
+      it('erases the notice before anything the shell prints of its own meanwhile', async () => {
+        // set -b: bash reports a finished job at once, below the line, and redraws it.
+        const session = await start('set -b\n');
+        await session.type('sleep 2 &\r');
+        await session.waitFor((rows) => rows.some((row) => /^\[1\] \d+$/.test(row)) && promptRow(rows) === '$', 'the job started');
+        await session.type(`echo half${LEFT}${LEFT}`);
+        await waitForLine(session, 'echo half', cursorInLine('echo half', 2), 'the typed line');
+        await session.type(HOTKEY);
+        await session.waitFor((rows) => rows.includes(NEEDS_BASH_4), 'the notice');
+        await session.waitFor(
+          (rows) => rows.some((row) => /Done\s+sleep 2/.test(row)) && !rows.includes(NEEDS_BASH_4),
+          "the job's report, with no notice left behind",
+          { timeoutMs: 5000 },
+        );
+        await session.type('X\r');
+        await session.waitFor((rows) => rows.includes('haXlf'), 'the line, run as it was with the key typed');
+      });
+
       it('erases the notice at the next key, which the line gets where the cursor was', async () => {
         const session = await start();
         await session.type(`echo half${LEFT}${LEFT}`);

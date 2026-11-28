@@ -132,11 +132,16 @@ Shelly says so below the line (bash 4+ reads it; `__` on an empty line still
 opens fast mode) and leaves the line exactly as it was. bash 3.2 cannot show
 that notice itself (its `bind -x` runs nothing for a key as long as Shelly's),
 so Shelly draws it: keys bound to readline's own cursor moves take the cursor
-to the line's end (remembering where it was in readline's mark), Shelly asks
-the terminal where that is and draws the notice on the rows below, and the
-cursor goes back to the mark. The shell never knows the notice is there, so
+to the line's end by way of its start (remembering where it was in readline's
+mark), Shelly asks the terminal where that is and draws the notice on the rows
+below, and the cursor goes back to the mark. A cursor move has no answer, but
+going by the start means readline always writes something for a non-empty
+line, so Shelly waits for that, asks again if more comes meanwhile, and checks
+that the end is not before where the cursor was; unsure, it rings the bell
+rather than draw over the line. The shell never knows the notice is there, so
 nothing needs redrawing; Shelly erases it before the next key reaches the
-shell, as zsh's `zle -M` would. The cost is the user's own mark.
+shell or anything the shell prints, as zsh's `zle -M` would. The cost is the
+user's own mark.
 
 Shelly takes these keys out of what the user types at the prompt, and only
 sends them while the shell is at its prompt (after `cwd`, before `exec`,
