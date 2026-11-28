@@ -179,9 +179,19 @@ export class HostTerminal {
    * asked for, then sent back to column 1. Everything written before the call
    * was drawn at that width, which tells a view whether its last frame
    * reached the terminal before or after a resize.
+   *
+   * `output` (a frame) is written in the same write as the query, so a
+   * resize can hardly fall between the two: the answer then tells when the
+   * frame itself arrived, not just when the query did. (With a query in
+   * flight, it is written at once, on its own, to keep output in order.)
    */
-  async queryWidth(timeoutMs = 500): Promise<WidthReport> {
-    const { row, col } = await this.ask('width', ansi.cursorForward(9999), '\r', timeoutMs);
+  async queryWidth(timeoutMs = 500, output = ''): Promise<WidthReport> {
+    let frame = output;
+    if (frame && this.pendingCursorQuery) {
+      this.write(frame);
+      frame = '';
+    }
+    const { row, col } = await this.ask('width', ansi.cursorForward(9999), '\r', timeoutMs, frame);
     return { row, cols: col };
   }
 
@@ -192,13 +202,18 @@ export class HostTerminal {
    * instead of waiting its own time out too: a stalled terminal costs one
    * timeout, not one per query.
    */
-  private async ask(kind: PendingCursorQuery['kind'], before: string, after: string, timeoutMs: number): Promise<CursorPosition> {
+  private async ask(kind: PendingCursorQuery['kind'], before: string, after: string, timeoutMs: number, output = ''): Promise<CursorPosition> {
     const deadline = Date.now() + timeoutMs;
+    // Written right away (see queryWidth): only when nothing is in flight, so nothing is waited for.
+    let lead = output;
     while (this.pendingCursorQuery) {
+      this.write(lead);
+      lead = '';
       await this.pendingCursorQuery.promise;
     }
     const left = deadline - Date.now();
     if (left <= 0) {
+      this.write(lead);
       throw new Error('The terminal did not report its cursor position.');
     }
     let resolve!: (position: CursorPosition) => void;
@@ -214,7 +229,7 @@ export class HostTerminal {
     }, left);
     this.pendingCursorQuery = { kind, promise, resolve, reject, timer };
     // Both forms: the DEC answer cannot be mistaken for a key; the plain one works everywhere.
-    this.write(before + ansi.requestDecCursorPosition + ansi.requestCursorPosition + after);
+    this.write(lead + before + ansi.requestDecCursorPosition + ansi.requestCursorPosition + after);
     return promise;
   }
 

@@ -36,8 +36,8 @@ export class EmulatedTerminal {
   }
 
   /** As HostTerminal.queryWidth: the width the terminal drew everything written so far at, and the cursor's row. */
-  async queryWidth(): Promise<{ row: number; cols: number }> {
-    this.write('\u001b[9999C');
+  async queryWidth(_timeoutMs?: number, output = ''): Promise<{ row: number; cols: number }> {
+    this.write(`${output}\u001b[9999C`);
     const { row, col } = await this.cursor();
     this.write('\r');
     return { row, cols: col };

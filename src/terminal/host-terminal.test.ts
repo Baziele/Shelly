@@ -350,3 +350,41 @@ describe('HostTerminal queries one after another', () => {
     host.stop();
   });
 });
+
+describe('HostTerminal frames sent with their width query', () => {
+  const recordWrites = () => {
+    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() { return this; } });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80, rows: 24 });
+    const writes: string[] = [];
+    const write = output.write.bind(output);
+    output.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return write(chunk);
+    }) as typeof output.write;
+    const host = new HostTerminal(input as never, output as never);
+    host.start(() => {});
+    return { host, writes, answer: (data: string) => input.write(data) };
+  };
+
+  it('writes the frame and the query in one write, so a resize cannot fall between them', async () => {
+    const { host, writes, answer } = recordWrites();
+    const width = host.queryWidth(500, 'FRAME');
+    assert.deepEqual(writes, ['FRAME\u001b[9999C\u001b[?6n\u001b[6n\r']);
+    answer('\u001b[?3;80R\u001b[3;80R');
+    assert.deepEqual(await width, { row: 3, cols: 80 });
+    host.stop();
+  });
+
+  it('writes the frame at once, on its own, when another query is in flight', async () => {
+    const { host, writes, answer } = recordWrites();
+    const position = host.queryCursorPosition();
+    const width = host.queryWidth(500, 'FRAME');
+    assert.equal(writes.at(-1), 'FRAME', 'the frame waited for the query in flight');
+    answer('\u001b[?3;1R\u001b[3;1R');
+    await position;
+    await sleep(5);
+    answer('\u001b[?3;80R\u001b[3;80R');
+    assert.deepEqual(await width, { row: 3, cols: 80 });
+    host.stop();
+  });
+});

@@ -545,7 +545,7 @@ describe('a frame on its way to the terminal when it resizes', () => {
         get size() { return known; },
         write: term.write,
         queryCursorPosition: () => term.cursor(),
-        queryWidth: () => term.queryWidth(),
+        queryWidth: (timeoutMs?: number, output?: string) => term.queryWidth(timeoutMs, output),
       };
       const timers = new FakeTimers();
       view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
@@ -589,8 +589,10 @@ describe('frame confirmation', () => {
         }
       },
       queryCursorPosition: () => term.cursor(),
-      queryWidth: async (): Promise<{ row: number; cols: number }> => {
+      queryWidth: async (_timeoutMs?: number, output = ''): Promise<{ row: number; cols: number }> => {
         calls++;
+        // The frame goes out with the query, as HostTerminal writes it.
+        host.write(output);
         const answer = reply(calls, syncOpen);
         if (answer === 'withhold') {
           // A terminal that holds replies while synchronized output is open: none comes in time.
@@ -602,7 +604,7 @@ describe('frame confirmation', () => {
         return term.queryWidth();
       },
     };
-    return { host, calls: () => calls };
+    return { host, calls: () => calls, syncOpen: () => syncOpen };
   };
 
   const begin = async (host: ConstructorParameters<typeof AgentView>[0], term: EmulatedTerminal, timers: FakeTimers) => {
@@ -681,6 +683,11 @@ describe('frame confirmation', () => {
     let ending = false;
     const watched = {
       ...host,
+      // The frame that comes with a query goes through the watch too.
+      queryWidth: (timeoutMs?: number, output = '') => {
+        watched.write(output);
+        return host.queryWidth(timeoutMs, '');
+      },
       write: (data: string) => {
         host.write(data);
         term.terminal.write('', () => {

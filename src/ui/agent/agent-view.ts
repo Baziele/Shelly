@@ -38,7 +38,7 @@ export interface AgentViewHost extends LiveRegionScreen {
    * each frame confirmed before the next is drawn, so a resize never meets
    * more than one frame on its way, and the view knows which one.
    */
-  queryWidth?(timeoutMs?: number): Promise<{ readonly row: number; readonly cols: number }>;
+  queryWidth?(timeoutMs?: number, output?: string): Promise<{ readonly row: number; readonly cols: number }>;
   /** Whether the terminal rewraps rows on a resize, when known (see LiveRegionOptions.reflows). */
   readonly reflows?: boolean;
 }
@@ -186,6 +186,8 @@ export class AgentView {
   private confirmAnswered = false;
   /** While frames go unconfirmed: when to ask the terminal again whether it answers. */
   private confirmProbeAt = 0;
+  /** A frame's output, held to go out in the same write as the query that confirms it (see confirm()). */
+  private heldOutput: string | undefined;
   /** The last confirmation: the row the cursor was parked on, and the width the frame was drawn at. */
   private lastConfirmed: { readonly row: number; readonly cols: number } | undefined;
   /** A confirmation showed the terminal at another width than laid out for: a resize the view has not been told of yet. */
@@ -224,7 +226,20 @@ export class AgentView {
     this.laidOutSize = { ...host.size };
     this.confirmFrames = typeof host.queryWidth === 'function';
     this.headless = HeadlessRenderer.create({ width: host.size.cols, height: this.bufferRows });
-    this.region = new LiveRegion(host, colorDepth, { marginRows: options.marginRows ?? 2, reflows: host.reflows });
+    // The live region writes through here, so a frame can be held for its confirmation (see paint()).
+    const screen = {
+      get size() {
+        return host.size;
+      },
+      write: (data: string) => {
+        if (this.heldOutput !== undefined) {
+          this.heldOutput += data;
+        } else {
+          host.write(data);
+        }
+      },
+    };
+    this.region = new LiveRegion(screen, colorDepth, { marginRows: options.marginRows ?? 2, reflows: host.reflows });
     this.style = createMarkdownStyle(this.headless.renderer);
 
     const renderer = this.headless.renderer;
@@ -835,31 +850,18 @@ export class AgentView {
       // region by bookkeeping alone. Nothing changes the tree meanwhile: no frame starts while confirming.
       if (live.length > 0 && commit.length + live.length <= this.region.maxLiveRows) {
         this.stats.frames++;
-        const promote = (): void => {
+        this.paint(() => this.region.update([], [...commit, ...live]), () => {
           this.region.promote(commit.length);
           this.afterCommit(snapshot, commitEnd, committedBlocks, split);
-        };
-        if (this.region.update([], [...commit, ...live]) || !this.region.acknowledged) {
-          this.confirm(promote);
-        } else {
-          // Already on screen as they are, and confirmed.
-          promote();
-        }
+        });
       } else {
         // Too tall to show whole (or nothing left live): clear the live region, and commit once that is
         // confirmed, from a cursor with no rows above it. The region shows empty for that round trip.
-        if (this.region.update([], []) || !this.region.acknowledged) {
-          this.confirm(() => this.processFrame(snapshot));
-        } else {
-          this.processFrame(snapshot);
-        }
+        this.paint(() => this.region.update([], []), () => this.processFrame(snapshot));
       }
       return;
     }
-    // A frame that wrote nothing needs no confirmation: the last one written was confirmed already.
-    if (this.region.update(commit, live)) {
-      this.confirm();
-    }
+    this.paint(() => this.region.update(commit, live));
     this.stats.frames++;
     this.afterCommit(snapshot, commitEnd, committedBlocks, split);
   }
@@ -893,6 +895,31 @@ export class AgentView {
   }
 
   /**
+   * Paint a frame (`draw` returns whether it wrote anything) and have it
+   * confirmed, its output going out in the same write as the query (see
+   * HostTerminal.queryWidth). `then` runs once it is confirmed. A frame
+   * that wrote nothing needs no confirmation when the last one written was
+   * confirmed already.
+   */
+  private paint(draw: () => boolean, then?: () => void): void {
+    this.heldOutput = '';
+    let wrote: boolean;
+    let output: string;
+    try {
+      wrote = draw();
+    } finally {
+      output = this.heldOutput;
+      this.heldOutput = undefined;
+    }
+    if (wrote || !this.region.acknowledged) {
+      this.confirm(output, then);
+      return;
+    }
+    this.host.write(output);
+    then?.();
+  }
+
+  /**
    * Ask the terminal to confirm the frame just painted, and hold the next
    * one until it does (or CONFIRM_MS passes): a resize then meets at most
    * this frame on its way, and the confirmation says whether it did (see
@@ -905,15 +932,17 @@ export class AgentView {
    * again every CONFIRM_PROBE_MS, without waiting, and confirmation resumes
    * as soon as it answers.
    */
-  private confirm(then?: () => void): void {
+  private confirm(output: string, then?: () => void): void {
     // A frame was just written: the last confirmation no longer says where the cursor is.
     this.lastConfirmed = undefined;
     const queryWidth = this.host.queryWidth?.bind(this.host);
     if (!queryWidth) {
+      this.host.write(output);
       then?.();
       return;
     }
     if (!this.confirmFrames) {
+      this.host.write(output);
       if (this.now() >= this.confirmProbeAt) {
         this.confirmProbeAt = this.now() + CONFIRM_PROBE_MS;
         queryWidth(CONFIRM_FIRST_MS).then(() => {
@@ -926,7 +955,7 @@ export class AgentView {
     }
     const written = this.laidOutSize.cols;
     let confirmed = false;
-    this.confirming = queryWidth(this.confirmAnswered ? CONFIRM_MS : CONFIRM_FIRST_MS).then(
+    this.confirming = queryWidth(this.confirmAnswered ? CONFIRM_MS : CONFIRM_FIRST_MS, output).then(
       (report) => {
         confirmed = true;
         this.confirmAnswered = true;
