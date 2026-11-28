@@ -69,7 +69,10 @@ describe('Shelly in a real terminal', { timeout: 90_000 }, () => {
     );
     const transcript = screen.indexOf('$ :: what is up');
     assert.match(screen[transcript + 1] ?? '', /✗ .*agent/i);
-    assert.equal(lastPromptRow(screen), transcript + 2, 'no blank line before the prompt');
+    // The message (wrapped, at this width), then one blank row before the prompt, as after any failure.
+    const prompt = lastPromptRow(screen);
+    assert.equal(screen[prompt - 1]?.trim(), '', `one blank row before the prompt:\n${screen.join('\n')}`);
+    assert.ok(screen.slice(transcript + 1, prompt - 1).every((row) => row.trim() !== '' && !row.includes('Try again')), `the message alone above it:\n${screen.join('\n')}`);
   });
 
   it('stays a plain shell when its background service cannot start, and says why on ::', async () => {

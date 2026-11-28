@@ -211,9 +211,10 @@ for (const shell of E2E_SHELLS) {
       assertClean(all);
       promptRightAfter(await driver.lines(), /✓ /);
 
-      // A turn that ends with nothing said says so, rather than a bare ✓.
-      const lines = await ask(driver, 'say nothing', '✓');
-      assert.ok(lines.some((line) => line.includes('fake ended the turn without a reply')), lines.join('\n'));
+      // A turn that ends with nothing said says so, rather than a bare ✓, and the prompt follows right after.
+      const lines = await ask(driver, 'say nothing', 'fake ended the turn without a reply');
+      assert.ok(!lines.slice(lines.findLastIndex((line) => line.includes(':: say nothing'))).some((line) => /^[✓◼] /.test(line)), lines.join('\n'));
+      promptRightAfter(lines, /\S/);
     });
 
     it('reflows when the terminal is resized mid-turn', async () => {
