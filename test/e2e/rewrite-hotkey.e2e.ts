@@ -40,8 +40,10 @@ const SLOW_KEY: Record<string, string> = {
 };
 
 const NOTICE = "Shelly couldn't read the line you were typing";
+/** bash 3.2 can never hand its line over. */
+const NEEDS_BASH_4 = 'Ctrl+] needs bash 4+ (brew install bash); __ on an empty line opens fast mode.';
 
-/** The input, open in place of the line or (bash 3.2) after it, on a prompt's or a continuation line's row. */
+/** The input, open in place of the line, on a prompt's or a continuation line's row. */
 const inputOpen = (rows: string[]): boolean => rows.some((row) => /__(?:\s|$)/.test(row));
 
 interface StayingEnter {
@@ -104,6 +106,71 @@ const bashVersion = (shell: string): number =>
   Number(execFileSync(shell, ['-c', 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'], { encoding: 'utf8' }).trim());
 
 const promptRow = (rows: string[]): string => rows[lastPromptRow(rows)]?.trimEnd() ?? '';
+
+/** The screen's width in these tests. */
+const COLS = 100;
+/** Two rows on screen, after the `$ ` prompt. */
+const WRAPPED = `echo ${'abcdefghij'.repeat(12)}`;
+
+/** Lines bash 3.2 keeps, with how many times the cursor goes left from the end. */
+const KEPT_LINES: readonly { readonly name: string; readonly line: string; readonly left: number }[] = [
+  { name: 'at the start', line: 'echo half', left: 'echo half'.length },
+  { name: 'in the middle', line: 'echo half', left: 2 },
+  { name: 'at the end', line: 'echo half', left: 0 },
+  { name: 'on the first row of a wrapped line', line: WRAPPED, left: 40 },
+  { name: 'on the second row of a wrapped line', line: WRAPPED, left: 10 },
+  { name: 'near the end of a line that fills its row', line: `echo ${'x'.repeat(COLS - 7)}`, left: 3 },
+];
+
+/** The rows from the last prompt down, joined: a wrapped line in one piece. */
+const promptLine = (rows: string[]): string => {
+  const prompt = lastPromptRow(rows);
+  return prompt === -1 ? '' : rows.slice(prompt).filter((row) => row !== '').join('');
+};
+
+/** Where the cursor is with `left` characters of `line` after it: rows below the prompt's, and 1-based column. */
+const cursorInLine = (line: string, left: number): { row: number; col: number } => {
+  const offset = '$ '.length + line.length - left;
+  return { row: Math.floor(offset / COLS), col: (offset % COLS) + 1 };
+};
+
+const rowsOf = (text: string): string[] => text.match(new RegExp(`.{1,${COLS}}`, 'g')) ?? [];
+
+/**
+ * `line`, an `echo`, ran as it was: the line, then what it echoed, then a
+ * new prompt. Blank rows aside: bash 3.2 leaves one after a line that fills
+ * its last row exactly, with or without Shelly.
+ */
+const ranExactly = (rows: string[], line: string): boolean => {
+  const prompt = lastPromptRow(rows);
+  const expected = [...rowsOf(`$ ${line}`), ...rowsOf(line.slice('echo '.length))];
+  const shown = rows.slice(0, prompt).filter((row) => row !== '').slice(-expected.length);
+  return rows[prompt] === '$' && shown.join('\n') === expected.join('\n');
+};
+
+/** Wait for the whole of `line` on the last prompt, nothing after it, and the cursor at `cursorAt` in it. */
+const waitForLine = async (
+  session: ShellyHarness,
+  line: string,
+  cursorAt: { row: number; col: number },
+  description: string,
+  also: (rows: string[]) => boolean = () => true,
+): Promise<string[]> => {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const rows = await session.screen();
+    const cursor = await session.cursor();
+    const at = { row: cursor.row - 1 - lastPromptRow(rows), col: cursor.col };
+    if (promptLine(rows) === `$ ${line}` && also(rows) && at.row === cursorAt.row && at.col === cursorAt.col) {
+      return rows;
+    }
+    if (Date.now() > deadline) {
+      assert.fail(`Timed out waiting for ${description}: cursor at ${JSON.stringify(at)} in the line, `
+        + `wanted ${JSON.stringify(cursorAt)}. Screen:\n${rows.join('\n')}`);
+    }
+    await sleep(50);
+  }
+};
 
 for (const shell of shells) {
   const kind = basename(shell);
@@ -241,27 +308,42 @@ for (const shell of shells) {
         assert.ok(!screen.some((row) => /^pid=/.test(row)), 'nothing ran');
       });
     } else {
-      it('opens the input without taking the line, which stays as it is', async () => {
+      // There is nothing to rewrite without the line (fast mode would never
+      // see it), so the input does not open: Shelly says why below the line,
+      // which stays exactly as it was, and the next key erases the notice.
+      for (const { name, line, left } of KEPT_LINES) {
+        it(`says it needs bash 4, leaving the line as it was with the cursor ${name}`, async () => {
+          const session = await start();
+          await session.type(line + LEFT.repeat(left));
+          await waitForLine(session, line, cursorInLine(line, left), 'the typed line');
+          const typedAt = await session.cursor();
+
+          await session.type(HOTKEY);
+          const screen = await session.waitFor((rows) => rows.includes(NEEDS_BASH_4), 'the notice');
+          const prompt = lastPromptRow(screen);
+          const lineRows = rowsOf(`$ ${line}`);
+          assert.deepEqual(screen.slice(prompt, prompt + lineRows.length), lineRows, 'the whole line, as it was');
+          const below = screen.slice(prompt + lineRows.length);
+          assert.deepEqual(below.filter((row) => row !== ''), [NEEDS_BASH_4], 'and only the notice below it');
+          // A line that ends right at the margin leaves readline's cursor on the next row.
+          assert.ok(below.indexOf(NEEDS_BASH_4) <= 1, 'right below it');
+          await sleep(200);
+          assert.deepEqual(await session.cursor(), typedAt, 'the cursor where it was');
+          assert.ok(!session.raw().includes('Describe a command'), 'the input did not open');
+
+          await session.type('\r');
+          await session.waitFor((rows) => ranExactly(rows, line) && !rows.includes(NEEDS_BASH_4), 'exactly the line, run, and the notice gone');
+        });
+      }
+
+      it('erases the notice at the next key, which the line gets where the cursor was', async () => {
         const session = await start();
-        await session.type('echo half');
-        await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the typed line');
-
+        await session.type(`echo half${LEFT}${LEFT}`);
+        await waitForLine(session, 'echo half', cursorInLine('echo half', 2), 'the typed line');
         await session.type(HOTKEY);
-        await session.waitFor((rows) => promptRow(rows).startsWith('$ echo half__'), 'the input after the line');
-        await session.type(ESCAPE);
-        await session.waitFor((rows) => promptRow(rows) === '$ echo half', 'the line as it was');
-
-        await session.type(HOTKEY);
-        await session.waitFor((rows) => promptRow(rows).startsWith('$ echo half__'), 'the input after the line');
-        await session.type('reply: # Loud enough already.\r');
-        const screen = await session.waitFor(
-          (rows) => rows.some((row) => row.trim() === 'Loud enough already.') && promptRow(rows) === '$ echo half',
-          'the answer and the line redrawn below it',
-          { timeoutMs: 20_000 },
-        );
-        assert.ok(!screen.includes('half'), 'the line did not run');
-        await session.type('\r');
-        await session.waitFor((rows) => rows.includes('half'), 'the command to run');
+        await session.waitFor((rows) => rows.includes(NEEDS_BASH_4), 'the notice');
+        await session.type('X');
+        await session.waitFor((rows) => !rows.includes(NEEDS_BASH_4) && promptLine(rows) === '$ echo haXlf', 'typing mid-line, the notice gone');
       });
     }
 
@@ -282,9 +364,13 @@ for (const shell of shells) {
         const line = promptRow(await session.screen());
 
         await session.type(HOTKEY);
-        await session.waitFor(inputOpen, 'the input');
-        await session.type(ESCAPE);
-        await session.waitFor((rows) => !inputOpen(rows) && promptRow(rows) === line, 'the line put back');
+        if (canCapture) {
+          await session.waitFor(inputOpen, 'the input');
+          await session.type(ESCAPE);
+          await session.waitFor((rows) => !inputOpen(rows) && promptRow(rows) === line, 'the line put back');
+        } else {
+          await session.waitFor((rows) => rows.includes(NEEDS_BASH_4) && promptRow(rows) === line, 'the notice, and the line');
+        }
         await session.type(enter.finish);
         await session.waitFor(enter.finished, 'the line to run as it was');
       });
