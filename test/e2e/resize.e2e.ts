@@ -46,8 +46,10 @@ afterEach(async () => {
 });
 
 describe('resizing during an answer', { timeout: 120_000 }, () => {
-  for (const pace of ['slowly', 'quickly'] as const) {
-    it(`keeps every paragraph exactly once and whole, narrowing then widening, ${pace} paced`, async () => {
+  // Slow replies: each cursor report takes 700 ms to come back, so with the stall below a reply to a
+  // frame on its way at the resize comes long after the frame (a loaded machine, a slow link).
+  for (const [pace, replyDelayMs] of [['slowly', 0], ['quickly', 0], ['quickly', 700]] as const) {
+    it(`keeps every paragraph exactly once and whole, narrowing then widening, ${pace} paced${replyDelayMs ? `, replies taking ${replyDelayMs} ms` : ''}`, async () => {
       stack = await startStack({ cols: 120, rows: 30 });
       const { driver } = stack;
       await driver.type('::');
@@ -55,6 +57,7 @@ describe('resizing during an answer', { timeout: 120_000 }, () => {
       await driver.type(`paced ${pace}`);
       await driver.press('enter');
       await driver.waitForText('Part 1.', { timeoutMs: 20_000 });
+      driver.replyDelayMs = replyDelayMs;
       if (pace === 'slowly') {
         await sleep(600);
       }

@@ -108,6 +108,8 @@ export class ScenarioDriver {
   private readonly tempDirs: string[] = [];
   private readonly exitCode: Promise<number>;
   private outDirPath: string | undefined;
+  /** How long the terminal's replies (cursor reports and the like) take to reach the application. */
+  replyDelayMs = 0;
   private rawOutput = '';
   private lastOutputAt = Date.now();
   private exited = false;
@@ -172,10 +174,18 @@ export class ScenarioDriver {
       this.lastOutputAt = Date.now();
       this.terminal.write(data);
     });
-    // Replies to the application's queries (cursor position, device attributes) go back to it.
+    // Replies to the application's queries (cursor position, device attributes) go back to it,
+    // after `replyDelayMs` (a slow link, or a busy terminal); in order, since every reply waits as long.
     this.terminal.onData((reply) => {
-      if (!this.exited) {
-        this.child.write(reply);
+      const send = (): void => {
+        if (!this.exited) {
+          this.child.write(reply);
+        }
+      };
+      if (this.replyDelayMs > 0) {
+        setTimeout(send, this.replyDelayMs);
+      } else {
+        send();
       }
     });
   }
