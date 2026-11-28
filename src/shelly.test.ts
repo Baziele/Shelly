@@ -20,7 +20,7 @@ import type { HostTerminal } from './terminal/host-terminal.js';
 process.env.SHELLY_BUSY_WATCHDOG_MS = '200';
 process.env.SHELLY_PROMPT_WAIT_MS = '300';
 process.env.SHELLY_LINE_SET_WAIT_MS = '200';
-const { Shelly, printableOnly, replayable, splitTerminalReplies, withoutDrawing } = await import('./shelly.js');
+const { Shelly, printableOnly, replayable, withoutDrawing } = await import('./shelly.js');
 
 const home = mkdtempSync(join(tmpdir(), 'shelly-unit-'));
 after(() => rmSync(home, { recursive: true, force: true }));
@@ -314,11 +314,27 @@ describe('Shelly hands the terminal back', () => {
     t.prompt();
     const claim = take(t.internals);
     t.internals.release(freshLine, claim);
+    // fish 4 asks while its line is set: where the cursor is, and the terminal's attributes.
+    t.shellOutput('\u001b[6n\u001b[c');
     t.type('a\u001b[12;5Rb\u001b[?62;22c');
     assert.equal(t.toShell.at(-1), '\u001b[12;5R\u001b[?62;22c', 'the replies, now: the shell is waiting for them');
     t.prompt();
     await sleep(20);
     assert.equal(t.toShell.at(-1), 'ab', 'the keys after the prompt');
+    await t.stop();
+  });
+
+  it('holds a key that looks like an answer (Ctrl+F3) when no query waits for one', async () => {
+    const t = setup();
+    t.prompt();
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
+    const before = t.toShell.length;
+    t.type('a\u001b[1;5Rb');
+    assert.equal(t.toShell.length, before, 'nothing sent at once');
+    t.prompt();
+    await sleep(20);
+    assert.equal(t.toShell.at(-1), 'ab', 'with the keys, then dropped as a key that acts');
     await t.stop();
   });
 
@@ -675,13 +691,5 @@ describe('replayable', () => {
 
   it('treats a paste that has not ended as typed text', () => {
     assert.equal(replayable('\u001b[200~rm -rf\n', { pastes: true }), 'rm -rf');
-  });
-});
-
-describe('splitTerminalReplies', () => {
-  it('takes the terminal\'s answers out of what was typed, and leaves keys (arrows, F-keys) alone', () => {
-    const { replies, keys } = splitTerminalReplies('x\u001b[3;1R\u001b[A\u001b]11;rgb:0000/0000/0000\u001b\\\u001b[15~\u001b[?1u\u001bP>|xterm(390)\u001b\\y');
-    assert.equal(replies, '\u001b[3;1R\u001b]11;rgb:0000/0000/0000\u001b\\\u001b[?1u\u001bP>|xterm(390)\u001b\\');
-    assert.equal(keys, 'x\u001b[A\u001b[15~y');
   });
 });

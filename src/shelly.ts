@@ -15,6 +15,7 @@ import { ShellMarkerParser, type ShellOutputSegment } from './shell/shell-marker
 import { ShellSession, type ShellSessionOptions } from './shell/shell-session.js';
 import type { CursorPosition } from './terminal/cursor-report.js';
 import type { HostTerminal, TerminalSize } from './terminal/host-terminal.js';
+import { TerminalReplies } from './terminal/terminal-replies.js';
 import type { InlineOverlay } from './ui/inline-overlay.js';
 
 /** Typed at an empty prompt, these hand the input line to Shelly. */
@@ -150,27 +151,6 @@ export const replayable = (text: string, { pastes }: { readonly pastes: boolean 
 };
 
 /**
- * The terminal's answers to the shell's queries (cursor position, device
- * attributes, modes, colours, keyboard flags), as opposed to keys. While
- * Shelly holds the user's keys, these still go to the shell at once: it is
- * waiting for them (fish 4 does while its line is set), and held, then
- * stripped as not text, they would never reach it.
- */
-const TERMINAL_REPLY = /\u001b\[\??\d+(?:;\d+)*R|\u001b\[[?>=][\d;]*c|\u001b\[\??[\d;]*\$y|\u001b\[\?\d*u|\u001b\[\d+n|\u001b\[\d+(?:;\d+)*t|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001bP[^\u001b]*\u001b\\/g;
-
-export const splitTerminalReplies = (data: string): { readonly replies: string; readonly keys: string } => {
-  if (!data.includes('\u001b')) {
-    return { replies: '', keys: data };
-  }
-  let replies = '';
-  const keys = data.replace(TERMINAL_REPLY, (reply) => {
-    replies += reply;
-    return '';
-  });
-  return { replies, keys };
-};
-
-/**
  * Where keystrokes go.
  * - shell:   straight to the shell, watching for a trigger.
  * - capturing: the rewrite hotkey was pressed and Shelly is taking the
@@ -226,6 +206,8 @@ export class Shelly {
   private overlayLoad: Promise<InlineOverlay | undefined> | undefined;
   private overlayUnavailable = false;
   private disposed = false;
+  /** The shell's queries on the terminal, so their answers can be told from keys. */
+  private readonly replies = new TerminalReplies();
   private mode: Mode = 'shell';
   private queuedInput = '';
   /** Shell output that arrives while Shelly owns the input line, replayed when it hands back. */
@@ -384,6 +366,10 @@ export class Shelly {
 
   private handleInput(data: string): void {
     this.eraseNoticeBelow();
+    if ((this.mode === 'shell' || this.mode === 'busy' || this.mode === 'overlay') && this.replies.waiting) {
+      // Answers go where they always do here; they settle their queries all the same.
+      this.replies.split(data);
+    }
     switch (this.mode) {
       case 'shell':
         this.handleShellInput(data);
@@ -413,9 +399,14 @@ export class Shelly {
     }
   }
 
-  /** The shell's answers from the terminal go to it now; returns the keys, which wait. */
+  /**
+   * The terminal's answers to the shell's queries go to it now: it is
+   * waiting for them, and held, then stripped as not text, they would never
+   * reach it. Returns the keys, which wait (a look-alike of an answer with
+   * no query waiting, Ctrl+F3 as `ESC[1;5R`, among them).
+   */
   private passReplies(data: string): string {
-    const { replies, keys } = splitTerminalReplies(data);
+    const { replies, keys } = this.replies.split(data);
     if (replies) {
       this.shell.write(replies);
     }
@@ -620,11 +611,11 @@ export class Shelly {
       // old prompt it still had to do (fish 3 after a resize), all drawn
       // relative to where it thought it was. The new prompt replaces them.
       wait.dropped += data;
-      this.host.write(withoutDrawing(data));
+      this.toTerminal(withoutDrawing(data));
       return;
     }
     if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
-      this.host.write(data);
+      this.toTerminal(data);
     } else {
       this.heldShellOutput.push(data);
     }
@@ -981,9 +972,9 @@ export class Shelly {
     // shell waits on, a mode it set) still goes through.
     const held = this.takeHeldShellOutput();
     if (cursor === 'fresh-line' && this.lineEditor?.isAtPrompt) {
-      this.host.write(withoutDrawing(held));
+      this.toTerminal(withoutDrawing(held));
     } else if (held) {
-      this.host.write(cursor === 'fresh-line' && !held.endsWith('\n') ? `${held}\r\n` : held);
+      this.toTerminal(cursor === 'fresh-line' && !held.endsWith('\n') ? `${held}\r\n` : held);
     }
 
     const finish = (): void => {
@@ -1073,8 +1064,13 @@ export class Shelly {
   }
 
   private flushHeldShellOutput(): void {
-    const output = this.takeHeldShellOutput();
+    this.toTerminal(this.takeHeldShellOutput());
+  }
+
+  /** The shell's output, on the terminal at last: any query in it now waits for an answer. */
+  private toTerminal(output: string): void {
     if (output) {
+      this.replies.asked(output);
       this.host.write(output);
     }
   }
