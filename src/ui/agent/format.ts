@@ -6,7 +6,7 @@ import type {
   ToolCall,
   ToolContent,
 } from '../../protocol/schema.js';
-import { truncateStart } from '../../render/text-width.js';
+import { displayWidth, truncateEnd, truncateStart } from '../../render/text-width.js';
 import { diffExcerpt, diffOf, diffStats, type DiffLine } from './diff.js';
 import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, type Line, type Segment } from './lines.js';
 
@@ -361,12 +361,55 @@ export const relativeTime = (at: number, now: number): string => {
   return new Date(at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: days > 300 ? 'numeric' : undefined });
 };
 
+/** A key hint on the status row. */
+export interface StatusHint {
+  readonly text: string;
+  /** Used before the hint is dropped: `esc` for `esc background`. */
+  readonly short?: string;
+  /** Lower stays longer: when room runs out, the highest is shortened, then dropped. */
+  readonly priority: number;
+}
+
 export interface StatusLineView {
   readonly phase: string;
   readonly elapsedMs: number;
-  /** Key hints, longest first; the first that fits is shown. */
-  readonly hints: readonly string[];
+  /** In the order they are shown. */
+  readonly hints: readonly StatusHint[];
 }
+
+const HINT_SEPARATOR = ' · ';
+/** Cells kept free at the right edge: an ambiguous-width glyph (←, →, ·) may take two in some terminals. */
+const HINT_MARGIN = 1;
+/** A hint shorter than this once ellipsized is not worth showing. */
+const MIN_HINT_CELLS = 6;
+
+/**
+ * The hints that fit in `room` cells: the least important shortened first,
+ * then dropped, and the last one left ellipsized if it still does not fit.
+ */
+export const fitHints = (hints: readonly StatusHint[], room: number): string => {
+  let shown = hints.map((hint) => ({ ...hint, current: hint.text }));
+  const text = (): string => shown.map((hint) => hint.current).join(HINT_SEPARATOR);
+  // The least important first: shortened, then dropped, before the next is touched.
+  for (const hint of [...shown].sort((a, b) => b.priority - a.priority)) {
+    if (displayWidth(text()) <= room) {
+      return text();
+    }
+    if (hint.short !== undefined) {
+      hint.current = hint.short;
+      if (displayWidth(text()) <= room) {
+        return text();
+      }
+    }
+    if (shown.length > 1) {
+      shown = shown.filter((candidate) => candidate !== hint);
+    }
+  }
+  if (displayWidth(text()) <= room) {
+    return text();
+  }
+  return room >= MIN_HINT_CELLS ? truncateEnd(text(), room) : '';
+};
 
 /** The live status row: spinner, phase and time on the left, key hints on the right when they fit. */
 export const formatStatus = (status: StatusLineView, context: FormatContext): Line => {
@@ -376,8 +419,8 @@ export const formatStatus = (status: StatusLineView, context: FormatContext): Li
     seg(status.phase),
     seg(` · ${formatDuration(status.elapsedMs)}`, 'muted'),
   ];
-  const hints = status.hints.find((candidate) => lineWidth(left) + 2 + lineWidth([seg(candidate)]) <= context.width);
-  return alignRight(left, hints ? [seg(hints, 'muted')] : [], context.width);
+  const hints = fitHints(status.hints, context.width - lineWidth(left) - 2 - HINT_MARGIN);
+  return alignRight(left, hints ? [seg(hints, 'muted'), seg(' '.repeat(HINT_MARGIN))] : [], context.width);
 };
 
 export interface TurnOutcome {

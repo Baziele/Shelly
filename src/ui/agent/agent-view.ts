@@ -886,8 +886,14 @@ export class AgentView {
         phase: phaseText(phase, this.agentName, context),
         elapsedMs: this.now() - Math.min(startedAt, this.now()),
         hints: phase.type === 'waiting'
-          ? ['←→ select · enter confirm · esc reject', 'enter confirm · esc reject', 'enter · esc']
-          : phase.type === 'stopping' ? [] : ['esc background · ^c stop', 'esc · ^c'],
+          ? [
+            { text: '←→ select', priority: 3 },
+            { text: 'enter confirm', short: 'enter', priority: 1 },
+            { text: 'esc reject', short: 'esc', priority: 2 },
+          ]
+          : phase.type === 'stopping'
+            ? []
+            : [{ text: 'esc background', short: 'esc', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
       }, context));
     }
     return lines;

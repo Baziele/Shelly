@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { displayWidth } from '../../render/text-width.js';
 import type { ToolCall } from '../../protocol/schema.js';
 import { diffExcerpt, diffLines, diffStats } from './diff.js';
 import {
   formatDuration,
   formatPermission,
   formatPermissionOutcome,
+  fitHints,
   formatStatus,
   formatSummary,
   formatTool,
@@ -126,12 +128,40 @@ describe('permission prompts', () => {
 });
 
 describe('status and summary', () => {
-  it('right-aligns the hints that fit, dropping them when none do', () => {
-    const status = { phase: 'Thinking', elapsedMs: 3200, hints: ['esc background · ^c stop', 'esc · ^c'] };
-    const wide = lineText(formatStatus(status, context));
-    assert.ok(wide.startsWith('⠋ Thinking · 3s') && wide.endsWith('esc background · ^c stop') && wide.length === 60);
-    assert.ok(lineText(formatStatus(status, { ...context, width: 28 })).endsWith('esc · ^c'));
-    assert.equal(lineText(formatStatus(status, { ...context, width: 18 })), '⠋ Thinking · 3s');
+  it('right-aligns the hints that fit, shortening and dropping the least important first', () => {
+    const running = {
+      phase: 'Thinking',
+      elapsedMs: 3200,
+      hints: [{ text: 'esc background', short: 'esc', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
+    };
+    const wide = lineText(formatStatus(running, context));
+    assert.ok(wide.startsWith('⠋ Thinking · 3s') && wide.endsWith('esc background · ^c stop ') && wide.length === 60, wide);
+    assert.ok(lineText(formatStatus(running, { ...context, width: 32 })).endsWith(' esc · ^c stop '));
+    assert.equal(lineText(formatStatus(running, { ...context, width: 18 })), '⠋ Thinking · 3s');
+
+    const waiting = {
+      phase: 'Waiting for you',
+      elapsedMs: 0,
+      hints: [
+        { text: '←→ select', priority: 3 },
+        { text: 'enter confirm', short: 'enter', priority: 1 },
+        { text: 'esc reject', short: 'esc', priority: 2 },
+      ],
+    };
+    const at = (width: number) => lineText(formatStatus(waiting, { ...context, width }));
+    assert.ok(at(100).endsWith('←→ select · enter confirm · esc reject '), at(100));
+    assert.ok(at(80).endsWith('←→ select · enter confirm · esc reject '), at(80));
+    assert.ok(at(44).endsWith('enter confirm · esc '), at(44));
+    for (const width of [100, 80, 60, 44, 36, 30, 24]) {
+      const line = at(width);
+      assert.ok(displayWidth(line) <= width, `fits ${width}: ${line}`);
+      assert.ok(!/(·|select|confirm|reject) ?$/.test(line.trimEnd()) || /(select|confirm|reject|enter|esc)$/.test(line.trimEnd()), `no cut word at ${width}: ${line}`);
+    }
+  });
+
+  it('ellipsizes the last hint rather than cutting it', () => {
+    assert.equal(fitHints([{ text: 'press enter to confirm', priority: 1 }], 12), 'press enter…');
+    assert.equal(fitHints([{ text: 'press enter to confirm', priority: 1 }], 4), '');
   });
 
   it('says how each turn ended', () => {
