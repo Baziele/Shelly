@@ -2,15 +2,16 @@ import { BoxRenderable } from '@opentui/core';
 import { encodeRow } from '../../render/inline-painter.js';
 import type { PaintRow } from '../../render/live-region.js';
 import type { ColorDepth } from '../../render/sgr.js';
-import { HeadlessRenderer } from '../headless-renderer.js';
+import { HeadlessRenderer, maxRendererRows } from '../headless-renderer.js';
 import { seg } from './lines.js';
 import { createMarkdownStyle, MessageView } from './message-view.js';
 import { lineToPaintRow } from './paint-line.js';
 
 const FIRST_BUFFER_ROWS = 200;
 /**
- * The tallest layout tried. Past it (a 20,000-row answer), the rows that fit
- * are kept with a note saying how many were left out, rather than nothing.
+ * The tallest layout tried, before OpenTUI's own cap (a million cells: 12,500
+ * rows at 80 columns). Past either, the rows that fit are kept with a note
+ * saying how many were left out, rather than nothing.
  */
 export const MAX_BUFFER_ROWS = 20_000;
 
@@ -26,7 +27,9 @@ export interface MarkdownLayout {
  * output printed statically (history, fast-mode answers) rather than
  * streamed. `totalRows` says how tall the whole document is.
  */
-export const layoutMarkdown = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS): Promise<MarkdownLayout> => {
+export const layoutMarkdown = async (markdown: string, width: number, requestedMaxRows = MAX_BUFFER_ROWS): Promise<MarkdownLayout> => {
+  // OpenTUI caps a renderer's cells: at 100 columns, 10,000 rows.
+  const maxRows = Math.min(requestedMaxRows, maxRendererRows(width));
   let bufferRows = Math.min(FIRST_BUFFER_ROWS, maxRows);
   const headless = HeadlessRenderer.create({ width, height: bufferRows });
   try {

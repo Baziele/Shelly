@@ -43,4 +43,13 @@ describe('renderMarkdownRows', { timeout: 60_000 }, () => {
     assert.equal(underlined(')'), false, 'the closing parenthesis is plain');
     assert.equal(underlined('agentclientprotocol'), false, 'the URL is muted, not underlined');
   });
+
+  it('keeps a 12,000-line answer to what OpenTUI can lay out, with a note, instead of throwing', async () => {
+    const lines = Array.from({ length: 12_000 }, (_, index) => `line ${index + 1}`).join('\n\n');
+    // At 100 columns OpenTUI allows 10,000 rows (a million cells).
+    const rows = (await renderMarkdownRows(lines, 100)).map(rowText);
+    assert.ok(rows.length <= 10_001, `${rows.length} rows`);
+    assert.equal(rows[0], 'line 1');
+    assert.match(rows.at(-1)!, /^… \(\d+ more lines not shown\)$/);
+  });
 });
