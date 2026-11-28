@@ -14,8 +14,7 @@ import type { DaemonLink } from './daemon-link.js';
 
 /** The line the shell had before the input opened, when the rewrite hotkey took it. */
 export interface Rewrite {
-  /** Undefined when the shell could not hand it over (bash 3.2): it is still on the shell's line. */
-  readonly captured: CapturedLine | undefined;
+  readonly captured: CapturedLine;
 }
 
 /** What the input was opened for. */

@@ -100,7 +100,7 @@ and commands typed with a leading space are never recorded.
 Fast mode reads the line being edited and leaves its answer on the shell's
 own input line, ready to edit or run, never run for the user
 (`src/shell/line-editor.ts`). Shelly sends the shell private keys no terminal
-sends (F12 down to F8 with every modifier held, the one kind of key that
+sends (F12 down to F4 with every modifier held, the one kind of key that
 zle, readline and fish 4 can all bind), and the hooks bind them in every
 keymap (emacs and vi):
 
@@ -125,6 +125,18 @@ and has it show a notice, rather than opening Shelly's input.
 |---|---|---|
 | zsh, fish 4, bash 4+ | yes | set exactly, multi-line included |
 | bash 3.2 (macOS) | no (no `READLINE_LINE`) | clear the line and type: a bracketed paste if the shell turned it on, else one line, control characters removed |
+
+In bash 3.2 the rewrite hotkey does not open the input: without the line there
+is nothing to rewrite, since fast mode would never see what the user typed.
+Shelly says so below the line (bash 4+ reads it; `__` on an empty line still
+opens fast mode) and leaves the line exactly as it was. bash 3.2 cannot show
+that notice itself (its `bind -x` runs nothing for a key as long as Shelly's),
+so Shelly draws it: keys bound to readline's own cursor moves take the cursor
+to the line's end (remembering where it was in readline's mark), Shelly asks
+the terminal where that is and draws the notice on the rows below, and the
+cursor goes back to the mark. The shell never knows the notice is there, so
+nothing needs redrawing; Shelly erases it before the next key reaches the
+shell, as zsh's `zle -M` would. The cost is the user's own mark.
 
 Shelly takes these keys out of what the user types at the prompt, and only
 sends them while the shell is at its prompt (after `cwd`, before `exec`,
