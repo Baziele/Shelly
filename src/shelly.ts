@@ -531,6 +531,11 @@ export class Shelly {
     const editor = this.lineEditor!;
     this.mode = 'capturing';
     this.queuedInput = remainder;
+    // The UI loads only once the line is captured (openOverlay), never
+    // before or meanwhile: the capture is of the shell as it is when the key
+    // is pressed, and loading keeps the event loop busy, so the capture's
+    // wait for the shell's answer (or, below, bash 3.2's cursor queries)
+    // could time out with the answer waiting to be read.
     // bash 3.2 can never hand its line over. Without it there is nothing to
     // rewrite (fast mode would not see what the user typed), so the input
     // does not open there: the line stays as it is, with a notice below.
