@@ -28,4 +28,19 @@ describe('renderMarkdownRows', { timeout: 60_000 }, () => {
     assert.match(rows.at(-1)!, /^… \(\d+ more lines not shown\)$/);
     assert.ok(rows.length >= 50);
   });
+
+  it('underlines a link\'s label only: the parentheses around the URL stay plain', async () => {
+    const rows = await renderMarkdownRows('See [the ACP spec](https://agentclientprotocol.com) for more.', 80);
+    const spans = rows.flatMap((row) => [...row]);
+    const underlined = (char: string) => {
+      const span = spans.find((candidate) => candidate.text.includes(char));
+      assert.ok(span, `no span holds ${char}: ${JSON.stringify(spans.map((candidate) => candidate.text))}`);
+      return (span.style.attributes & 8) !== 0;
+    };
+    assert.equal(rows.map(rowText).join(' '), 'See the ACP spec (https://agentclientprotocol.com) for more.');
+    assert.equal(underlined('ACP'), true, 'the label is underlined');
+    assert.equal(underlined('('), false, 'the opening parenthesis is plain');
+    assert.equal(underlined(')'), false, 'the closing parenthesis is plain');
+    assert.equal(underlined('agentclientprotocol'), false, 'the URL is muted, not underlined');
+  });
 });
