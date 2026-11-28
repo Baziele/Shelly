@@ -149,7 +149,9 @@ describe('ThreadService', () => {
     await withThreads((threads) =>
       Effect.gen(function* () {
         const thread = yield* createAttached(threads);
-        const events = Array.from(yield* Stream.runCollect(threads.prompt(promptInput(thread.id, 'why did the build fail?'))));
+        const events = Array.from(yield* Stream.runCollect(threads.prompt({ ...promptInput(thread.id, 'why did the build fail?'), clientRequestId: 'req-1' })));
+        const [started] = events;
+        assert.equal(started?.type === 'turn.started' ? started.clientRequestId : null, 'req-1', 'the request\'s id, echoed');
         assert.deepEqual(shape(events), [
           'turn.started',
           'mode.changed',

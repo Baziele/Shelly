@@ -1,4 +1,6 @@
 /* The interactive `shelly`: the user's shell in a pty, with Shelly around it. Loaded by index.ts. */
+import { clientLogPath, logClientError } from './client/client-log.js';
+import { crashGuard } from './crash-guard.js';
 import { defaultShell } from './shell/shell-session.js';
 import { Shelly } from './shelly.js';
 import { HostTerminal } from './terminal/host-terminal.js';
@@ -10,16 +12,21 @@ if (!host.isInteractive) {
   process.exit(1);
 }
 
-// Whatever goes wrong, never leave the user's terminal stuck in raw mode.
-const crash = (error: unknown): never => {
-  host.stop();
-  process.stderr.write(`\r\nshelly crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\r\n`);
-  process.exit(1);
-};
-process.on('uncaughtException', crash);
-process.on('unhandledRejection', crash);
+let shelly: Shelly | undefined;
 
-const shelly = new Shelly({
+// Whatever goes wrong, never leave the user's terminal stuck in raw mode (see crash-guard.ts).
+const guard = crashGuard({
+  restoreTerminal: () => host.stop(),
+  killShell: () => shelly?.terminate(),
+  log: (what, error) => logClientError(what, error),
+  logPath: clientLogPath(),
+  write: (text) => process.stderr.write(text),
+  exit: (code) => process.exit(code),
+});
+process.on('uncaughtException', guard.uncaughtException);
+process.on('unhandledRejection', guard.unhandledRejection);
+
+shelly = new Shelly({
   host,
   shell: defaultShell(),
   cwd: process.cwd(),
@@ -27,7 +34,7 @@ const shelly = new Shelly({
 });
 
 for (const signal of ['SIGHUP', 'SIGTERM'] as const) {
-  process.on(signal, () => shelly.terminate());
+  process.on(signal, () => shelly?.terminate());
 }
 
 // Exit with the shell. run() has already said goodbye to the daemon (bounded

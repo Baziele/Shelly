@@ -109,6 +109,8 @@ export const Prompt = Rpc.make('thread.prompt', {
     clientId: Schema.String,
     text: Schema.String,
     context: PromptContext,
+    /** Made by the client for this one request; echoed in the turn's `turn.started` (see TurnStarted). */
+    clientRequestId: Schema.optionalKey(Schema.String),
   },
   success: ThreadEvent,
   error: PromptError,

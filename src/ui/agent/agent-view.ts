@@ -147,6 +147,9 @@ export class AgentView {
   private state: State = 'created';
   /** Runs once start() has: what a finish() waiting for it to begin needs. */
   private onStart: (() => void) | undefined;
+  /** Esc or Ctrl-C typed before the view started (the cursor report on its way): acted on at start. */
+  private early: 'cancel' | 'background' | undefined;
+  private started = false;
   private startedAt = 0;
   private bufferRows: number;
   private frameTimer: NodeJS.Timeout | undefined;
@@ -212,11 +215,24 @@ export class AgentView {
       return;
     }
     this.state = 'running';
+    this.started = true;
     this.startedAt = this.now();
     this.region.start(anchor);
     this.spinnerTimer = this.timers.setInterval(() => this.spin(), SPINNER_INTERVAL_MS);
     this.schedule();
+    const early = this.early;
+    this.early = undefined;
+    if (early === 'cancel') {
+      this.stop();
+    } else if (early === 'background') {
+      this.background();
+    }
     this.onStart?.();
+  }
+
+  /** Whether the view has begun drawing (and so draws its own end). */
+  get hasStarted(): boolean {
+    return this.started;
   }
 
   apply(event: ThreadEvent): void {
@@ -251,6 +267,9 @@ export class AgentView {
    *   its first moments on screen.
    */
   handleInput(data: string): boolean {
+    if (this.state === 'created') {
+      return this.handleEarlyInput(data);
+    }
     if (this.state !== 'running' || this.model.ended) {
       return false;
     }
@@ -281,6 +300,20 @@ export class AgentView {
       return false;
     }
     return this.handleKey(keys[0]!);
+  }
+
+  /** Before the first frame: Ctrl-C (stop) and a lone Esc (background) wait for it; everything else is not the view's. */
+  private handleEarlyInput(data: string): boolean {
+    const { text, pasted } = this.pastes.filter(data);
+    if (text.includes('\u0003')) {
+      this.early = 'cancel';
+      return true;
+    }
+    if (!pasted && text === '\u001b') {
+      this.early ??= 'background';
+      return true;
+    }
+    return false;
   }
 
   private handleKey(key: Key): boolean {
@@ -339,7 +372,8 @@ export class AgentView {
       ]);
       this.onStart = undefined;
       if ((this.state as State) === 'created') {
-        this.state = 'done';
+        // Never drawn: nothing to commit, but the renderer still goes.
+        this.destroy();
         return;
       }
     }

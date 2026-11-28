@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { after, describe, it } from 'node:test';
 import type { DaemonLink } from './client/daemon-link.js';
-import type { ReleaseOptions } from './client/flow-host.js';
+import type { OpenInput, ReleaseOptions } from './client/flow-host.js';
 import type { ShellSessionOptions } from './shell/shell-session.js';
 import { LINE_KEYS } from './shell/line-editor.js';
+import { until } from '../test/support/shelly-rig.js';
 import type { HostTerminal } from './terminal/host-terminal.js';
 
 /*
@@ -18,17 +19,31 @@ import type { HostTerminal } from './terminal/host-terminal.js';
 
 process.env.SHELLY_BUSY_WATCHDOG_MS = '200';
 process.env.SHELLY_PROMPT_WAIT_MS = '300';
-const { Shelly, printableOnly, withoutDrawing } = await import('./shelly.js');
+process.env.SHELLY_LINE_SET_WAIT_MS = '200';
+const { Shelly, printableOnly, replayable, withoutDrawing } = await import('./shelly.js');
 
 const home = mkdtempSync(join(tmpdir(), 'shelly-unit-'));
 after(() => rmSync(home, { recursive: true, force: true }));
 
 interface Internals {
   mode: string;
+  lineEditor: { replace(text: string): Promise<void>; restore(line: { buffer: string; cursor: number }): Promise<void> };
+  openOverlay(trigger: string, remainder: string, rewrite?: OpenInput['rewrite']): Promise<void>;
   overlayLoad: Promise<unknown> | undefined;
-  claim(onKeys: (data: string) => boolean): void;
-  release(options: ReleaseOptions): void;
+  open: OpenInput | undefined;
+  claim(open: OpenInput, onKeys: (data: string) => boolean): number | undefined;
+  release(options: ReleaseOptions, claim?: number): void;
 }
+
+/** As a flow does: from an open input (no overlay here, so a stand-in for one), take the terminal. */
+const take = (internals: Internals, onKeys: (data: string) => boolean = () => false): number => {
+  const open: OpenInput = { trigger: '::', mode: 'agent', rewrite: undefined };
+  internals.mode = 'overlay';
+  internals.open = open;
+  const claim = internals.claim(open, onKeys);
+  assert.ok(claim !== undefined, 'the claim was taken');
+  return claim;
+};
 
 interface SetupOptions {
   /** Where the terminal says the cursor is, asked each time. */
@@ -233,7 +248,7 @@ describe('Shelly hands the terminal back', () => {
   it('gives the prompt back on its own when busy with nothing drawing (an error lost on the way)', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    take(t.internals);
     t.type('ls');
     assert.equal(t.internals.mode, 'busy');
     await sleep(350);
@@ -249,9 +264,9 @@ describe('Shelly hands the terminal back', () => {
   it('carries on after the prompt wait, replaying only printable text', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    const claim = take(t.internals);
     t.type('ls\u001b[A -la\r');
-    t.internals.release(freshLine);
+    t.internals.release(freshLine, claim);
     assert.equal(t.internals.mode, 'returning');
     // The shell never reports its prompt.
     await sleep(400);
@@ -264,9 +279,9 @@ describe('Shelly hands the terminal back', () => {
   it('drops what the idle shell drew meanwhile, and what it writes before the new prompt, but not its queries', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    const claim = take(t.internals);
     t.shellOutput('\u001b[2A$ REPAINT\u001b[?2004h');
-    t.internals.release(freshLine);
+    t.internals.release(freshLine, claim);
     // fish 4 asks where the cursor is and waits for the answer: the question must reach the terminal.
     t.shellOutput('\r\nLATE-REPAINT\u001b[6n');
     t.prompt();
@@ -282,8 +297,8 @@ describe('Shelly hands the terminal back', () => {
   it('sends Ctrl-C on at once while the prompt comes back, never later', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
-    t.internals.release(freshLine);
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
     t.type('\u0003x\u0004');
     assert.equal(t.toShell.at(-1), '\u0003', 'Ctrl-C at once');
     t.prompt();
@@ -294,14 +309,70 @@ describe('Shelly hands the terminal back', () => {
     await t.stop();
   });
 
+  it('passes the terminal\'s answers to the shell at once while it gets its line back, and holds the keys', async () => {
+    const t = setup();
+    t.prompt();
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
+    // fish 4 asks while its line is set: where the cursor is, and the terminal's attributes.
+    t.shellOutput('\u001b[6n\u001b[c');
+    t.type('a\u001b[12;5Rb\u001b[?62;22c');
+    assert.equal(t.toShell.at(-1), '\u001b[12;5R\u001b[?62;22c', 'the replies, now: the shell is waiting for them');
+    t.prompt();
+    await sleep(20);
+    assert.equal(t.toShell.at(-1), 'ab', 'the keys after the prompt');
+    await t.stop();
+  });
+
+  it('passes the answer to a query the shell asked just before Shelly took the terminal, while busy', async () => {
+    const t = setup();
+    t.prompt();
+    t.shellOutput('\u001b[6n');
+    let keys = '';
+    take(t.internals, (data) => {
+      keys += data;
+      return true;
+    });
+    assert.equal(t.internals.mode, 'busy');
+    t.type('\u001b[5;3Rq');
+    assert.equal(t.toShell.at(-1), '\u001b[5;3R', 'to the shell, at once');
+    assert.equal(keys, 'q', 'only the key to what Shelly draws');
+    await t.stop();
+  });
+
+  it('passes the answer to the shell while the input is open, not to the input as keys', async () => {
+    const t = setup();
+    t.prompt();
+    t.shellOutput('\u001b[c');
+    t.internals.mode = 'overlay';
+    t.type('\u001b[?62;22c');
+    assert.equal(t.toShell.at(-1), '\u001b[?62;22c');
+    t.internals.mode = 'shell';
+    await t.stop();
+  });
+
+  it('holds a key that looks like an answer (Ctrl+F3) when no query waits for one', async () => {
+    const t = setup();
+    t.prompt();
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
+    const before = t.toShell.length;
+    t.type('a\u001b[1;5Rb');
+    assert.equal(t.toShell.length, before, 'nothing sent at once');
+    t.prompt();
+    await sleep(20);
+    assert.equal(t.toShell.at(-1), 'ab', 'with the keys, then dropped as a key that acts');
+    await t.stop();
+  });
+
   it('resizes the shell only once it has its new prompt, so it never repaints under Shelly\'s output', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
+    const claim = take(t.internals);
     t.resize({ cols: 70, rows: 20 });
     t.resize({ cols: 84, rows: 22 });
     assert.deepEqual(t.resizes, [], 'not while Shelly draws');
-    t.internals.release(freshLine);
+    t.internals.release(freshLine, claim);
     assert.deepEqual(t.resizes, [], 'nor while the prompt comes back');
     t.prompt();
     await sleep(20);
@@ -314,10 +385,126 @@ describe('Shelly hands the terminal back', () => {
   it('ignores a second release, so an error path cannot draw another prompt', async () => {
     const t = setup();
     t.prompt();
-    t.internals.claim(() => false);
-    t.internals.release(freshLine);
-    t.internals.release(freshLine);
+    const claim = take(t.internals);
+    t.internals.release(freshLine, claim);
+    t.internals.release(freshLine, claim);
     assert.equal(t.toShell.filter((data) => data === '\r').length, 1);
+    await t.stop();
+  });
+});
+
+const PASTE = '\u001b[200~cd /tmp\nls -la\u001b[201~';
+const asBefore: ReleaseOptions = { cursor: 'prompt', line: { type: 'as-before' } };
+const setLine: ReleaseOptions = { cursor: 'prompt', line: { type: 'set', text: 'git status' } };
+
+describe('a paste typed while Shelly had the terminal', () => {
+  /** The shell at its prompt, with `modes` in its prompt's output (zsh turns bracketed paste on there). */
+  const atPrompt = (features: string, modes: string) => {
+    const t = setup();
+    t.shellOutput(t.marker('line-editor', features));
+    t.shellOutput(`${t.marker('cwd', encodeURIComponent(home))}${modes}$ `);
+    return t;
+  };
+
+  it('bash 3.2, without bracketed paste: one line of text, no markers, no newline to run it', async () => {
+    const t = atPrompt('clear,jump', '');
+    const claim = take(t.internals);
+    t.type(PASTE);
+    t.internals.release(asBefore, claim);
+    assert.equal(t.internals.mode, 'shell');
+    const sent = t.toShell.join('');
+    assert.ok(sent.includes('cd /tmp ls -la'), JSON.stringify(t.toShell));
+    assert.ok(!/[\r\n]|\u001b\[20[01]~/.test(sent), JSON.stringify(t.toShell));
+    await t.stop();
+  });
+
+  it('zsh, with bracketed paste on: the paste whole', async () => {
+    const t = atPrompt('capture,set,notice,query', '\u001b[?2004h');
+    const claim = take(t.internals);
+    t.type(PASTE);
+    t.internals.release(asBefore, claim);
+    assert.equal(t.toShell.at(-1), PASTE);
+    await t.stop();
+  });
+
+  it('a shell that turned bracketed paste off again: one line of text', async () => {
+    const t = atPrompt('capture,set,notice,query', '\u001b[?2004h');
+    t.shellOutput('\u001b[?2004l');
+    const claim = take(t.internals);
+    t.type(PASTE);
+    t.internals.release(asBefore, claim);
+    assert.equal(t.toShell.at(-1), 'cd /tmp ls -la');
+    await t.stop();
+  });
+});
+
+describe('keys typed while Shelly sets the shell\'s line', () => {
+  const atZshPrompt = () => {
+    const t = setup();
+    t.shellOutput(t.marker('line-editor', 'capture,set,notice,query'));
+    t.shellOutput(`${t.marker('cwd', encodeURIComponent(home))}\u001b[?2004h$ `);
+    return t;
+  };
+  const sent = (t: ReturnType<typeof setup>) => t.toShell.join('');
+
+  it('a set that never finishes: the keys go on after a while, as text, never Enter', async () => {
+    const t = atZshPrompt();
+    t.internals.lineEditor.replace = () => new Promise(() => undefined);
+    const claim = take(t.internals);
+    t.internals.release(setLine, claim);
+    assert.equal(t.internals.mode, 'returning');
+    t.type('ab\r');
+    assert.ok(!sent(t).includes('ab'), 'not under the set');
+    await until(() => t.internals.mode === 'shell', 'the shell back', 2000);
+    assert.ok(sent(t).endsWith('ab'), JSON.stringify(t.toShell));
+    await t.stop();
+  });
+
+  it('a set that fails: a bell, and a paste typed meanwhile as text only', async () => {
+    const t = atZshPrompt();
+    t.internals.lineEditor.replace = () => sleep(30).then(() => Promise.reject(new Error('no answer')));
+    const claim = take(t.internals);
+    t.internals.release(setLine, claim);
+    t.type(PASTE);
+    await until(() => t.internals.mode === 'shell', 'the shell back');
+    assert.ok(t.written().includes(BELL));
+    assert.equal(t.toShell.at(-1), 'cd /tmp ls -la');
+    await t.stop();
+  });
+
+  it('a set that finishes after Shelly shut down: nothing more reaches the shell', async () => {
+    const t = atZshPrompt();
+    let finish: () => void = () => undefined;
+    t.internals.lineEditor.replace = () => new Promise((resolve) => (finish = resolve));
+    const claim = take(t.internals);
+    t.internals.release(setLine, claim);
+    t.type('rm -rf x');
+    await t.stop();
+    finish();
+    await sleep(20);
+    assert.ok(!sent(t).includes('rm -rf x'), JSON.stringify(t.toShell));
+  });
+
+  it('a rewrite whose input cannot open: keys typed while its line goes back wait for it', async () => {
+    const t = setup({ cursor: () => Promise.reject(new Error('no answer')) });
+    t.shellOutput(t.marker('line-editor', 'capture,set,notice,query'));
+    t.prompt();
+    let restored: () => void = () => undefined;
+    let restoring = false;
+    t.internals.lineEditor.restore = () => {
+      restoring = true;
+      return new Promise((resolve) => (restored = resolve));
+    };
+    const opening = t.internals.openOverlay('__', 'typed', { captured: { buffer: 'echo hi', cursor: 7 } });
+    await until(() => restoring, 'the line going back');
+    await opening;
+    assert.equal(t.internals.mode, 'returning');
+    t.type('x');
+    assert.ok(!sent(t).includes('x'), JSON.stringify(t.toShell));
+    restored();
+    await until(() => t.internals.mode === 'shell', 'the shell back');
+    await sleep(5);
+    assert.ok(sent(t).endsWith('typedx'), JSON.stringify(t.toShell));
     await t.stop();
   });
 });
@@ -385,6 +572,20 @@ describe('Ctrl+] in bash 3.2, which cannot hand its line over', () => {
     await t.stop();
   });
 
+  it('drops an Enter typed before the notice shows, and passes one typed after it to the shell', async () => {
+    const t = bash32([{ row: 5, col: 10 }, { row: 5, col: 12 }]);
+    t.type(`${HOTKEY}a\r`);
+    for (let i = 0; i < 50 && !t.events.some((event) => event.includes(NOTICE)); i++) {
+      await sleep(2);
+    }
+    t.type('\r');
+    await sleep(300);
+    const sent = t.toShell.join('');
+    assert.equal(sent.split('\r').length - 1, 1, `one Enter, the one typed after the notice: ${JSON.stringify(t.toShell)}`);
+    assert.ok(sent.indexOf('a') < sent.indexOf('\r'), 'the text typed before it, as text, first');
+    await t.stop();
+  });
+
   it('erases the notice before shell output that comes while it shows', async () => {
     const t = bash32([{ row: 5, col: 10 }, { row: 5, col: 12 }]);
     t.type(HOTKEY);
@@ -420,7 +621,8 @@ describe('Ctrl+] in bash 3.2, which cannot hand its line over', () => {
   it('rings the bell, and puts the cursor back, when the line\'s end cannot be asked for', async () => {
     const t = bash32([{ row: 5, col: 10 }]);
     t.type(HOTKEY);
-    await sleep(250);
+    // Retries and the move back take a while, longer on a loaded machine: wait for the outcome itself.
+    await until(() => t.written().includes(BELL), 'the bell', 5000);
     assert.ok(t.written().includes(BELL));
     assert.ok(!t.written().includes(NOTICE));
     assert.ok(t.toShell.includes(LINE_KEYS.back), 'the cursor goes back');
@@ -430,7 +632,8 @@ describe('Ctrl+] in bash 3.2, which cannot hand its line over', () => {
   it('gives up on a shell too slow to move the cursor rather than draw in the wrong row', async () => {
     const t = bash32([{ row: 5, col: 10 }, { row: 5, col: 10 }], { answer: () => undefined });
     t.type(HOTKEY);
-    await sleep(700);
+    // Retries and the move back take a while, longer on a loaded machine: wait for the outcome itself.
+    await until(() => t.written().includes(BELL), 'the bell', 5000);
     assert.ok(t.written().includes(BELL));
     assert.ok(!t.written().includes(NOTICE));
     assert.ok(t.toShell.includes(LINE_KEYS.back));
@@ -460,7 +663,8 @@ describe('Ctrl+] in bash 3.2, which cannot hand its line over', () => {
     };
     const t = bash32([{ row: 5, col: 10 }, busy, busy, busy, busy]);
     t.type(HOTKEY);
-    await sleep(400);
+    // Retries and the move back take a while, longer on a loaded machine: wait for the outcome itself.
+    await until(() => t.written().includes(BELL), 'the bell', 5000);
     assert.ok(t.written().includes(BELL));
     assert.ok(!t.written().includes(NOTICE));
     await t.stop();
@@ -469,7 +673,8 @@ describe('Ctrl+] in bash 3.2, which cannot hand its line over', () => {
   it('does not trust an end before where the cursor was', async () => {
     const t = bash32([{ row: 5, col: 10 }, { row: 5, col: 4 }]);
     t.type(HOTKEY);
-    await sleep(250);
+    // Retries and the move back take a while, longer on a loaded machine: wait for the outcome itself.
+    await until(() => t.written().includes(BELL), 'the bell', 5000);
     assert.ok(t.written().includes(BELL));
     assert.ok(!t.written().includes(NOTICE));
     assert.ok(t.toShell.includes(LINE_KEYS.back));
@@ -499,5 +704,19 @@ describe('withoutDrawing', () => {
 describe('printableOnly', () => {
   it('keeps text, drops keys and escape sequences', () => {
     assert.equal(printableOnly('git st\u001b[Datus\r\u0003\u001bOA ok'), 'git status ok');
+  });
+});
+
+describe('replayable', () => {
+  it('keeps a bracketed paste whole, newlines and all, and only the text around it, for a shell that takes pastes', () => {
+    assert.equal(replayable('a\r\u001b[200~cd /tmp\nls\u001b[201~\u001b[Ab\r', { pastes: true }), 'a\u001b[200~cd /tmp\nls\u001b[201~b');
+  });
+
+  it('makes a paste one line of text, never an Enter, for a shell that does not', () => {
+    assert.equal(replayable('a\u001b[200~cd /tmp\r\nls\tx\u001b[201~b', { pastes: false }), 'acd /tmp ls xb');
+  });
+
+  it('treats a paste that has not ended as typed text', () => {
+    assert.equal(replayable('\u001b[200~rm -rf\n', { pastes: true }), 'rm -rf');
   });
 });

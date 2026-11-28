@@ -30,6 +30,7 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
   let written = '';
   let picker: PickerRequest | undefined;
   let claimed = 0;
+  let keys: ((data: string) => boolean) | undefined;
   let threads = 0;
   const live = new Set<string>();
   const client = {
@@ -75,13 +76,16 @@ const setup = (overrides: Partial<FlowHost> = {}) => {
     recordsCommands: true,
     cwd: () => '/home',
     environment: () => Promise.resolve({ os: 'TestOS', shell: 'zsh', shellVersion: undefined, terminal: undefined }),
-    claim: () => claimed++,
+    claim: (_open: OpenInput, onKeys: (data: string) => boolean) => {
+      keys = onKeys;
+      return ++claimed;
+    },
     release: (options: ReleaseOptions) => released.push(options),
     ...overrides,
   } as unknown as FlowHost;
   const session = new AgentSession(host);
   const open: OpenInput = { trigger: '::', mode: 'agent', rewrite: undefined };
-  return { session, open, calls, released, written: () => written, picker: () => picker, claimed: () => claimed, live };
+  return { session, open, calls, released, written: () => written, picker: () => picker, claimed: () => claimed, live, keys: (data: string) => keys?.(data) };
 };
 
 describe('AgentSession', () => {
@@ -94,6 +98,25 @@ describe('AgentSession', () => {
     assert.equal(t.claimed(), 1);
     assert.equal(t.released.length, 1, 'released exactly once');
     assert.match(t.written(), /✗ the environment is gone/);
+  });
+
+  it('gives the terminal back at once on Ctrl-C while a slash command is still getting its text, and prints nothing after', async () => {
+    let environment!: (value: unknown) => void;
+    const t = setup({ environment: () => new Promise((resolve) => (environment = resolve)) } as unknown as Partial<FlowHost>);
+    t.session.submit(t.open, '/context');
+    await tick();
+    assert.equal(t.claimed(), 1);
+    assert.equal(t.keys('a'), false, 'other keys wait for the shell');
+    assert.equal(t.keys('\u0003'), true, 'Ctrl-C is acted on');
+    await tick();
+    assert.equal(t.released.length, 1, 'the prompt is back without waiting');
+    const before = t.written();
+    environment({ os: 'TestOS', shell: 'zsh', shellVersion: undefined, terminal: undefined });
+    for (let i = 0; i < 5; i++) {
+      await tick();
+    }
+    assert.equal(t.written(), before, 'nothing printed after the prompt came back');
+    assert.equal(t.released.length, 1);
   });
 
   it('shows /mode for a new thread without leaving a thread behind, and sets the pick when the thread starts', async () => {

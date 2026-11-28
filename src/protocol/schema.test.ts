@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import * as Schema from 'effect/Schema';
-import { DaemonRpcs } from './rpc.js';
+import { DaemonRpcs, Prompt } from './rpc.js';
 import { FastEvent, PromptContext, ThreadEvent, type ThreadEvent as ThreadEventType } from './schema.js';
 
 /** Through JSON and back, as the socket carries it. */
@@ -58,6 +58,21 @@ describe('protocol schemas', () => {
 
   it('rejects an event of an unknown type', () => {
     assert.throws(() => Schema.decodeUnknownSync(ThreadEvent)({ seq: 1, type: 'turn.exploded', turnId: 't' }));
+  });
+
+  it('carries the id of the request that started a turn, and reads a turn.started without one', () => {
+    const started: ThreadEventType = { seq: 1, type: 'turn.started', turnId: 't1', text: 'same', at: 1, clientRequestId: 'req-1' };
+    assert.deepEqual(roundTrip(ThreadEvent, started), started);
+    const older = Schema.decodeUnknownSync(ThreadEvent)({ seq: 1, type: 'turn.started', turnId: 't1', text: 'same', at: 1 });
+    assert.equal(older.type === 'turn.started' ? older.clientRequestId : null, undefined);
+  });
+
+  it('takes a thread.prompt with or without a clientRequestId (an older client)', () => {
+    const context: PromptContext = { cwd: '/repo', environment: { os: 'macOS', shell: 'zsh', shellVersion: null, terminal: null }, commands: [] };
+    const payload = { threadId: 'th', clientId: 'c', text: 'hi', context, clientRequestId: 'req-1' };
+    assert.deepEqual(roundTrip(Prompt.payloadSchema, payload), payload);
+    const { clientRequestId: _, ...older } = payload;
+    assert.deepEqual(roundTrip(Prompt.payloadSchema, older), older);
   });
 
   it('carries prompt context and fast replies', () => {

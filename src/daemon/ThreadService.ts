@@ -85,6 +85,7 @@ export interface PromptInput {
   readonly clientId: string;
   readonly text: string;
   readonly context: PromptContext;
+  readonly clientRequestId?: string;
 }
 
 export class ThreadService extends Context.Service<
@@ -454,7 +455,7 @@ const make = Effect.gen(function* () {
 
   /** Set up and fork a turn on a ready session. Runs holding the thread's lock. */
   const setUpTurn = Effect.fnUntraced(function* (input: PromptInput, thread: LiveThread, session: AgentSession) {
-    const { threadId, text, context } = input;
+    const { threadId, text, context, clientRequestId } = input;
     // Read the thread again: it may have been deleted or renamed while the agent started.
     const row = thread.deleted ? undefined : yield* store.getThread(threadId);
     if (!row) {
@@ -486,7 +487,7 @@ const make = Effect.gen(function* () {
         // A generated title can replace this one later (see titles.ts).
         ...(row.title === '' ? { title: initialTitle(text) } : {}),
       });
-      yield* emit(threadId, thread, { type: 'turn.started', turnId: turn.turnId, text, at: now });
+      yield* emit(threadId, thread, { type: 'turn.started', turnId: turn.turnId, text, at: now, ...(clientRequestId === undefined ? {} : { clientRequestId }) });
       announced = true;
       if (session.startedFresh && row.nativeSessionId !== null) {
         yield* emit(threadId, thread, {
