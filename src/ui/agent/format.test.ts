@@ -4,6 +4,7 @@ import { displayWidth } from '../../render/text-width.js';
 import type { ToolCall } from '../../protocol/schema.js';
 import { diffExcerpt, diffLines, diffStats } from './diff.js';
 import {
+  commandTitle,
   formatDuration,
   formatPermission,
   formatPermissionOutcome,
@@ -13,6 +14,7 @@ import {
   formatTool,
   relativeTime,
   shortenPath,
+  shortToolTitle,
   tidyTitle,
   type FormatContext,
 } from './format.js';
@@ -124,6 +126,29 @@ describe('permission prompts', () => {
     assert.equal(lineText(formatPermissionOutcome('Run x', 'allow_once', context)), '✓ Allowed once: Run x');
     assert.equal(lineText(formatPermissionOutcome('Run x', 'reject_once', context)), '✗ Rejected: Run x');
     assert.equal(lineText(formatPermissionOutcome('Run x', null, context)), '◼ Cancelled: Run x');
+  });
+});
+
+describe('command titles', () => {
+  it('reads an execute title as the command it runs', () => {
+    assert.equal(commandTitle('Run `pnpm test`'), 'pnpm test');
+    assert.equal(commandTitle('Running `make build`'), 'make build');
+    assert.equal(commandTitle('Terminal: `ls -la`'), 'ls -la');
+    assert.equal(commandTitle('`git status`'), 'git status');
+    // Claude Code titles the call with the command itself once it knows it.
+    assert.equal(commandTitle("printf 'hi\\n' > allowed.txt"), "printf 'hi\\n' > allowed.txt");
+    // A description, not a command in backticks, stays as it is.
+    assert.equal(commandTitle('Run the test suite'), 'Run the test suite');
+    // Generic names, before the command is known, are not commands.
+    assert.equal(commandTitle('Terminal'), undefined);
+    assert.equal(commandTitle('bash'), undefined);
+  });
+
+  it('shows `$ command` rows, and generic names without the prompt sign', () => {
+    const exec = (title: string): ToolCall => ({ id: 't', title, kind: 'execute', status: 'completed', locations: [], content: [] });
+    assert.match(lineText(formatTool(exec('Run `pnpm test`'), context)[0]!), /^. \$ pnpm test$/);
+    assert.match(lineText(formatTool(exec('Terminal'), context)[0]!), /^. Terminal$/);
+    assert.equal(shortToolTitle(exec('Run `pnpm test`'), context), 'pnpm test');
   });
 });
 

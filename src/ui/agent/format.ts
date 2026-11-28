@@ -69,6 +69,29 @@ export const shortenPathsIn = (text: string, context: PathContext): string =>
   });
 
 /** An agent's tool title made tidy for one row: one line, paths shortened, wrapping backticks dropped. */
+/** What agents call a command before they know it: shown as a name, not as `$ Terminal`. */
+const GENERIC_COMMAND_TITLE = /^(?:terminal|bash|shell|command|run command|execute)$/i;
+/** `Run \`pnpm test\``, `Running \`make\``, `Terminal: \`ls\``: a verb before the command in backticks. */
+const VERBED_COMMAND = /^(?:run|running|ran|execute|executing|terminal)\s*:?\s+`([^`]+)`$/i;
+
+/**
+ * An execute tool's title as the command it runs, when it is one: without
+ * backticks or a leading verb. Undefined for a generic name (Claude Code's
+ * "Terminal" before the command is known), which shows as it is.
+ */
+export const commandTitle = (title: string): string | undefined => {
+  let text = oneLine(title);
+  const verbed = VERBED_COMMAND.exec(text);
+  if (verbed) {
+    text = verbed[1]!.trim();
+  }
+  const wrapped = /^`([^`]+)`$/.exec(text);
+  if (wrapped) {
+    text = wrapped[1]!.trim();
+  }
+  return text === '' || GENERIC_COMMAND_TITLE.test(text) ? undefined : text;
+};
+
 export const tidyTitle = (title: string, context: PathContext): string => {
   let text = oneLine(title);
   const wrapped = /^`([^`]+)`$/.exec(text);
@@ -193,9 +216,10 @@ export const formatTool = (tool: ToolCall, context: FormatContext, options: Tool
     ? []
     : [seg(` · ${options.permission === null ? 'cancelled' : PERMISSION_NOTE[options.permission]}`, 'muted')];
   const suffix = [...toolSuffix(tool), ...permission];
-  const title = tidyTitle(tool.title, context);
-  // Commands read as commands.
-  const prompt: Segment[] = tool.kind === 'execute' ? [seg('$ ', 'muted')] : [];
+  // Commands read as commands: `$ pnpm test`, not `$ Run \`pnpm test\``.
+  const command = tool.kind === 'execute' ? commandTitle(tool.title) : undefined;
+  const title = command === undefined ? tidyTitle(tool.title, context) : shortenPathsIn(command, context);
+  const prompt: Segment[] = command !== undefined ? [seg('$ ', 'muted')] : [];
   const titleWidth = Math.max(8, width - 2 - lineWidth(prompt) - lineWidth(suffix));
   const titleRow: Line = [glyph, seg(' '), ...prompt, ...fitLine([seg(title, tool.status === 'pending' ? 'muted' : undefined)], titleWidth), ...suffix];
   const rows: Line[] = [fitLine(titleRow, width)];
@@ -235,8 +259,11 @@ export const formatToolSummary = (tool: ToolCall, context: FormatContext): Line 
   formatTool({ ...tool, content: tool.content.filter((item) => item.type === 'diff') }, context, { stopped: true })[0]!;
 
 /** The tool title for the status line's "Running …". */
-export const shortToolTitle = (tool: ToolCall, context: PathContext, maxWidth = 40): string =>
-  fitLine([seg(tidyTitle(tool.title, context))], maxWidth).map((segment) => segment.text).join('');
+export const shortToolTitle = (tool: ToolCall, context: PathContext, maxWidth = 40): string => {
+  const command = tool.kind === 'execute' ? commandTitle(tool.title) : undefined;
+  const title = command === undefined ? tidyTitle(tool.title, context) : shortenPathsIn(command, context);
+  return fitLine([seg(title)], maxWidth).map((segment) => segment.text).join('');
+};
 
 // ─── Thoughts, plans, notices ───────────────────────────────────────────────
 
