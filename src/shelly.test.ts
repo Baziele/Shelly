@@ -17,7 +17,7 @@ import type { HostTerminal } from './terminal/host-terminal.js';
 
 process.env.SHELLY_BUSY_WATCHDOG_MS = '200';
 process.env.SHELLY_PROMPT_WAIT_MS = '300';
-const { Shelly, printableOnly } = await import('./shelly.js');
+const { Shelly, printableOnly, withoutDrawing } = await import('./shelly.js');
 
 const home = mkdtempSync(join(tmpdir(), 'shelly-unit-'));
 after(() => rmSync(home, { recursive: true, force: true }));
@@ -35,12 +35,17 @@ const setup = () => {
     size: { cols: 80, rows: 24 },
     start: (listener: (data: string) => void) => (onInput = listener),
     stop: () => undefined,
-    onResize: () => () => undefined,
+    onResize: (listener: (size: { cols: number; rows: number }) => void) => {
+      resize = listener;
+      return () => undefined;
+    },
     write: (data: string) => (written += data),
     queryCursorPosition: () => Promise.resolve({ row: 5, col: 3 }),
   } as unknown as HostTerminal;
 
   const toShell: string[] = [];
+  const resizes: { cols: number; rows: number }[] = [];
+  let resize: (size: { cols: number; rows: number }) => void = () => undefined;
   let shellOutput: (data: string) => void = () => undefined;
   let exit: (code: number) => void = () => undefined;
   let nonce = '';
@@ -50,7 +55,7 @@ const setup = () => {
       onData: (listener: (data: string) => void) => (shellOutput = listener),
       onExit: (listener: (code: number) => void) => (exit = listener),
       write: (data: string) => toShell.push(data),
-      resize: () => undefined,
+      resize: (size: { cols: number; rows: number }) => resizes.push(size),
       kill: () => exit(0),
       isShellInForeground: () => true,
     };
@@ -73,6 +78,8 @@ const setup = () => {
     internals,
     written: () => written,
     toShell,
+    resizes,
+    resize: (size: { cols: number; rows: number }) => resize(size),
     type: (data: string) => onInput(data),
     shellOutput: (data: string) => shellOutput(data),
     prompt,
@@ -117,16 +124,19 @@ describe('Shelly hands the terminal back', () => {
     await t.stop();
   });
 
-  it('drops what the idle shell drew meanwhile, and what it writes before the new prompt', async () => {
+  it('drops what the idle shell drew meanwhile, and what it writes before the new prompt, but not its queries', async () => {
     const t = setup();
     t.prompt();
     t.internals.claim(() => false);
-    t.shellOutput('\u001b[2A$ REPAINT');
+    t.shellOutput('\u001b[2A$ REPAINT\u001b[?2004h');
     t.internals.release(freshLine);
-    t.shellOutput('\r\nLATE-REPAINT');
+    // fish 4 asks where the cursor is and waits for the answer: the question must reach the terminal.
+    t.shellOutput('\r\nLATE-REPAINT\u001b[6n');
     t.prompt();
     await sleep(20);
     assert.ok(!t.written().includes('REPAINT'), JSON.stringify(t.written()));
+    assert.ok(t.written().includes('\u001b[?2004h'), 'a mode the shell set goes through');
+    assert.ok(t.written().includes('\u001b[6n'), 'a query the shell waits on goes through');
     assert.ok(t.written().endsWith('$ '), 'the new prompt is drawn');
     assert.equal(t.internals.mode, 'shell');
     await t.stop();
@@ -147,6 +157,23 @@ describe('Shelly hands the terminal back', () => {
     await t.stop();
   });
 
+  it('resizes the shell only once it has its new prompt, so it never repaints under Shelly\'s output', async () => {
+    const t = setup();
+    t.prompt();
+    t.internals.claim(() => false);
+    t.resize({ cols: 70, rows: 20 });
+    t.resize({ cols: 84, rows: 22 });
+    assert.deepEqual(t.resizes, [], 'not while Shelly draws');
+    t.internals.release(freshLine);
+    assert.deepEqual(t.resizes, [], 'nor while the prompt comes back');
+    t.prompt();
+    await sleep(20);
+    assert.deepEqual(t.resizes, [{ cols: 84, rows: 22 }], 'the last size, once');
+    t.resize({ cols: 90, rows: 24 });
+    assert.deepEqual(t.resizes.at(-1), { cols: 90, rows: 24 }, 'at once when the shell has the terminal');
+    await t.stop();
+  });
+
   it('ignores a second release, so an error path cannot draw another prompt', async () => {
     const t = setup();
     t.prompt();
@@ -155,6 +182,15 @@ describe('Shelly hands the terminal back', () => {
     t.internals.release(freshLine);
     assert.equal(t.toShell.filter((data) => data === '\r').length, 1);
     await t.stop();
+  });
+});
+
+describe('withoutDrawing', () => {
+  it('keeps queries and modes, drops text, moves and erases', () => {
+    assert.equal(
+      withoutDrawing('\r\u001b[2A\u001b[K$ prompt\u001b[6n\u001b[?2004h\u001b[>1u\u001b[?u\u001b[s\u001b[u\u001b]0;title\u0007\u001bPq\u001b\\\u001b7'),
+      '\u001b[6n\u001b[?2004h\u001b[>1u\u001b[?u\u001b]0;title\u0007\u001bPq\u001b\\',
+    );
   });
 });
 

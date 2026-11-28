@@ -66,6 +66,34 @@ export type ShellLike = Pick<ShellSession, 'onData' | 'onExit' | 'write' | 'resi
 const INTERRUPT = '\u0003';
 const EOF_KEY = '\u0004';
 
+/** CSI finals that draw (move, erase, insert, delete, scroll): what dropping drawing removes. */
+const DRAWING_CSI_FINALS = new Set('@ABCDEFGHIJKLMPSTXZ`abdefgrsu'.split(''));
+
+/**
+ * Shell output Shelly drops (a prompt drawn relative to a position that is
+ * no longer there), minus the drawing: text, line breaks, cursor moves and
+ * erases go; everything else stays, because the shell depends on it.
+ * Queries (fish 4 asks where the cursor is and waits for the answer), mode
+ * changes (bracketed paste, the kitty keyboard protocol), OSC and DCS.
+ */
+export const withoutDrawing = (data: string): string => {
+  let kept = '';
+  const sequence = /\u001b(?:\[([0-9;:?<>=!]*)[ -/]*([@-~])|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|P[\s\S]*?\u001b\\|[\s\S])/g;
+  for (const match of data.matchAll(sequence)) {
+    const [text, params, final] = match;
+    if (final !== undefined) {
+      // CSI: `u` and `s` with a private prefix are kitty keyboard requests, not cursor save/restore.
+      const kitty = (final === 'u' || final === 's') && /^[?<>=]/.test(params ?? '');
+      if (kitty || !DRAWING_CSI_FINALS.has(final)) {
+        kept += text;
+      }
+    } else if (text.startsWith('\u001b]') || text.startsWith('\u001bP') || text === '\u001b=' || text === '\u001b>') {
+      kept += text;
+    }
+  }
+  return kept;
+};
+
 /**
  * Typed text worth replaying once the shell has its line back: printable
  * characters only. A stale Enter, Ctrl-C, arrow or escape sequence typed
@@ -135,6 +163,8 @@ export class Shelly {
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
   private watchdog: NodeJS.Timeout | undefined;
+  /** A resize that came while Shelly drew: the shell gets it once it has its line back. */
+  private pendingShellSize: TerminalSize | undefined;
   /** Waiting for the shell to draw the prompt Shelly asked for: then this runs. */
   private promptWait: {
     sawCwd: boolean;
@@ -393,6 +423,7 @@ export class Shelly {
       // old prompt it still had to do (fish 3 after a resize), all drawn
       // relative to where it thought it was. The new prompt replaces them.
       wait.dropped += data;
+      this.host.write(withoutDrawing(data));
       return;
     }
     if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
@@ -590,17 +621,21 @@ export class Shelly {
     // on a resize, an async prompt segment), with cursor moves relative to
     // the old prompt further up: drawn down here, it would land on Shelly's
     // output (fish 3 repaints over the last rows) and show the prompt twice.
-    // The new prompt replaces all of it.
-    let held = this.takeHeldShellOutput();
+    // The new prompt replaces all of it; what is not drawing (a query the
+    // shell waits on, a mode it set) still goes through.
+    const held = this.takeHeldShellOutput();
     if (cursor === 'fresh-line' && this.lineEditor?.isAtPrompt) {
-      held = '';
-    }
-    if (held) {
+      this.host.write(withoutDrawing(held));
+    } else if (held) {
       this.host.write(cursor === 'fresh-line' && !held.endsWith('\n') ? `${held}\r\n` : held);
     }
 
     const finish = (): void => {
       this.mode = 'shell';
+      if (this.pendingShellSize) {
+        this.shell.resize(this.pendingShellSize);
+        this.pendingShellSize = undefined;
+      }
       this.detector.markLineEmpty();
       if (line.type === 'set') {
         // Set exactly, cursor at the end; a multi-line command is beyond what the detector follows.
@@ -642,9 +677,9 @@ export class Shelly {
     // A shell without hooks never says; give it a moment.
     const timer = setTimeout(() => {
       const wait = this.promptWait;
-      if (wait && !wait.sawCwd && wait.dropped) {
-        // No prompt marker came (hooks broken?): show what the shell drew, best effort.
-        this.host.write(wait.dropped);
+      if (wait && !wait.sawCwd && wait.dropped.trim()) {
+        // No prompt marker came (hooks broken?): a fresh line, so whatever the shell draws next is readable.
+        this.host.write('\r\n');
       }
       this.promptReady();
     }, this.markers ? PROMPT_WAIT_MS : NO_HOOKS_PROMPT_WAIT_MS);
@@ -699,7 +734,15 @@ export class Shelly {
   }
 
   private handleResize(size: TerminalSize): void {
-    this.shell.resize(size);
+    if (this.mode === 'busy' || this.mode === 'returning') {
+      // The shell is idle at its prompt and needs no size now. Resized, it
+      // would repaint that prompt (and fish 4 asks the terminal where the
+      // cursor is) under Shelly's output; the size reaches it once it has its
+      // new prompt, which it then redraws in place, as without Shelly.
+      this.pendingShellSize = size;
+    } else {
+      this.shell.resize(size);
+    }
     if (this.mode !== 'overlay' && this.mode !== 'busy') {
       return;
     }
