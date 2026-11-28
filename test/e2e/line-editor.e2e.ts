@@ -290,7 +290,8 @@ for (const shell of shells) {
       }
       times.sort((a, b) => a - b);
       t.diagnostic(`${kind} query round trip: median ${times[10]!.toFixed(1)} ms, slowest ${times.at(-1)!.toFixed(1)} ms`);
-      assert.ok(times[10]! < 30, `median ${times[10]} ms`);
+      // About 1-2 ms on an idle machine; this only catches one that spawns a process or waits.
+      assert.ok(times[10]! < 50, `median ${times[10]} ms`);
       assert.equal(await session.promptRow(), '$ echo kept', `the line is as it was:\n${session.output()}`);
       await session.press('X');
       await enter(session);
