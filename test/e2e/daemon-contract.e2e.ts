@@ -143,12 +143,14 @@ describe('the client and the daemon agree on every RPC', () => {
 
   it('streams a turn, then replays it to a watcher', async () => {
     await call('thread.prewarm', client.prewarmThread({ threadId, cwd: '/work/app' }));
-    const events = await collect('thread.prompt', client.prompt(threadId, 'hello contract', CONTEXT));
+    const events = await collect('thread.prompt', client.prompt(threadId, 'hello contract', CONTEXT, 'req-contract'));
     assert.deepEqual(types(events), ['turn.started', 'mode.changed', 'message.chunk', 'message.chunk', 'turn.ended']);
+    assert.equal(events[0]?.type === 'turn.started' ? events[0].clientRequestId : null, 'req-contract', 'the request id, echoed');
     assert.equal(events.flatMap((event) => (event.type === 'message.chunk' ? [event.text] : [])).join(''), 'echo: hello contract');
 
     const watched = await collect('thread.watch', other.watch(threadId, 0));
     assert.deepEqual(types(watched), ['turn.started', 'mode.changed', 'message.chunk', 'turn.ended']);
+    assert.equal(watched[0]?.type === 'turn.started' ? watched[0].clientRequestId : null, 'req-contract', 'and kept with the thread');
     assert.deepEqual(await collect('thread.watch', other.watch(threadId, watched.at(-1)!.seq)), []);
     await rejectsWith(collect('thread.watch', other.watch('no-such-thread')), fields(new ThreadNotFound({ threadId: 'no-such-thread' })));
     await rejectsWith(collect('thread.prompt', other.prompt(threadId, 'me too', CONTEXT)), fields(new ThreadBusy({ threadId, attachedBy: client.clientId })));

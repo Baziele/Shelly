@@ -173,6 +173,14 @@ export const TurnStarted = Schema.Struct({
   /** What the user typed, without the context Shelly added. */
   text: Schema.String,
   at: Schema.Number,
+  /**
+   * The `clientRequestId` of the `thread.prompt` that started the turn, as
+   * the client sent it: a client that lost its stream before this event
+   * finds its own turn by it, never another one with the same text. Absent
+   * when the prompt had none. Added without a protocol version bump: both
+   * sides take it as optional, and ignore it if they do not know it.
+   */
+  clientRequestId: Schema.optionalKey(Schema.String),
 });
 
 /**

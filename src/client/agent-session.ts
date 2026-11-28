@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { BUILTIN_COMMANDS, parseSlashCommand } from '../commands/slash-commands.js';
 import { formatCommandLines, formatEnvironmentLines } from '../context/format-context.js';
 import type {
@@ -116,7 +117,11 @@ interface NextThread {
 }
 
 const TITLE_IN_HINT = 32;
-/** How far the daemon's clock may be behind this one when matching a turn to the request that started it. */
+/**
+ * A daemon that does not echo `clientRequestId` (one from before it): how
+ * far its clock may be behind this one when matching a turn to the request
+ * that started it by its text.
+ */
 const CLOCK_SLACK_MS = 2000;
 /** How stale the agent list may get before opening :: refreshes it (in the background). */
 const AGENTS_REFRESH_MS = 30_000;
@@ -356,6 +361,8 @@ export class AgentSession {
     output.target = { client, threadId };
     output.live = live;
     const sentAt = Date.now();
+    // Names this request alone: the turn it starts says so, and a lost stream finds it by that (see recover).
+    const requestId = randomUUID();
     const onStarted = (): void => {
       // The daemon took the turn: from here this terminal tracks it (not before, so a refused
       // prompt never replaces a turn that is still running).
@@ -369,9 +376,9 @@ export class AgentSession {
       }
     };
     try {
-      const outcome = await this.follow(client.prompt(threadId, text, context), live, live, view, onStarted);
+      const outcome = await this.follow(client.prompt(threadId, text, context, requestId), live, live, view, onStarted);
       if (outcome === 'lost') {
-        await this.recover(live, live, view, { at: sentAt, onStarted });
+        await this.recover(live, live, view, { at: sentAt, requestId, onStarted });
       }
     } catch (error) {
       if (live.view === view && live.status !== 'ended') {
@@ -586,8 +593,9 @@ export class AgentSession {
   /**
    * The daemon went away mid-turn: start it again and catch up, or say what
    * happened. A request lost before the daemon said it took it is looked
-   * for in the thread (`sent`): found, it is followed from its start; not
-   * found, the user is told it may never have reached the agent. Never a
+   * for in the thread (`sent`), by the id it went with: found, it is
+   * followed from its start; not found, the user is told it may never have
+   * reached the agent. Never a
    * replay of the thread from its beginning, which would show an old turn
    * as this one's answer.
    */
@@ -595,7 +603,7 @@ export class AgentSession {
     tracker: Tracker,
     live: LiveTurn,
     view: AgentView,
-    sent?: { readonly at: number; readonly onStarted: () => void },
+    sent?: { readonly at: number; readonly requestId: string; readonly onStarted: () => void },
   ): Promise<void> {
     const shown = (): boolean => live.view === view;
     if (shown()) {
@@ -610,7 +618,12 @@ export class AgentSession {
       this.attachedOn = hello.pid;
       if (lookFor) {
         const newest = history.findLast((event) => event.type === 'turn.started');
-        if (!newest || newest.text !== live.text || newest.at < sent.at - CLOCK_SLACK_MS) {
+        // By its id, whatever the text and the clocks; a daemon that does not echo ids: the same
+        // text, started no earlier than it was sent (an identical prompt just before could pass).
+        const ours = newest && (newest.clientRequestId !== undefined
+          ? newest.clientRequestId === sent.requestId
+          : newest.text === live.text && newest.at >= sent.at - CLOCK_SLACK_MS);
+        if (!newest || !ours) {
           unsent = true;
         } else {
           await this.follow(client.watch(live.threadId, newest.seq - 1), tracker, live, view, sent.onStarted);

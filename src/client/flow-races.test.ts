@@ -287,24 +287,61 @@ describe('the daemon failing under the flows', () => {
     }
   });
 
-  const firstTurn = async (rig: Rig) => {
+  const firstTurn = async (rig: Rig, { first = 'first', second = 'second' } = {}) => {
     await openAgent(rig);
-    await typeKeys(rig, 'first');
+    await typeKeys(rig, first);
     rig.type('\r');
     await until(() => rig.daemon.prompts.length === 1, 'the first prompt');
     const { feed } = rig.daemon.prompts[0]!;
-    feed.push(event({ seq: 1, type: 'turn.started', turnId: 'u1', text: 'first', at: 0 }));
+    feed.push(event({ seq: 1, type: 'turn.started', turnId: 'u1', text: first, at: 0 }));
     feed.push(event({ seq: 2, type: 'message.chunk', turnId: 'u1', messageId: 'm1', kind: 'text', text: 'OLD ANSWER' }));
     feed.push(event({ seq: 3, type: 'turn.ended', turnId: 'u1', stopReason: 'end_turn', error: null, durationMs: 1 }));
     await until(() => rig.mode() === 'returning', 'the hand-back', 4000);
     rig.prompt();
     await until(() => rig.mode() === 'shell', 'the shell');
     await openAgent(rig);
-    await typeKeys(rig, 'second');
+    await typeKeys(rig, second);
     rig.type('\r');
     await until(() => rig.daemon.prompts.length === 2, 'the second prompt');
     return rig.daemon.prompts[1]!;
   };
+
+  it('the same prompt twice, the second lost before the daemon took it: never the first turn shown as its answer', async () => {
+    const rig = await startRig();
+    try {
+      const second = await firstTurn(rig, { first: 'again', second: 'again' });
+      const first = rig.daemon.prompts[0]!;
+      assert.ok(first.clientRequestId && second.clientRequestId && first.clientRequestId !== second.clientRequestId, 'each request has an id of its own');
+      const before = rig.written().length;
+      // The first turn, a moment ago, with the same text: only its id tells it apart.
+      rig.daemon.override.attachThread = (id: never) => Promise.resolve({
+        thread: summary(id),
+        history: [event({ seq: 1, type: 'turn.started', turnId: 'u1', text: 'again', at: Date.now(), clientRequestId: first.clientRequestId })],
+      });
+      second.feed.fail(tagged('DaemonDisconnected'));
+      await until(() => rig.mode() === 'returning', 'the hand-back', 4000);
+      assert.equal(rig.daemon.watches.length, 0, 'the first turn is not followed');
+      assert.match(plain(rig.written().slice(before)), /may not have your request/);
+    } finally {
+      await rig.stop();
+    }
+  });
+
+  it('the request lost before the daemon took it, which did arrive, with the daemon\'s clock well behind: followed by its id', async () => {
+    const rig = await startRig();
+    try {
+      const second = await firstTurn(rig);
+      rig.daemon.override.attachThread = (id: never) => Promise.resolve({
+        thread: summary(id),
+        history: [event({ seq: 4, type: 'turn.started', turnId: 'u2', text: 'second', at: Date.now() - 60_000, clientRequestId: second.clientRequestId })],
+      });
+      second.feed.fail(tagged('DaemonDisconnected'));
+      await until(() => rig.daemon.watches.length === 1, 'the recovery watch');
+      assert.equal(rig.daemon.watches[0]!.afterSeq, 3, 'from just before its turn.started');
+    } finally {
+      await rig.stop();
+    }
+  });
 
   it('the daemon lost before it took the request, which never arrived: says so, never shows an old turn', async () => {
     const rig = await startRig();

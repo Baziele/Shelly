@@ -92,7 +92,7 @@ export interface FakeDaemon {
   calls: string[];
   /** Replace a method (e.g. to make it slow). */
   override: Partial<Record<keyof DaemonClient, (...args: never[]) => unknown>>;
-  prompts: { threadId: string; text: string; context: unknown; feed: Feed<ThreadEvent> }[];
+  prompts: { threadId: string; text: string; context: unknown; clientRequestId: string | undefined; feed: Feed<ThreadEvent> }[];
   watches: { threadId: string; afterSeq: number; feed: Feed<ThreadEvent> }[];
   fast: { sessionKey: string; feed: Feed<FastEvent> }[];
 }
@@ -118,9 +118,9 @@ export const fakeDaemon = (): FakeDaemon => {
     respond: () => Promise.resolve(),
     endFast: () => Promise.resolve(),
     setDefaultAgent: () => Promise.resolve(),
-    prompt: (threadId: string, text: string, context: unknown) => {
+    prompt: (threadId: string, text: string, context: unknown, clientRequestId?: string) => {
       const feed = new Feed<ThreadEvent>();
-      prompts.push({ threadId, text, context, feed });
+      prompts.push({ threadId, text, context, clientRequestId, feed });
       return feed;
     },
     watch: (threadId: string, afterSeq: number) => {

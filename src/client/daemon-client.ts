@@ -379,9 +379,12 @@ export class DaemonClient {
     return this.call('thread.detach', { threadId, clientId: this.clientId });
   }
 
-  /** Start a turn; yields its events from `turn.started` to `turn.ended`. */
-  prompt(threadId: string, text: string, context: PromptContext): AsyncIterable<ThreadEvent> {
-    return this.stream('thread.prompt', { threadId, clientId: this.clientId, text, context }, checkThreadEvent);
+  /**
+   * Start a turn; yields its events from `turn.started` to `turn.ended`.
+   * `clientRequestId`, unique to this request, comes back in `turn.started`.
+   */
+  prompt(threadId: string, text: string, context: PromptContext, clientRequestId?: string): AsyncIterable<ThreadEvent> {
+    return this.stream('thread.prompt', { threadId, clientId: this.clientId, text, context, ...(clientRequestId === undefined ? {} : { clientRequestId }) }, checkThreadEvent);
   }
 
   /** Stored events after `afterSeq`, then live ones until the running turn ends. */
