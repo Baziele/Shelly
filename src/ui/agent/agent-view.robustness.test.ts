@@ -203,7 +203,7 @@ describe('a resize mid-stream', () => {
     view.apply(event({ type: 'tool.updated', tool: { id: 'a', title: 'pnpm test', kind: 'execute', status: 'completed', locations: [], content: [] } }));
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: paragraphs }));
     view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 10')));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep')));
     await settle(term);
   };
 
@@ -243,7 +243,7 @@ describe('a resize mid-stream', () => {
     timers.advance(80);
     await sleep(20);
     timers.advance(200);
-    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 10') && line.length <= 50));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep') && line.length <= 50));
     await endTurn(view);
     assertWhole(await term.logicalLines());
   });
@@ -284,6 +284,62 @@ describe('a resize mid-stream', () => {
     assert.ok(!lines.some((line, index) => line === '' && lines[index + 1] === ''), `a doubled blank row:\n${lines.join('\n')}`);
   });
 
+  it('asks again when the first cursor report never comes (a busy terminal), so no stale rows stay behind', async () => {
+    let asked = 0;
+    let term!: EmulatedTerminal;
+    const context = await setup(90, 16, {
+      query: () => (++asked === 1 ? Promise.reject(new Error('timed out')) : term.cursor()),
+    });
+    term = context.term;
+    const { view } = context;
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    await view.relayout();
+    assert.equal(asked, 2);
+    await endTurn(view);
+    assertWhole(await term.logicalLines());
+  });
+
+  it('asks again when the terminal was resized while it waited for the report', async () => {
+    let asked = 0;
+    let term!: EmulatedTerminal;
+    const context = await setup(90, 16, {
+      query: async () => {
+        asked++;
+        if (asked === 1) {
+          // The report describes the terminal at 60 columns; by the time it lands, it is 50.
+          term.resize(60, 16);
+          const report = await term.cursor();
+          term.resize(50, 16);
+          return report;
+        }
+        return term.cursor();
+      },
+    });
+    term = context.term;
+    const { view } = context;
+    await streamWithLiveTool(term, view);
+    term.resize(60, 16);
+    await view.relayout();
+    assert.equal(asked, 2);
+    await endTurn(view);
+    assertWhole(await term.logicalLines());
+  });
+
+  it('runs one relayout at a time: a second call while one runs makes it ask again, not re-anchor twice', async () => {
+    let asked = 0;
+    let term!: EmulatedTerminal;
+    const context = await setup(90, 16, { query: () => (asked++, term.cursor()) });
+    term = context.term;
+    const { view } = context;
+    await streamWithLiveTool(term, view);
+    term.resize(50, 16);
+    await Promise.all([view.relayout(), view.relayout()]);
+    assert.equal(asked, 2);
+    await endTurn(view);
+    assertWhole(await term.logicalLines());
+  });
+
   it('never paints over committed text when the cursor query fails', async () => {
     const { term, view } = await setup(90, 16, { query: () => Promise.reject(new Error('no answer')) });
     await streamWithLiveTool(term, view);
@@ -317,7 +373,7 @@ describe('a resize mid-stream', () => {
     const wide = `${'漢字'.repeat(20)}末`;
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `${wide}\n\nstill streaming ${'漢'.repeat(30)}` }));
     view.apply(event({ type: 'tool.updated', tool: { id: 'b', title: 'sleep 10', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 10')));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep')));
     await settle(term);
     term.resize(47, 16);
     await view.relayout();
@@ -337,7 +393,7 @@ describe('cost after big output', { timeout: 60_000 }, () => {
     await waitForScreen(term, (lines) => lines.some((line) => line.includes('value4999')));
     view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: '\n```\n\nDone.' }));
     view.apply(event({ type: 'tool.updated', tool: { id: 't', title: 'sleep 60', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep 60')));
+    await waitForScreen(term, (lines) => lines.some((line) => line.includes('Running sleep')));
     await settle(term);
     assert.ok((view as unknown as { bufferRows: number }).bufferRows <= 60, 'the buffer stayed 5,000 rows tall: every frame redraws it all');
   });

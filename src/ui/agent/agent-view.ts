@@ -73,6 +73,9 @@ const PROMPT_ARM_MS = 300;
 const ESCAPE_WAIT_MS = 40;
 /** While the user is being asked, the status line (and its elapsed time) redraws once a second. */
 const WAITING_REDRAW_MS = 1000;
+/** How long relayout() waits for each cursor report, and how often it asks before going without one. */
+const RELAYOUT_QUERY_MS = 1500;
+const RELAYOUT_ATTEMPTS = 3;
 /** A resize nobody passed on to relayout() is handled after the size has held still this long. */
 const AUTO_RELAYOUT_MS = 150;
 /** Longest finish() waits for the last frames before giving the terminal back anyway. */
@@ -105,6 +108,8 @@ type BlockView = MessageBlockView | TextBlockView;
 /** The layout of one frame, read while OpenTUI hands the frame over. */
 interface FrameSnapshot {
   readonly rows: PaintFrame['rows'];
+  /** Cells across the frame: the width OpenTUI actually drew at. */
+  readonly width: number;
   readonly height: number;
   readonly blocks: ReadonlyArray<{ readonly key: string; readonly bottom: number; readonly final: boolean; readonly split: StableSplit | undefined; readonly top: number }>;
 }
@@ -138,6 +143,8 @@ export class AgentView {
   private spinnerTimer: unknown;
   private readonly timers: ViewTimers;
   private autoRelayout: { timer: unknown; cols: number; rows: number } | undefined;
+  private relayoutRun: Promise<void> | undefined;
+  private relayoutAgain = false;
   private lastTickAt = 0;
   /** A frame was requested and has not been processed yet. */
   private awaitingFrame = false;
@@ -366,19 +373,42 @@ export class AgentView {
     if (this.state !== 'running' && this.state !== 'finishing') {
       return;
     }
+    // One at a time: a second relayout would re-anchor from the same report twice. A call that comes
+    // while one runs makes it ask again, since the terminal may have changed since it asked.
+    if (this.relayoutRun) {
+      this.relayoutAgain = true;
+      return this.relayoutRun;
+    }
+    this.relayoutRun = this.runRelayout().finally(() => {
+      this.relayoutRun = undefined;
+    });
+    return this.relayoutRun;
+  }
+
+  private async runRelayout(): Promise<void> {
     this.paused = true;
     this.cancelAutoRelayout();
     let cursor: CursorPosition | undefined;
-    try {
-      cursor = await this.host.queryCursorPosition();
-    } catch {
-      // No report: the live region restarts at the row the cursor was parked on (see LiveRegion.relayout).
-      cursor = undefined;
+    for (let attempt = 0; attempt < RELAYOUT_ATTEMPTS; attempt++) {
+      this.relayoutAgain = false;
+      const asked = { ...this.host.size };
+      try {
+        cursor = await this.host.queryCursorPosition(RELAYOUT_QUERY_MS);
+      } catch {
+        cursor = undefined;
+      }
+      // The view may have been finished or destroyed while the terminal answered.
+      if ((this.state as State) === 'done') {
+        return;
+      }
+      const { cols, rows } = this.host.size;
+      const changedMeanwhile = cols !== asked.cols || rows !== asked.rows || this.relayoutAgain;
+      // A report from before the latest resize, or none at all (a busy or slow terminal): ask again.
+      if (!changedMeanwhile && cursor) {
+        break;
+      }
     }
-    // The view may have been finished or destroyed while the terminal answered.
-    if ((this.state as State) === 'done') {
-      return;
-    }
+    // Without any report the live region restarts at the row the cursor was parked on (see LiveRegion.relayout).
     this.region.relayout(cursor);
     this.laidOutSize = { ...this.host.size };
     this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
@@ -682,7 +712,8 @@ export class AgentView {
         split: view.kind === 'message' && !view.syncedFinal ? shiftSplit(view.message.stableSplit(), view.message.markdown.y - top) : undefined,
       }];
     });
-    const snapshot: FrameSnapshot = { rows: frame.rows, height: this.root.height, blocks };
+    const width = frame.rows[0]?.reduce((sum, span) => sum + span.width, 0) ?? 0;
+    const snapshot: FrameSnapshot = { rows: frame.rows, width, height: this.root.height, blocks };
     // Let OpenTUI finish its frame before the tree changes.
     queueMicrotask(() => {
       this.processFrame(snapshot);
@@ -701,6 +732,15 @@ export class AgentView {
         this.armAutoRelayout();
       }
       this.dirty = true;
+      return;
+    }
+    if (snapshot.width !== this.host.size.cols) {
+      // Drawn at another width: OpenTUI applies a resize only after the frame it is drawing, so the
+      // first frame after one can still be at the old width. Its rows would wrap in the terminal, put
+      // committed text where the live region thinks it is not, and get painted over. Draw again.
+      this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
+      this.dirty = true;
+      this.afterFrame();
       return;
     }
     if (snapshot.height > snapshot.rows.length) {
