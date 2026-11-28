@@ -2,8 +2,8 @@
 
 /*
  * Dispatch on argv before importing anything: `shelly daemon …` must not
- * load the terminal side, and plain `shelly` must not load Effect or any
- * daemon code on its startup path.
+ * load the terminal side, and plain `shelly` must not load any daemon code
+ * (nor Effect, ever: see src/client/client-imports.test.ts).
  *
  * --max-semi-space-size=4 (MB) keeps V8's young generation small in each
  * terminal's client: by default it grows by 30–55 MB while an agent turn
