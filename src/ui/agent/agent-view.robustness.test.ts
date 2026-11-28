@@ -521,3 +521,56 @@ describe('without colour', () => {
     assert.ok((await term.allLines()).includes('Run make build again.'));
   });
 });
+
+describe('a frame on its way to the terminal when it resizes', () => {
+  /*
+   * The terminal narrows and reflows while a frame drawn for the old width is
+   * still on its way, and the view hears of the resize only later (SIGWINCH).
+   * Each frame is confirmed before the next, so the view knows the terminal
+   * reflowed the frame before; a commit goes in two steps, so a resize never
+   * leaves stale live rows above committed text.
+   */
+  const first = 'The first paragraph streams in with enough words to wrap at fifty columns, and more.';
+  const second = 'The second paragraph starts once the first is done, which commits the first one.';
+  for (const [label, more] of [
+    ['the frame only repaints', ' Still the first paragraph, growing past the edge of the narrowed screen.'],
+    ['the frame commits', `\n\n${second}`],
+  ] as const) {
+    it(`leaves nothing stale and loses nothing when ${label}`, async () => {
+      const term = new EmulatedTerminal(90, 16);
+      useModernWidths(term.terminal);
+      term.write('~/acme $ :: question\r\n');
+      let known = { cols: 90, rows: 16 };
+      const host = {
+        get size() { return known; },
+        write: term.write,
+        queryCursorPosition: () => term.cursor(),
+        queryWidth: () => term.queryWidth(),
+      };
+      const timers = new FakeTimers();
+      view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
+      view.start(await term.cursor());
+      view.apply(event({ type: 'turn.started', text: 'q', at: timers.now }));
+      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: first }));
+      await waitForScreen(term, (lines) => lines.some((line) => line.startsWith('The first')));
+      await settle(term);
+
+      term.resize(50, 16);
+      view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: more }));
+      await settle(term);
+      known = { cols: 50, rows: 16 };
+      await view.relayout();
+      view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 3000 }));
+      await view.finish();
+
+      const lines = await term.logicalLines();
+      const text = lines.join(' ').replace(/\s+/g, ' ');
+      assert.equal(lines.filter((line) => line.startsWith('~/acme $ :: question')).length, 1, lines.join('\n'));
+      assert.equal(text.split('The first paragraph').length - 1, 1, `the first paragraph lost or doubled:\n${lines.join('\n')}`);
+      assert.ok(text.includes(first.replace(/\s+/g, ' ')), `the first paragraph cut:\n${lines.join('\n')}`);
+      if (label === 'the frame commits') {
+        assert.equal(text.split('The second paragraph').length - 1, 1, `the second paragraph lost or doubled:\n${lines.join('\n')}`);
+      }
+    });
+  }
+});

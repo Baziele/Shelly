@@ -273,3 +273,30 @@ describe('HostTerminal teardown', () => {
     });
   }
 });
+
+describe('HostTerminal width queries', () => {
+  it('pushes the cursor to the right edge, asks where it is, and goes back to column 1', async () => {
+    const { host, typed, answer, written } = fakeTerminal();
+    const width = host.queryWidth();
+    await sleep(1);
+    assert.ok(written().endsWith('\u001b[9999C\u001b[?6n\u001b[6n\r'), JSON.stringify(written()));
+    await answer('\u001b[?7;60R\u001b[7;60R');
+    assert.equal(await width, 60);
+    host.stop();
+    assert.deepEqual(typed, []);
+  });
+
+  it('asks only once a query in flight is answered, instead of sharing its answer', async () => {
+    const { host, answer, written } = fakeTerminal();
+    const position = host.queryCursorPosition();
+    const width = host.queryWidth();
+    await sleep(1);
+    assert.ok(!written().includes('9999C'), 'asked while another query was in flight');
+    await answer('\u001b[?3;1R\u001b[3;1R');
+    assert.deepEqual(await position, { row: 3, col: 1 });
+    await sleep(1);
+    await answer('\u001b[?3;80R\u001b[3;80R');
+    assert.equal(await width, 80);
+    host.stop();
+  });
+});

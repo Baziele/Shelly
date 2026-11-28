@@ -149,6 +149,24 @@ export class HostTerminal {
     return promise;
   }
 
+  /**
+   * The terminal's width as of this point in the output: the cursor is
+   * pushed against the right edge, its position asked for, then sent back to
+   * column 1. Everything written before the call was drawn at that width,
+   * which tells a view whether its last frame reached the terminal before or
+   * after a resize. Waits for a query already in flight rather than sharing
+   * its answer, which was asked for at another point in the output.
+   */
+  async queryWidth(timeoutMs = 500): Promise<number> {
+    while (this.pendingCursorQuery) {
+      await this.pendingCursorQuery.promise.catch(() => undefined);
+    }
+    this.write(ansi.cursorForward(9999));
+    const position = this.queryCursorPosition(timeoutMs);
+    this.write('\r');
+    return (await position).col;
+  }
+
   private readonly handleData = (data: string | Buffer): void => {
     let text = typeof data === 'string' ? data : data.toString('utf8');
     const query = this.pendingCursorQuery;

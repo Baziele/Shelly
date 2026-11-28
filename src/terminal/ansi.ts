@@ -7,6 +7,13 @@ export const ansi = {
   eraseToLineEnd: `${CSI}K`,
   eraseLine: `${CSI}2K`,
   eraseDown: `${CSI}J`,
+  /** DECAWM: whether text reaching the right edge wraps to the next row. */
+  autowrapOff: `${CSI}?7l`,
+  autowrapOn: `${CSI}?7h`,
+  /** Up `rows` rows, staying in the column; stops at the top row. */
+  cursorUp: (rows: number): string => `${CSI}${rows}A`,
+  /** Right `cols` columns, staying on the row; stops at the right edge. */
+  cursorForward: (cols: number): string => `${CSI}${cols}C`,
   hideCursor: `${CSI}?25l`,
   showCursor: `${CSI}?25h`,
   resetStyle: `${CSI}0m`,

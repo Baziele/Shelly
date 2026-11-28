@@ -31,6 +31,13 @@ import { hasGapBefore, TurnModel, type Block, type LineBlock, type Phase, type P
 /** The host terminal as the agent view uses it. */
 export interface AgentViewHost extends LiveRegionScreen {
   queryCursorPosition(timeoutMs?: number): Promise<CursorPosition>;
+  /**
+   * The width the terminal drew everything written so far at (see
+   * HostTerminal.queryWidth). A host that has it gets each frame confirmed
+   * before the next is drawn, so a resize never meets more than one frame on
+   * its way, and the view knows which one.
+   */
+  queryWidth?(timeoutMs?: number): Promise<number>;
 }
 
 export interface AgentViewOptions {
@@ -76,6 +83,8 @@ const WAITING_REDRAW_MS = 1000;
 /** How long relayout() waits for each cursor report, and how often it asks before going without one. */
 const RELAYOUT_QUERY_MS = 1500;
 const RELAYOUT_ATTEMPTS = 3;
+/** How long a frame waits to be confirmed; a terminal that takes longer is not asked again (see AgentViewHost.queryWidth). */
+const CONFIRM_MS = 1500;
 /** A resize nobody passed on to relayout() is handled after the size has held still this long. */
 const AUTO_RELAYOUT_MS = 150;
 /** Longest finish() waits for the last frames before giving the terminal back anyway. */
@@ -152,6 +161,12 @@ export class AgentView {
   private dirty = false;
   /** A resize is being handled; nothing is painted until it is. */
   private paused = false;
+  /** The last frame is not confirmed yet: the next waits (see AgentViewHost.queryWidth). */
+  private confirming: Promise<void> | undefined;
+  /** Whether frames are confirmed: the host can, and has not failed to. */
+  private confirmFrames: boolean;
+  /** A confirmation showed the terminal at another width than laid out for: a resize the view has not been told of yet. */
+  private resizedUnseen = false;
   private selectedOption = 0;
   private shownRequestId: string | undefined;
   /** When the prompt on screen first showed; keys before PROMPT_ARM_MS after it are ignored. */
@@ -184,6 +199,7 @@ export class AgentView {
     this.agentName = oneLine(options.agentName) || 'agent';
     this.bufferRows = this.baseBufferRows();
     this.laidOutSize = { ...host.size };
+    this.confirmFrames = typeof host.queryWidth === 'function';
     this.headless = HeadlessRenderer.create({ width: host.size.cols, height: this.bufferRows });
     this.region = new LiveRegion(host, colorDepth, { marginRows: options.marginRows ?? 2 });
     this.style = createMarkdownStyle(this.headless.renderer);
@@ -388,6 +404,13 @@ export class AgentView {
   private async runRelayout(): Promise<void> {
     this.paused = true;
     this.cancelAutoRelayout();
+    // Whether the last frame reached the terminal before the resize or after decides what it reflowed.
+    if (this.confirming) {
+      await this.confirming;
+      if ((this.state as State) === 'done') {
+        return;
+      }
+    }
     let cursor: CursorPosition | undefined;
     for (let attempt = 0; attempt < RELAYOUT_ATTEMPTS; attempt++) {
       this.relayoutAgain = false;
@@ -410,6 +433,7 @@ export class AgentView {
     }
     // Without any report the live region restarts at the row the cursor was parked on (see LiveRegion.relayout).
     this.region.relayout(cursor);
+    this.resizedUnseen = false;
     this.laidOutSize = { ...this.host.size };
     this.headless.resize({ width: this.host.size.cols, height: this.bufferRows });
     this.paused = false;
@@ -499,7 +523,7 @@ export class AgentView {
   /** The terminal was resized and relayout() has not run yet: painting now would land on reflowed scrollback. */
   private awaitingRelayout(): boolean {
     const { cols, rows } = this.host.size;
-    return cols !== this.laidOutSize.cols || rows !== this.laidOutSize.rows;
+    return this.resizedUnseen || cols !== this.laidOutSize.cols || rows !== this.laidOutSize.rows;
   }
 
   // ─── Input ────────────────────────────────────────────────────────────────
@@ -586,7 +610,7 @@ export class AgentView {
     if (this.state === 'created' || this.state === 'done') {
       return;
     }
-    if (this.awaitingFrame || this.paused) {
+    if (this.awaitingFrame || this.paused || this.confirming) {
       this.dirty = true;
       return;
     }
@@ -604,7 +628,7 @@ export class AgentView {
     if (this.state === 'created' || this.state === 'done') {
       return;
     }
-    if (this.awaitingFrame || this.paused || this.awaitingRelayout()) {
+    if (this.awaitingFrame || this.paused || this.confirming || this.awaitingRelayout()) {
       if (this.awaitingRelayout()) {
         this.armAutoRelayout();
       }
@@ -772,7 +796,19 @@ export class AgentView {
 
     const commit = snapshot.rows.slice(0, commitEnd);
     const live = this.clip(snapshot.rows.slice(commitEnd, snapshot.height));
+    if (commit.length > 0 && this.confirmFrames && this.region.rowsAbovePark > 0) {
+      // Commit in two steps. First clear the live region, leaving the cursor on its first row; once
+      // that is confirmed, commit from there. A resize that meets the clearing on its way only leaves
+      // live rows to clear again, and the commit itself starts with no rows above the cursor for a
+      // reflow to move, so nothing stale can end up above committed text. The synchronized update
+      // stays open in between: the terminal never shows the cleared region. The frame is painted once
+      // that is confirmed: nothing changes the tree meanwhile, since no frame starts while confirming.
+      this.region.update([], [], { hold: true });
+      this.confirm(snapshot);
+      return;
+    }
     this.region.update(commit, live);
+    this.confirm();
     this.stats.frames++;
     if (this.stats.firstPaintMs < 0) {
       this.stats.firstPaintMs = this.now() - this.startedAt;
@@ -798,6 +834,43 @@ export class AgentView {
       }
     }
     this.afterFrame();
+  }
+
+  /**
+   * Ask the terminal to confirm the frame just painted, and hold the next
+   * one until it does: a resize then meets at most this frame on its way,
+   * and the confirmation says whether it did (see LiveRegion.acknowledge).
+   */
+  private confirm(then?: FrameSnapshot): void {
+    if (!this.confirmFrames || !this.host.queryWidth) {
+      if (then) {
+        this.processFrame(then);
+      }
+      return;
+    }
+    const written = this.laidOutSize.cols;
+    this.confirming = this.host.queryWidth(CONFIRM_MS).then(
+      (cols) => {
+        this.region.acknowledge(cols);
+        if (cols !== written) {
+          this.resizedUnseen = true;
+        }
+      },
+      () => {
+        // Too slow or no answer: paint without confirming from now on.
+        this.confirmFrames = false;
+      },
+    ).finally(() => {
+      this.confirming = undefined;
+      if (this.state !== 'running' && this.state !== 'finishing') {
+        return;
+      }
+      if (then) {
+        this.processFrame(then);
+      } else {
+        this.afterFrame();
+      }
+    });
   }
 
   /** After a tall block went to scrollback, draw into a small buffer again: every frame draws the whole buffer. */

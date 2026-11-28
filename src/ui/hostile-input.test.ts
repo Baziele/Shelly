@@ -31,7 +31,7 @@ const HOSTILE = [
 ].join(' ');
 
 /** Shelly's own sequences: colours, cursor moves, erases, cursor visibility, synchronized output, cursor queries. */
-const SHELLY_SEQUENCES = /\u001b\[[0-9;]*[mHKJ]|\u001b\[\?(?:25|2026)[hl]|\u001b\[6n/g;
+const SHELLY_SEQUENCES = /\u001b\[[0-9;]*[mHKJAC]|\u001b\[\?(?:25|2026|7)[hl]|\u001b\[6n/g;
 const FORBIDDEN = /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 
 /** Payloads of the sequences above; removing only the ESC would leave them on screen as junk. */
