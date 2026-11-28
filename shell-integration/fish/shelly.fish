@@ -60,6 +60,29 @@ if test -n "$__shelly_nonce"
         __shelly_emit "line;$request;$encoded;$cursor"
     end
 
+    # Report the line and the cursor (in characters), leaving both as they
+    # are, to the request Shelly left in the line file (`query <n>`). With
+    # none there, Shelly has stopped waiting, so nothing is reported.
+    function __shelly_line_query
+        set -l file $__shelly_line_file
+        test -n "$file" -a -f "$file" -a ! -L "$file"; or return
+        set -l header
+        read header < $file
+        # Any other request belongs to another key.
+        string match -qr -- '^query [0-9]+$' "$header"; or return
+        # Shelly withdraws the request once answered: no rm, which would
+        # cost a process on a keystroke Shelly is holding.
+        set -l request (string replace -- 'query ' '' "$header")
+        set -l line (commandline | string collect -N)
+        set -l encoded (string escape --style=url -- "$line")
+        set encoded (string replace -r -- '%0A$' '' "$encoded")
+        if test (string length -- "$encoded") -gt 60000
+            __shelly_emit "query;$request;;-1"
+            return
+        end
+        __shelly_emit "query;$request;$encoded;"(commandline -C)
+    end
+
     # Replace the line with the file Shelly wrote: `set <request> <cursor>`
     # (the cursor in characters) on the first line, the text after it. The
     # file is removed once read.
@@ -122,11 +145,13 @@ if test -n "$__shelly_nonce"
             bind -M $__shelly_mode \e\[24\;16~ __shelly_line_capture
             bind -M $__shelly_mode \e\[23\;16~ __shelly_line_set
             bind -M $__shelly_mode \e\[19\;16~ __shelly_line_notice
+            bind -M $__shelly_mode \e\[20\;16~ __shelly_line_query
         else
             bind -M $__shelly_mode ctrl-alt-shift-super-f12 __shelly_line_capture
             bind -M $__shelly_mode ctrl-alt-shift-super-f11 __shelly_line_set
             bind -M $__shelly_mode ctrl-alt-shift-super-f8 __shelly_line_notice
+            bind -M $__shelly_mode ctrl-alt-shift-super-f9 __shelly_line_query
         end
     end
-    __shelly_emit 'line-editor;capture,set,notice'
+    __shelly_emit 'line-editor;capture,set,notice,query'
 end

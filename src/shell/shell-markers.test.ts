@@ -42,6 +42,10 @@ describe('ShellMarkerParser', () => {
       { type: 'line', request: undefined, line: undefined },
       { type: 'line', request: undefined, line: undefined },
     ]);
+    assert.deepEqual(events(parser.push(marker('query;5;ls ;a;2') + marker('query;6;;-1'))), [
+      { type: 'line-query', request: 5, line: { buffer: 'ls ;a', cursor: 2 } },
+      { type: 'line-query', request: 6, line: undefined },
+    ]);
     assert.deepEqual(events(parser.push(marker('line-set;4') + marker('line-set;'))), [
       { type: 'line-set', request: 4 },
       { type: 'line-set', request: undefined },

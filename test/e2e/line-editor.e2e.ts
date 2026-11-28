@@ -277,6 +277,26 @@ for (const shell of shells) {
       assert.deepEqual(execs(session.events), ['echo half']);
     });
 
+    it('queries the line, leaving it alone, within a few milliseconds', { skip: !canEditLine && 'bash 3.2 cannot read its line' }, async (t) => {
+      session = await start(shell);
+      assert.equal(session.editor.canQuery, true);
+      await session.press(`echo kept${LEFT}`);
+      const times: number[] = [];
+      for (let round = 0; round < 20; round++) {
+        const started = performance.now();
+        const result = await session.editor.query();
+        times.push(performance.now() - started);
+        assert.deepEqual(result, { status: 'captured', line: { buffer: 'echo kept', cursor: 8 } });
+      }
+      times.sort((a, b) => a - b);
+      t.diagnostic(`${kind} query round trip: median ${times[10]!.toFixed(1)} ms, slowest ${times.at(-1)!.toFixed(1)} ms`);
+      assert.ok(times[10]! < 30, `median ${times[10]} ms`);
+      assert.equal(await session.promptRow(), '$ echo kept', `the line is as it was:\n${session.output()}`);
+      await session.press('X');
+      await enter(session);
+      assert.deepEqual(execs(session.events), ['echo kepXt'], 'and so is the cursor');
+    });
+
     it('shows a notice below the line, leaving the line alone', { skip: !canEditLine && 'bash 3.2 has no notices' }, async () => {
       session = await start(shell);
       assert.equal(session.editor.canNotify, true);

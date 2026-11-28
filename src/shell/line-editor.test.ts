@@ -348,6 +348,45 @@ describe('LineEditor', () => {
     assert.equal(subject.isAtPrompt, false, 'Enter after the paste starts a command');
   });
 
+  it('queries the line without touching it, and ignores an answer that comes too late', async () => {
+    const subject = create(['capture', 'set', 'query']);
+    assert.equal(subject.canQuery, true);
+    const file = subject.lineFile ?? '';
+    let answer: ((request: number) => void) | undefined;
+    shell = (data) => {
+      assert.equal(data, LINE_KEYS.query);
+      const request = /^query (\d+)\n$/.exec(readFileSync(file, 'utf8'))?.[1];
+      assert.ok(request, 'a numbered query in the line file');
+      answer?.(Number(request));
+    };
+
+    answer = (request) => subject.handleEvent({ type: 'line-query', request, line: { buffer: 'gït log', cursor: 2 } });
+    assert.deepEqual(await subject.query(), { status: 'captured', line: { buffer: 'gït log', cursor: 2 } });
+    assert.ok(!existsSync(file));
+
+    let late: number | undefined;
+    answer = (request) => {
+      late = request;
+    };
+    assert.deepEqual(await subject.query({ timeoutMs: 10 }), { status: 'failed', reason: 'no-answer' });
+    assert.ok(!existsSync(file), 'the request is withdrawn');
+    subject.handleEvent({ type: 'line-query', request: late, line: { buffer: 'x', cursor: 1 } });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(written, [LINE_KEYS.query, LINE_KEYS.query], 'nothing is put back: the line was never cleared');
+
+    answer = (request) => subject.handleEvent({ type: 'line-query', request, line: undefined });
+    assert.deepEqual(await subject.query(), { status: 'failed', reason: 'too-long' });
+    assert.equal(subject.filterInput(LINE_KEYS.query), '', 'its key cannot be typed');
+  });
+
+  it('does not query a shell that cannot answer, or is not at its prompt', async () => {
+    assert.deepEqual(await create(['capture', 'set']).query(), { status: 'unsupported' });
+    const subject = create(['capture', 'set', 'query']);
+    subject.handleEvent({ type: 'exec', command: 'vim' });
+    assert.deepEqual(await subject.query(), { status: 'unsupported' });
+    assert.deepEqual(written, []);
+  });
+
   it('reports nothing it cannot do', () => {
     const subject = create([]);
     assert.equal(subject.canCapture, false);
