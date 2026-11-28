@@ -4,10 +4,8 @@ import { ensureDaemonStarted } from './daemon-spawn.js';
 
 /*
  * The terminal's way to the daemon, kept off the startup path. Starting the
- * daemon is plain node (a socket probe, maybe a spawn); the connection
- * itself loads Effect, about 120 ms of module evaluation, so it is imported
- * only when Shelly asks for it, which it does once the shell is idle at its
- * first prompt, or when the user opens the input first.
+ * daemon is plain node (a socket probe, maybe a spawn); the connection is
+ * imported only when Shelly is about to be used (see Shelly.loadUi).
  *
  * If the daemon cannot start, Shelly carries on as a plain shell: `get()`
  * rejects with a one-line reason naming the daemon's log, and tries again
@@ -54,7 +52,7 @@ export class DaemonLink {
     return this.client;
   }
 
-  /** Make sure a daemon is running. Cheap: no Effect. Safe to call often. */
+  /** Make sure a daemon is running. Cheap: a socket probe, maybe a spawn. Safe to call often. */
   startDaemon(): Promise<void> {
     this.started ??= (this.options.ensureStarted ?? ensureDaemonStarted)(this.startOptions()).catch((error: unknown) => {
       this.started = undefined;

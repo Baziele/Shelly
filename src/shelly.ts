@@ -42,8 +42,6 @@ const TRIGGER_HOLD_MS = 400;
 const RESIZE_SETTLE_MS = 50;
 /** How long output that might begin a shell marker is held before it goes to the terminal anyway. */
 const MARKER_HOLD_MS = 50;
-/** How long the terminal must be quiet (no keys, no output) before the daemon connection loads. */
-const IDLE_MS = 300;
 /** Busy this long with nothing drawing, Shelly gives the prompt back (see armWatchdog). */
 const BUSY_WATCHDOG_MS = Number(process.env.SHELLY_BUSY_WATCHDOG_MS) > 0 ? Number(process.env.SHELLY_BUSY_WATCHDOG_MS) : 5000;
 /** Longest Shelly waits for a prompt it asked for before carrying on anyway. */
@@ -59,7 +57,7 @@ export interface ShellyOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly triggers?: readonly string[];
   readonly rewriteHotkeys?: readonly string[];
-  /** The daemon connection; tests may pass their own. Loaded after the shell is up otherwise. */
+  /** The daemon connection; tests may pass their own. Loaded on first use otherwise. */
   readonly link?: DaemonLink;
   /** Test seam: start the shell some other way (a fake). */
   readonly spawnShell?: (options: ShellSessionOptions) => ShellLike;
@@ -146,21 +144,22 @@ export class Shelly {
   /** Where keys go in `busy` mode; returns whether they were used. */
   private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
-  /** The daemon connection, loaded (with the UI) off the startup path. */
+  /** The daemon link: a small module, loaded at the first prompt to start the daemon. */
   private linkLoad: Promise<DaemonLink> | undefined;
   private link: DaemonLink | undefined;
   private readonly initialCwd: string;
   private flows: Flows | undefined;
   private warmupStarted = false;
-  private warmupTimer: NodeJS.Timeout | undefined;
-  private lastActivityAt = 0;
   private readonly shellPath: string;
   private readonly env: NodeJS.ProcessEnv;
   /** Looked up in the background once the shell is running. */
   private environment: Promise<EnvironmentInfo> | undefined;
-  /** The UI loads in the background so the shell starts without waiting for it. */
+  /**
+   * The UI (OpenTUI) and the daemon connection, loaded on first use (see
+   * loadUi), so a terminal that never uses Shelly never pays for them.
+   */
   private overlay: InlineOverlay | undefined;
-  private overlayLoad: Promise<InlineOverlay | undefined> = Promise.resolve(undefined);
+  private overlayLoad: Promise<InlineOverlay | undefined> | undefined;
   private overlayUnavailable = false;
   private disposed = false;
   private mode: Mode = 'shell';
@@ -168,6 +167,8 @@ export class Shelly {
   /** Shell output that arrives while Shelly owns the input line, replayed when it hands back. */
   private heldShellOutput: string[] = [];
   private triggerHoldTimer: NodeJS.Timeout | undefined;
+  /** Counts trigger holds, so a hold's late release never releases a newer one. */
+  private holds = 0;
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
   private watchdog: NodeJS.Timeout | undefined;
@@ -225,7 +226,6 @@ export class Shelly {
         void this.dispose().then(() => resolve(exitCode));
       });
       this.host.start((data) => this.handleInput(data));
-      this.overlayLoad = this.loadOverlay();
       this.environment = describeEnvironment(this.shellPath, this.env);
     });
   }
@@ -235,12 +235,28 @@ export class Shelly {
     this.shell.kill();
   }
 
+  /**
+   * Load the UI and connect to the daemon, once. Called when Shelly is
+   * about to be used: the first character of a trigger typed at an empty
+   * prompt (`:` of `::`), the rewrite hotkey, or a trigger itself. Loading
+   * OpenTUI takes tens of milliseconds, so starting on the first character
+   * means `::` typed at a normal pace opens as fast as if it were loaded.
+   */
+  private loadUi(): Promise<InlineOverlay | undefined> {
+    this.overlayLoad ??= this.loadOverlay();
+    return this.overlayLoad;
+  }
+
   private async loadOverlay(): Promise<InlineOverlay | undefined> {
     try {
+      const linkLoad = this.loadLink();
+      // The connection loads alongside the UI; a failure here is told when the input opens.
+      const connecting = linkLoad.then((link) => link.get());
+      connecting.catch(() => undefined);
       const [{ InlineOverlay }, { Flows }, link] = await Promise.all([
         import('./ui/inline-overlay.js'),
         import('./client/flows.js'),
-        this.loadLink(),
+        linkLoad,
       ]);
       if (this.disposed) {
         return undefined;
@@ -250,7 +266,9 @@ export class Shelly {
         onCancel: () => this.open && this.flows?.cancel(this.open),
       });
       this.overlay = overlay;
-      this.flows = new Flows(this.flowHost(overlay, link));
+      const flows = new Flows(this.flowHost(overlay, link));
+      this.flows = flows;
+      void connecting.then((client) => flows.connected(client), () => undefined);
       return overlay;
     } catch (error) {
       // Keep working as a plain shell; triggers simply pass through.
@@ -261,7 +279,6 @@ export class Shelly {
     }
   }
 
-  /** What the agent and fast flows get to work with. */
   /** The daemon link module is small and plain, but still not needed before the first prompt. */
   private loadLink(): Promise<DaemonLink> {
     this.linkLoad ??= this.link
@@ -273,6 +290,7 @@ export class Shelly {
     return this.linkLoad;
   }
 
+  /** What the agent and fast flows get to work with. */
   private flowHost(overlay: InlineOverlay, link: DaemonLink): FlowHost {
     return {
       terminal: this.host,
@@ -291,7 +309,6 @@ export class Shelly {
   }
 
   private handleInput(data: string): void {
-    this.lastActivityAt = Date.now();
     if (this.noticeBelow) {
       this.host.write(eraseBelowLine(this.noticeBelow));
       this.noticeBelow = undefined;
@@ -384,12 +401,22 @@ export class Shelly {
     }
 
     if (this.detector.isHolding) {
-      this.triggerHoldTimer = setTimeout(() => this.writeToShell(this.detector.release()), TRIGGER_HOLD_MS);
+      // A trigger may be coming: get the UI ready for it.
+      void this.loadUi();
+      const hold = ++this.holds;
+      this.triggerHoldTimer = setTimeout(() => {
+        // A key typed in time may still wait to be read, if loading kept the
+        // event loop busy past the timer: read input first, then decide.
+        setImmediate(() => {
+          if (hold === this.holds && this.detector.isHolding) {
+            this.writeToShell(this.detector.release());
+          }
+        });
+      }, TRIGGER_HOLD_MS);
     }
   }
 
   private handleShellOutput(data: string): void {
-    this.lastActivityAt = Date.now();
     if (this.noticeBelow) {
       // The shell never knows the notice is there, so it can always go
       // first; left, the shell's drawing would land around it.
@@ -452,9 +479,9 @@ export class Shelly {
   }
 
   /**
-   * The shell has drawn its first prompt: start the daemon now (a spawn, no
-   * Effect), and load the connection to it once the terminal is quiet, so
-   * its module loading never lands on a keystroke.
+   * The shell has drawn its first prompt: start the daemon now (a socket
+   * probe, maybe a spawn; cheap for the client), so it is up by the time
+   * the user first asks. The connection and the UI wait for first use.
    */
   private warmUp(): void {
     if (this.warmupStarted || this.disposed) {
@@ -462,18 +489,6 @@ export class Shelly {
     }
     this.warmupStarted = true;
     void this.loadLink().then((link) => link.startDaemon()).catch(() => undefined);
-    const whenIdle = (): void => {
-      if (this.disposed) {
-        return;
-      }
-      const quietFor = Date.now() - this.lastActivityAt;
-      if (quietFor < IDLE_MS) {
-        this.warmupTimer = setTimeout(whenIdle, IDLE_MS - quietFor);
-        return;
-      }
-      void this.loadLink().then((link) => link.get()).then((client) => this.flows?.connected(client), () => undefined);
-    };
-    this.warmupTimer = setTimeout(whenIdle, IDLE_MS);
   }
 
   private async openOverlay(trigger: string, remainder: string, rewrite?: OpenInput['rewrite']): Promise<void> {
@@ -481,10 +496,10 @@ export class Shelly {
     this.open = { trigger, mode: trigger === '__' ? 'fast' : 'agent', rewrite };
     this.queuedInput = remainder;
 
-    const [overlay, cursor] = await Promise.all([
-      this.overlayLoad,
-      this.host.queryCursorPosition().catch((): CursorPosition | undefined => undefined),
-    ]);
+    // The UI first: loading it keeps the event loop busy, and a cursor query
+    // asked meanwhile could time out with its answer waiting to be read.
+    const overlay = await this.loadUi();
+    const cursor = await this.host.queryCursorPosition().catch((): CursorPosition | undefined => undefined);
 
     const flows = this.flows;
     if (!overlay || !flows || !cursor || this.disposed) {
@@ -516,6 +531,11 @@ export class Shelly {
     const editor = this.lineEditor!;
     this.mode = 'capturing';
     this.queuedInput = remainder;
+    // The UI loads only once the line is captured (openOverlay), never
+    // before or meanwhile: the capture is of the shell as it is when the key
+    // is pressed, and loading keeps the event loop busy, so the capture's
+    // wait for the shell's answer (or, below, bash 3.2's cursor queries)
+    // could time out with the answer waiting to be read.
     // bash 3.2 can never hand its line over. Without it there is nothing to
     // rewrite (fast mode would not see what the user typed), so the input
     // does not open there: the line stays as it is, with a notice below.
@@ -849,7 +869,6 @@ export class Shelly {
     clearTimeout(this.triggerHoldTimer);
     clearTimeout(this.resizeTimer);
     clearTimeout(this.markerHoldTimer);
-    clearTimeout(this.warmupTimer);
     clearTimeout(this.promptWait?.timer);
     clearTimeout(this.watchdog);
     this.lineEditor?.dispose();

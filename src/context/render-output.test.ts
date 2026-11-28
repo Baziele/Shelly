@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { renderOutput, renderTerminalText } from './render-output.js';
+import { MAX_EMULATED_LINES, renderOutput, renderTerminalText } from './render-output.js';
 
 const ZSH_NO_NEWLINE_MARK = `\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m${' '.repeat(79)}\r \r`;
 const plain = (head: string) => ({ head, tail: '', omittedChars: 0, usedFullScreen: false });
@@ -31,6 +31,17 @@ describe('renderTerminalText', () => {
   it('applies cursor movement, as when a tool rewrites earlier lines', async () => {
     const raw = 'step 1: pending\r\nstep 2: pending\r\n\u001b[2A\r\u001b[Kstep 1: done\r\n\u001b[Kstep 2: done\r\n';
     assert.equal(await renderTerminalText(raw, 80), 'step 1: done\nstep 2: done');
+  });
+
+  it('replays at most MAX_EMULATED_LINES lines, keeping the end', async () => {
+    const lines = Array.from({ length: 3 * MAX_EMULATED_LINES }, (_, index) => `line ${index + 1}`);
+    // The cursor move sends it through the emulator; it rewrites the last line.
+    const raw = `${lines.join('\r\n')}\r\n\u001b[1A\r\u001b[Klast, rewritten\r\n`;
+    const rendered = (await renderTerminalText(raw, 80)).split('\n');
+    assert.ok(rendered.length <= MAX_EMULATED_LINES + 24, `${rendered.length} lines`);
+    assert.equal(rendered.at(-1), 'last, rewritten');
+    assert.equal(rendered.at(-2), `line ${lines.length - 1}`);
+    assert.ok(!rendered.includes('line 1'));
   });
 
   it('rejoins lines the terminal wrapped', async () => {

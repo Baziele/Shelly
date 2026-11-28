@@ -22,13 +22,21 @@ terminal tab ─ shelly (client) ─ pty ─ user's shell (with Shelly's hooks)
 - **Client** (`src/shelly.ts` and friends): one per terminal tab. Owns the pty,
   the shell hooks, the command log, the inline UI, and everything the user
   sees. Plain TypeScript on the hot path; it loads the daemon connection and
-  the UI lazily, after the shell is up, so Shelly never delays the prompt.
+  the UI on first use, so Shelly never delays the prompt and a tab that
+  never uses it stays small.
 - **Daemon** (`src/daemon/`): one per user, started on demand by the first
   client that needs it and gone after a while with no clients and no running
   turns. Owns agent processes, threads and their history, so a thread outlives
   the tab it started in and an agent's work survives closing the tab.
 - **Protocol** (`src/protocol/`): Effect RPC over a unix socket in
-  `$SHELLY_HOME/run/`, NDJSON-serialised. Both sides share the schemas.
+  `$SHELLY_HOME/run/`, NDJSON-serialised. The daemon serves it with Effect's
+  RpcServer and the schemas. The client speaks the same messages with a
+  small hand-written client (`src/client/rpc-connection.ts`) and never loads
+  Effect, which would cost every tab about 40 MB: it trusts the protocol
+  version checked at hello, and checks the shape of the events it renders.
+  A contract test (`test/e2e/daemon-contract.e2e.ts`) runs every RPC through
+  it against a real daemon, and fails when an RPC is added that it does not
+  know.
 
 `SHELLY_HOME` defaults to `~/.shelly`. Tests always point it at a temporary
 directory.
@@ -194,11 +202,18 @@ recorded event sequences from `test/fixtures/thread-events/` through them.
 
 - Nothing slows the shell: no extra work before the prompt, none per keystroke
   or per byte of output beyond what the hooks need.
-- Heavy modules (Effect, OpenTUI, the daemon connection) load after the shell
-  starts. The daemon is started at the first prompt; its connection (Effect,
-  about 120 ms of synchronous module loading) loads once the terminal has
-  been quiet for 300 ms. That is best effort: a key pressed during the load
-  waits for it. Without a daemon, Shelly is a plain shell and `::` says why.
+- The client loads only what the shell needs until Shelly is used: about
+  60 MB RSS for a tab that never opens it, and never Effect. The daemon is
+  started at the first prompt (a socket probe, maybe a spawn). The UI
+  (OpenTUI) and the daemon connection load on first use, from the first `:`
+  or `_` typed at an empty prompt (which may begin a trigger) or the rewrite
+  hotkey. A `::` typed at a normal pace opens as fast as if they were
+  loaded; one typed instantly (a paste) waits about 90 ms for the load, the
+  first time only. Without a daemon, Shelly is a plain shell and `::` says
+  why.
+- Each client runs with a 4 MB young generation (`--max-semi-space-size=4`
+  in the shebang): V8's default grows by 30–55 MB per tab while a turn
+  streams. The daemon keeps V8's defaults.
 - The daemon starts in the background when a client first runs, warms the
   agent while the user is still typing, and keeps one lean fast-mode process
   warm only for a few minutes after use (each costs about 200 MB).

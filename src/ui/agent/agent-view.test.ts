@@ -178,6 +178,20 @@ describe('AgentView', { timeout: 30_000 }, () => {
     assert.equal(view.handleInput('x'), false, 'keys go back to the shell');
   });
 
+  it('draws a turn that ended before it knew where to start', async () => {
+    const term = new EmulatedTerminal(80, 12);
+    term.write(`${ECHO}q\r\n`);
+    const view = new AgentView(term, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme-web', home: '/home/dev', now: clock });
+    current = view;
+    view.apply(event({ type: 'turn.started', text: 'q', at: Date.now() }));
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'Quick.' }));
+    view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
+    const finished = view.finish();
+    view.start(await term.cursor());
+    await finished;
+    assert.deepEqual((await term.allLines()).slice(1), ['Quick.', '', '✓ 1s']);
+  });
+
   it('leaves ordinary typing alone while a turn runs', async () => {
     const { view } = await setup(80, 12, 'q');
     assert.equal(view.handleInput('ls'), false);

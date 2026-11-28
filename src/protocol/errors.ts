@@ -1,4 +1,5 @@
 import * as Schema from 'effect/Schema';
+import { ERROR_MESSAGES } from './error-messages.js';
 
 /** Errors the daemon returns to clients. Messages are shown to the user as they are. */
 
@@ -7,7 +8,7 @@ export class ProtocolMismatch extends Schema.TaggedError<ProtocolMismatch>()('Pr
   clientProtocol: Schema.Number,
 }) {
   override get message(): string {
-    return `Shelly's background service speaks protocol ${this.daemonProtocol}, this terminal speaks ${this.clientProtocol}.`;
+    return ERROR_MESSAGES.ProtocolMismatch(this);
   }
 }
 
@@ -15,7 +16,7 @@ export class ThreadNotFound extends Schema.TaggedError<ThreadNotFound>()('Thread
   threadId: Schema.String,
 }) {
   override get message(): string {
-    return 'That thread no longer exists.';
+    return ERROR_MESSAGES.ThreadNotFound();
   }
 }
 
@@ -25,7 +26,7 @@ export class ThreadBusy extends Schema.TaggedError<ThreadBusy>()('ThreadBusy', {
   attachedBy: Schema.String,
 }) {
   override get message(): string {
-    return 'That thread is open in another terminal.';
+    return ERROR_MESSAGES.ThreadBusy();
   }
 }
 
@@ -33,7 +34,7 @@ export class TurnInProgress extends Schema.TaggedError<TurnInProgress>()('TurnIn
   threadId: Schema.String,
 }) {
   override get message(): string {
-    return 'The agent is still working on the last request.';
+    return ERROR_MESSAGES.TurnInProgress();
   }
 }
 
@@ -42,7 +43,7 @@ export class AgentUnavailable extends Schema.TaggedError<AgentUnavailable>()('Ag
   reason: Schema.String,
 }) {
   override get message(): string {
-    return this.reason;
+    return ERROR_MESSAGES.AgentUnavailable(this);
   }
 }
 
@@ -52,7 +53,7 @@ export class AgentFailed extends Schema.TaggedError<AgentFailed>()('AgentFailed'
   reason: Schema.String,
 }) {
   override get message(): string {
-    return this.reason;
+    return ERROR_MESSAGES.AgentFailed(this);
   }
 }
 
@@ -60,7 +61,7 @@ export class UnknownRequest extends Schema.TaggedError<UnknownRequest>()('Unknow
   requestId: Schema.String,
 }) {
   override get message(): string {
-    return 'That request has already been answered or withdrawn.';
+    return ERROR_MESSAGES.UnknownRequest();
   }
 }
 

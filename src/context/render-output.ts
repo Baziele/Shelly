@@ -192,8 +192,12 @@ type HeadlessModule = typeof import('@xterm/headless');
 let terminalModule: Promise<HeadlessModule> | undefined;
 
 const EMULATOR_ROWS = 24;
-/** Bounds the emulator's buffers; output this long rarely moves the cursor between lines. */
-const MAX_EMULATED_LINES = 5000;
+/**
+ * Bounds the emulator's buffers, and so the memory a replay leaves behind
+ * (5,000 lines left about 17 MB). Output this long rarely moves the cursor
+ * between lines, and an agent is given the end of it, well within this.
+ */
+export const MAX_EMULATED_LINES = 1000;
 
 const emulate = async (raw: string, width: number): Promise<string> => {
   // A CommonJS package: Node puts its exports on `default`, some loaders on the namespace.

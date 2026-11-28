@@ -130,6 +130,8 @@ export class AgentView {
   private agentName: string;
 
   private state: State = 'created';
+  /** Runs once start() has: what a finish() waiting for it to begin needs. */
+  private onStart: (() => void) | undefined;
   private startedAt = 0;
   private bufferRows: number;
   private frameTimer: NodeJS.Timeout | undefined;
@@ -199,6 +201,7 @@ export class AgentView {
     this.region.start(anchor);
     this.spinnerTimer = this.timers.setInterval(() => this.spin(), SPINNER_INTERVAL_MS);
     this.schedule();
+    this.onStart?.();
   }
 
   apply(event: ThreadEvent): void {
@@ -312,8 +315,18 @@ export class AgentView {
    */
   async finish(): Promise<void> {
     if (this.state === 'created') {
-      this.state = 'done';
-      return;
+      // The turn can end before the view knows where to draw (the terminal
+      // has not said where the cursor is yet): wait for that, or a turn that
+      // ends quickly would show nothing at all.
+      await Promise.race([
+        new Promise<void>((resolve) => (this.onStart = resolve)),
+        new Promise<void>((resolve) => setTimeout(resolve, FINISH_TIMEOUT_MS).unref()),
+      ]);
+      this.onStart = undefined;
+      if ((this.state as State) === 'created') {
+        this.state = 'done';
+        return;
+      }
     }
     if (this.state !== 'running') {
       return;
