@@ -383,10 +383,10 @@ for (const shell of shells) {
           await session.type(step.keys);
           await session.waitFor(step.shown, JSON.stringify(step.keys));
         }
-        // The shell takes the Enter and runs nothing. Ctrl+] at once: Shelly
-        // holds it until the shell has shown what the Enter did, however
-        // slowly its output comes.
-        await session.type(`${enter.enter?.[kind] ?? '\r'}${HOTKEY}`);
+        // The shell takes the Enter and runs nothing. Ctrl+] with it, in the
+        // same read (as when typed fast): Shelly holds it until the shell has
+        // shown what the Enter did, however slowly its output comes.
+        await session.driver.type(`${enter.enter?.[kind] ?? '\r'}${HOTKEY}`, { perCharDelayMs: 0 });
         if (canCapture) {
           const opened = await session.waitFor(inputOpen, 'the input');
           assert.ok(!opened.some((row) => SEARCHING.test(row)), 'the search was over first');
@@ -414,7 +414,7 @@ for (const shell of shells) {
       const session = await start();
       // Held until the shell says it ran a command, then the command's.
       await session.type(`cat\r${HOTKEY}y\r`);
-      await session.waitFor((rows) => rows.includes('^]y'), 'cat to receive the key');
+      await session.driver.waitFor(() => session.raw().includes('\u001dy'), 'cat to receive the key and write it back');
       await session.type('\u0004');
       await session.waitFor((rows) => promptRow(rows) === '$', 'the prompt after cat');
     });

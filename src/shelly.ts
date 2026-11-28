@@ -370,9 +370,15 @@ export class Shelly {
       return;
     }
 
-    this.routeToShell(this.detector.push(data.slice(0, hotkey.start)));
+    this.routeToShell(this.detector.push(data.slice(0, hotkey.start), { mayAsk }));
     if (this.mode !== 'shell') {
       this.queuedInput += data.slice(hotkey.start);
+      return;
+    }
+    if (this.heldInput !== undefined || (mayWait && this.lineEditor?.isDeciding)) {
+      // What came before it is being asked about, or was an Enter (the two
+      // keys arrive together when typed fast): the rest waits with it.
+      this.handleShellInput(data.slice(hotkey.start), { mayAsk, mayWait });
       return;
     }
     if (!this.lineEditor?.isAtPrompt) {
