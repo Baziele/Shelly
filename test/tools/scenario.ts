@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -392,6 +392,7 @@ export const keySequence = (key: string, applicationCursorKeys = false): string 
  */
 export const stopDaemonIn = async (shellyHome: string): Promise<void> => {
   const paths = shellyPaths({ SHELLY_HOME: shellyHome });
+  await settleStartingDaemon(paths);
   const pid = readLock(paths.lock)?.pid;
   if (pid === undefined || pid === process.pid || !isProcessAlive(pid) || !(await probeSocket(paths.socket))) {
     return;
@@ -402,6 +403,22 @@ export const stopDaemonIn = async (shellyHome: string): Promise<void> => {
   }
   if (isProcessAlive(pid)) {
     process.kill(pid, 'SIGKILL');
+  }
+};
+
+/** A daemon still starting (spawned, its log begun, not yet on its socket) is waited for, so it can be stopped. */
+const DAEMON_START_WAIT_MS = 15_000;
+const DAEMON_GAVE_UP = /started pid=|another daemon is running|too long|failed|stopping/;
+
+const settleStartingDaemon = async (paths: ReturnType<typeof shellyPaths>): Promise<void> => {
+  for (let waited = 0; waited < DAEMON_START_WAIT_MS; waited += 100) {
+    if (!existsSync(paths.daemonLog) || (await probeSocket(paths.socket))) {
+      return;
+    }
+    if (DAEMON_GAVE_UP.test(readFileSync(paths.daemonLog, 'utf8'))) {
+      return;
+    }
+    await sleep(100);
   }
 };
 
