@@ -33,7 +33,7 @@
  *   --verbose              Print every message to stderr as it passes.
  *   --resanitize           Re-run the sanitizer over the recorded fixtures.
  *
- * Scenarios: init, simple, tool, bash, permission-allow, permission-reject,
+ * Scenarios: init, simple, tool, bash, write, permission-allow, permission-reject,
  * external, cancel, resume, latency, rss.
  *
  * Real prompts cost money: every scenario but `init` sends one to three tiny
@@ -42,7 +42,7 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, hostname, tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
@@ -56,6 +56,7 @@ import {
   type Stream,
 } from "@agentclientprotocol/sdk/unstable";
 import { withoutHostSession } from "../src/daemon/claude-env.js";
+import { sanitizer } from "./acp-sanitize.js";
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -528,144 +529,19 @@ function makeProbeDir(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sanitizing
+// Sanitizing (scripts/acp-sanitize.ts)
 
-type Rule = { re: RegExp; to: string };
-
-/** Replaces machine- and person-specific strings in one pass, and returns a
- *  map from each index of `s` to the matching index of the result, so that a
- *  text streamed in chunks can be scrubbed as a whole and split again. */
-function scrubber(probeDir: string | undefined) {
-  const home = homedir();
-  const user = userInfo().username;
-  const host = hostname().replace(/\.local$/, "");
-  const tmp = realpathSync(tmpdir());
-  const literal = (from: string, to: string): Rule[] => [
-    { re: new RegExp(escape(from), "g"), to },
-    ...(from.startsWith("/private/") ? [{ re: new RegExp(escape(from.slice("/private".length)), "g"), to }] : []),
-  ];
-  // Order matters: the first rule that matches at a position wins.
-  const rules: Rule[] = [
-    ...(["extra", "outside"] as const).flatMap((n) => (extraDirs[n] ? literal(extraDirs[n], `/tmp/${n}`) : [])),
-    ...(probeDir ? literal(probeDir, "/tmp/probe") : []),
-    ...literal(`${tmp}/`, "/tmp/"),
-    ...literal(tmp, "/tmp"),
-    ...literal(home, "/home/user"),
-    { re: /acp-(?:probe|extra|outside)-[A-Za-z0-9]{6}/g, to: "<dir>" },
-    { re: new RegExp(`\\b${escape(user)}\\b`, "gi"), to: "user" },
-    { re: new RegExp(`\\b${escape(host)}\\b`, "gi"), to: "host" },
-    { re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, to: "user@example.com" },
-    { re: /\bsk-[A-Za-z0-9_-]{16,}/g, to: "<token>" },
-    { re: /\b(?:eyJ[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]{10,}/g, to: "<token>" },
-  ];
-  const combined = new RegExp(rules.map((r) => `(?:${r.re.source})`).join("|"), "gi");
-  const anchored = rules.map((r) => new RegExp(`^(?:${r.re.source})$`, r.re.flags.replace("g", "")));
-  const replacement = (m: string): string => {
-    const i = anchored.findIndex((re) => re.test(m));
-    const rule = rules[i]!;
-    // `acp-probe-XXXXXX` -> `probe`, and so on.
-    return rule.to === "<dir>" ? m.split("-")[1]! : rule.to;
-  };
-  return (s: string): { out: string; map: number[] } => {
-    let out = "";
-    const map: number[] = [];
-    let last = 0;
-    for (const m of s.matchAll(combined)) {
-      const at = m.index;
-      for (let i = last; i < at; i++) map[i] = out.length + (i - last);
-      out += s.slice(last, at);
-      const rep = replacement(m[0]);
-      for (let i = at; i < at + m[0].length; i++) map[i] = out.length; // inside a match: its start
-      out += rep;
-      last = at + m[0].length;
-    }
-    for (let i = last; i <= s.length; i++) map[i] = out.length + (i - last);
-    out += s.slice(last);
-    // A match that ends the string maps its end past the replacement.
-    map[s.length] = out.length;
-    return { out, map };
-  };
-}
-
-const CHUNK_KINDS = new Set(["agent_message_chunk", "agent_thought_chunk", "user_message_chunk"]);
-
-/** Scrubs streamed text as one string per message, so a path split across
- *  chunks is caught, and gives each chunk its share of the result. */
-function scrubChunkStreams(records: Rec[], scrub: ReturnType<typeof scrubber>): Rec[] {
-  const copy = records.map((r) => structuredClone(r));
-  const groups = new Map<string, { text: { text: string } }[]>();
-  for (const r of copy) {
-    const m = r.msg as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string; messageId?: string; content?: { type?: string; text?: string } } } };
-    const u = m.params?.update;
-    if (m.method !== "session/update" || !u || !CHUNK_KINDS.has(u.sessionUpdate ?? "") || u.content?.type !== "text") continue;
-    const key = `${r.proc ?? 1}|${m.params!.sessionId}|${u.sessionUpdate}|${u.messageId ?? ""}`;
-    const list = groups.get(key) ?? [];
-    list.push({ text: u.content as { text: string } });
-    groups.set(key, list);
-  }
-  for (const list of groups.values()) {
-    const joined = list.map((c) => c.text.text).join("");
-    const { out, map } = scrub(joined);
-    if (out === joined) continue;
-    let pos = 0;
-    for (const c of list) {
-      const a = pos;
-      const b = pos + c.text.text.length;
-      pos = b;
-      // Indices inside a match map to its start, so the chunk holding the
-      // match's last character gets the replacement and the chunks before it
-      // inside the match become empty.
-      c.text.text = out.slice(map[a]!, map[b]!);
-    }
-  }
-  return copy;
-}
-
-const TRIM_LIST = 8;
-
-function sanitizer(probeDir: string | undefined) {
-  const scrub = scrubber(probeDir);
-  const str = (s: string) => scrub(s).out;
-  const secretKey = /(token|secret|password|apikey|api_key|authorization|cookie|email|accountuuid|organization|orguuid|orgname|userid|displayname)/i;
-  const notes: string[] = [];
-  const walk = (v: unknown, key = "", path = ""): unknown => {
-    if (typeof v === "string") return secretKey.test(key) && v !== "" ? "<redacted>" : str(v);
-    if (Array.isArray(v)) {
-      let arr = v;
-      // Long lists (commands, skills, models) are trimmed: they carry the
-      // user's own setup and are not part of the protocol shape.
-      if ((key === "availableCommands" || key === "options" || key === "availableModels" || key === "availableModes") && v.length > TRIM_LIST) {
-        notes.push(`${path}: kept ${TRIM_LIST} of ${v.length}`);
-        arr = v.slice(0, TRIM_LIST);
-      }
-      return arr.map((x, i) => walk(x, key, `${path}[${i}]`));
-    }
-    if (v && typeof v === "object") {
-      return Object.fromEntries(Object.entries(v).map(([k, x]) => [str(k), walk(x, k, path ? `${path}.${k}` : k)]));
-    }
-    return v;
-  };
-  const one = (rec: Rec) => {
-    notes.length = 0;
-    const msg = walk(rec.msg);
-    const out: Record<string, unknown> = { dir: rec.dir, t: rec.t };
-    if (rec.proc !== undefined) out.proc = rec.proc;
-    out.msg = msg;
-    if (notes.length) out.trimmed = [...notes];
-    return out;
-  };
-  return { one, all: (records: Rec[]) => scrubChunkStreams(records, scrub).map(one) };
-}
-
-function escape(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+/** The probe's own directories and what they become in a fixture. */
+const probeDirs = (probeDir: string | undefined): [string, string][] => [
+  ...(["extra", "outside"] as const).flatMap((n): [string, string][] => (extraDirs[n] ? [[extraDirs[n], `/tmp/${n}`]] : [])),
+  ...(probeDir ? [[probeDir, "/tmp/probe"] as [string, string]] : []),
+];
 
 function writeFixture(p: Probe, name: string): void {
   if (argv["no-record"]) return;
   const dir = join(fixtureRoot, agentName);
   mkdirSync(dir, { recursive: true });
-  const lines = sanitizer(p.cwd).all(p.rec.records).map((r) => JSON.stringify(r));
+  const lines = sanitizer(probeDirs(p.cwd)).all(p.rec.records).map((r) => JSON.stringify(r));
   const file = join(dir, `${name}.ndjson`);
   writeFileSync(file, `${lines.join("\n")}\n`);
   report.fixture = file.replace(`${repoRoot}/`, "");
@@ -717,6 +593,21 @@ const scenarios: Record<string, (p: Probe) => Promise<void>> = {
       "Run exactly this shell command once with your shell tool, then reply with its exit code only: printf 'one\\ntwo\\nthree\\n'; echo oops >&2; exit 3",
     );
     Object.assign(report, { turn, permissionRequests: permissionRequests(p), updates: updateKinds(p.rec.records) });
+  },
+
+  async write(p) {
+    // Shelly's layout: the session runs in its own folder, and the user's project is an
+    // additional directory. A new file there, in the agent's own default mode (Claude's
+    // is often Auto: no permission prompt).
+    makeExtraDirs();
+    p.permissionPolicy = "allow_once";
+    const { session } = await setup(p, { additionalDirectories: [extraDirs.extra] });
+    const turn = await prompt(
+      p,
+      session.sessionId,
+      `Create ${extraDirs.extra}/notes.txt containing exactly three lines: alpha, beta, gamma. Use your file write tool, no shell commands, do not ask me anything first, then reply with the word done.`,
+    );
+    Object.assign(report, { turn, permissionRequests: permissionRequests(p), fileWritten: existsSync(join(extraDirs.extra, "notes.txt")), updates: updateKinds(p.rec.records) });
   },
 
   async "permission-allow"(p) {
@@ -906,7 +797,7 @@ function resanitize(): void {
     for (const name of readdirSync(dir).filter((f) => f.endsWith(".ndjson"))) {
       const file = join(dir, name);
       const rows = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Rec & { trimmed?: string[] });
-      const clean = sanitizer(undefined).all(rows);
+      const clean = sanitizer([]).all(rows);
       const lines = clean.map((r, i) => JSON.stringify(rows[i]!.trimmed && !r.trimmed ? { ...r, trimmed: rows[i]!.trimmed } : r));
       writeFileSync(file, `${lines.join("\n")}\n`);
     }
@@ -940,7 +831,7 @@ async function main(): Promise<void> {
     for (const d of Object.values(extraDirs)) if (d) rmSync(d, { recursive: true, force: true });
   }
   else report.probeDir = dir;
-  const out = sanitizer(dir).one({ dir: "in", t: 0, msg: report as unknown as AnyMessage }).msg as Record<string, unknown>;
+  const out = sanitizer(probeDirs(dir)).one({ dir: "in", t: 0, msg: report as unknown as AnyMessage }).msg as Record<string, unknown>;
   if (failed) out.failed = errInfo(failed);
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
   if (failed) process.exitCode = 1;

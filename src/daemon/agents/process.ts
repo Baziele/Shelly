@@ -10,6 +10,7 @@ import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import * as AcpClient from '../../acp/client.js';
 import type * as Acp from '../../acp/compat.js';
 import type * as AcpError from '../../acp/errors.js';
+import type { AcpProtocolLogEvent } from '../../acp/protocol.js';
 import { AgentFailed, AgentUnavailable } from '../../protocol/errors.js';
 import { type AgentDefinition, agentEnvironment } from './definitions.js';
 
@@ -69,7 +70,33 @@ export interface SpawnHooks {
   readonly onTerminated: (process: AgentProcess, error: AcpError.AcpError) => Effect.Effect<void>;
   /** Test hook: the pid of each process spawned. */
   readonly onSpawn?: ((info: { readonly agentId: string; readonly pid: number }) => void) | undefined;
+  /**
+   * Recording hook: every JSON-RPC line exchanged with the agent, as sent or
+   * received. For fixtures only: the lines hold prompts and agent output.
+   */
+  readonly onProtocolMessage?: ProtocolTap | undefined;
 }
+
+export type ProtocolTap = (message: { readonly agentId: string; readonly direction: 'in' | 'out'; readonly line: string }) => void;
+
+/** Turns the client's raw protocol events (stdout chunks, encoded writes) into whole lines. */
+const protocolLogger = (agentId: string, tap: ProtocolTap) => {
+  const pending = { in: '', out: '' };
+  return (event: AcpProtocolLogEvent): Effect.Effect<void> =>
+    Effect.sync(() => {
+      if (event.stage !== 'raw' || typeof event.payload !== 'string') {
+        return;
+      }
+      const direction = event.direction === 'incoming' ? 'in' : 'out';
+      const lines = (pending[direction] + event.payload).split('\n');
+      pending[direction] = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.trim() !== '') {
+          tap({ agentId, direction, line });
+        }
+      }
+    });
+};
 
 const CANCELLED: Acp.RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
 
@@ -130,6 +157,9 @@ export const spawnAgentProcess = Effect.fn('AgentProcess.spawn')(function* (
     let process: AgentProcess | undefined;
 
     const context = yield* Layer.build(AcpClient.layerChildProcess(child, {
+      ...(hooks.onProtocolMessage
+        ? { logIncoming: true, logOutgoing: true, logger: protocolLogger(definition.id, hooks.onProtocolMessage) }
+        : {}),
       onTermination: (error) =>
         Effect.suspend(() => {
           alive = false;
@@ -157,7 +187,9 @@ export const spawnAgentProcess = Effect.fn('AgentProcess.spawn')(function* (
       }));
 
     const initialize = yield* acp.agent.initialize({
-      // v1 is what both built-in agents are measured and recorded on; v2 is still a draft.
+      // The vendored client sends one hybrid request (v2 and v1 fields, `protocolVersion: 2`)
+      // and follows the generation the agent answers with: Claude Code answers v2, OpenCode v1.
+      // mapping.ts handles both. This field only feeds the v1 half.
       protocolVersion: 1,
       clientInfo: SHELLY_CLIENT_INFO,
       clientCapabilities: SHELLY_CLIENT_CAPABILITIES,
