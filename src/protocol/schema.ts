@@ -6,12 +6,7 @@ import * as Schema from 'effect/Schema';
  * from ACP here, so clients never see an agent's own protocol.
  */
 
-/**
- * Bumped whenever a schema in src/protocol changes incompatibly, or gains a
- * call an older daemon would not know (2: `thread.modes`), so a client asks
- * an older idle daemon to make way.
- */
-export const PROTOCOL_VERSION = 2;
+export { PROTOCOL_VERSION } from './version.js';
 
 // ─── Agents ─────────────────────────────────────────────────────────────────
 
