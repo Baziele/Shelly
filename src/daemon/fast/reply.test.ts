@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { classifyReply, looksLikeProse } from './reply.js';
 
+/** The commands the tests' "shell" has, so they never depend on this machine's PATH. */
+const COMMANDS = new Set([
+  'ls', 'du', 'sort', 'Rscript', 'R', 'Xvfb', 'echo', 'git', 'find', 'cp', 'cd', 'kill', 'for', 'which', 'python3', 'printf',
+  'cat', 'tar', 'ssh', 'open', 'npm', 'make', 'sudo', 'lsof', 'osascript', 'curl', 'sh', 'grep', 'tr', 'mv', 'zip', 'tail',
+  'docker', 'rsync', 'ps', 'xargs', 'wc', 'head', 'brew', 'set', 'sed', 'Get-ChildItem', 'Set-Location', 'Add-Content',
+]);
+const isCommand = (word: string) => COMMANDS.has(word);
+
 describe('classifyReply', () => {
   const cases: ReadonlyArray<readonly [raw: string, kind: 'command' | 'answer', text: string]> = [
     ['lsof -ti tcp:3000 | xargs kill', 'command', 'lsof -ti tcp:3000 | xargs kill'],
@@ -33,13 +41,25 @@ describe('classifyReply', () => {
   ];
 
   for (const [raw, kind, text] of cases) {
-    it(`reads ${JSON.stringify(raw)} as ${kind}`, () => assert.deepEqual(classifyReply(raw), { kind, text }));
+    it(`reads ${JSON.stringify(raw)} as ${kind}`, () => assert.deepEqual(classifyReply(raw, { isCommand }), { kind, text }));
   }
 
-  it('shows a prose reply instead of putting it on the line', () => {
+  it('shows a prose reply as an answer, shaped like any other', () => {
     const raw = 'Use `du -sh * | sort -h` — it lists sizes of everything here, smallest first.';
-    assert.deepEqual(classifyReply(raw), { kind: 'answer', text: raw });
-    assert.deepEqual(classifyReply('```\nRun `git status` to see what changed.\n```').kind, 'answer');
+    assert.deepEqual(classifyReply(raw, { isCommand }), { kind: 'answer', text: raw });
+    // Fenced or not, the same answer: no fences, no `#` markers.
+    const fenced = classifyReply('```\nRun `git status` to see what changed.\nThen commit.\n```', { isCommand });
+    assert.deepEqual(fenced, { kind: 'answer', text: 'Run `git status` to see what changed.\nThen commit.' });
+    assert.deepEqual(classifyReply('# Run `git status` to see what changed.\n# Then commit.', { isCommand }), fenced);
+  });
+
+  it('scans a long reply in linear time', () => {
+    const long = `cat > big.txt <<'EOF'\n${Array.from({ length: 20_000 }, (_, i) => `line ${i} "with 'quotes'`).join('\n')}\nEOF`;
+    const started = performance.now();
+    assert.equal(classifyReply(long, { isCommand }).kind, 'command');
+    const multiline = `echo "${Array.from({ length: 20_000 }, (_, i) => `line ${i}`).join('\n')}"\n# trailing`;
+    assert.equal(classifyReply(multiline, { isCommand }).kind, 'command');
+    assert.ok(performance.now() - started < 1000, `took ${Math.round(performance.now() - started)} ms`);
   });
 });
 
@@ -100,6 +120,23 @@ describe('looksLikeProse', () => {
     'npm run build',
     'ps aux --sort=-%mem | head',
     'set -gx FOO bar',
+    // Shapes the review found misread before.
+    'echo done. Next',
+    'git commit -m fix the bug.',
+    'echo this is fine.',
+    'echo Build finished. Deploy next — tomorrow.',
+    'cp ~/Notes/2024—draft.md ./notes–old.md',
+    'mv "Q3 – report.pdf" archive/',
+    'Add-Content -Path notes.txt -Value hello world',
+    'Mytool build the docs',
+    'Rscript run the analysis',
+    // Quotes the scanner must read as the shell does.
+    "echo $'It\\'s done. Next one'",
+    'echo "say \\"hi\\". Then go"',
+    'echo `grep "a b" f` done',
+    "printf '%s\\n' 'Use the force. Always.'",
+    'Mytool "Use the thing — now',
+    "sed -i '' 's/foo/bar/' file.txt",
   ];
 
   // Answers a model gave without the `# ` convention. Never on the line.
@@ -112,28 +149,34 @@ describe('looksLikeProse', () => {
     'The -print0 flag separates names with NUL bytes.',
     'It lists files by size.',
     '`du -sh *` lists the size of each item',
-    'ls -la shows hidden files too. Use it often.',
-    'lsof -ti tcp:3000 — then pipe it to kill',
     "Sorry, I can't do that as a command.",
     "I don't know which file you mean.",
     "Here's how: run make clean first.",
     'Sure! ls -la',
     'There is no single command for that.',
-    'git fetch downloads; git pull also merges.',
     'ls -la\nThis lists all files, including hidden ones.',
     'Lists every file larger than 100MB.',
     'Both work, but fetch is safer.',
     'Unfortunately macOS has no such flag.',
-    'find . -size +100M – that finds big files',
     'Note: this deletes files permanently.',
     "Don't run that as root.",
     'Try `brew install jq` first, then rerun.',
+    "Use 'ls to list files",
+    'This needs sudo. Run it as an admin.',
+    "Unknown tool — it isn't installed here",
+    'Lists every file larger than 100MB.',
   ];
 
   for (const command of commands) {
-    it(`keeps ${JSON.stringify(command)} a command`, () => assert.equal(looksLikeProse(command), false));
+    it(`keeps ${JSON.stringify(command)} a command`, () => assert.equal(looksLikeProse(command, { isCommand }), false));
   }
   for (const text of prose) {
-    it(`reads ${JSON.stringify(text)} as prose`, () => assert.equal(looksLikeProse(text), true));
+    it(`reads ${JSON.stringify(text)} as prose`, () => assert.equal(looksLikeProse(text, { isCommand }), true));
   }
+
+  it('knows builtins and what is on PATH, exactly as spelled', () => {
+    assert.equal(looksLikeProse('echo this is fine.'), false);
+    assert.equal(looksLikeProse('ls these files now.'), false, 'ls is on PATH');
+    assert.equal(looksLikeProse('Use the force.'), true);
+  });
 });
