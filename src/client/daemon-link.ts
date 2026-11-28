@@ -24,6 +24,15 @@ export interface DaemonLinkOptions {
   /** Overrides for tests: which script runs `shelly daemon`, and with which node flags. */
   readonly entry?: string;
   readonly execArgv?: readonly string[];
+  /** Test seams: how the daemon is started, and how the client is made. */
+  readonly ensureStarted?: (options: ReturnType<DaemonLink['startOptions']>) => Promise<void>;
+  readonly createClient?: (options: ReturnType<DaemonLink['startOptions']>) => Promise<DaemonClient>;
+}
+
+class Disposed extends Error {
+  constructor() {
+    super('Shelly is exiting.');
+  }
 }
 
 export class DaemonLink {
@@ -47,7 +56,7 @@ export class DaemonLink {
 
   /** Make sure a daemon is running. Cheap: no Effect. Safe to call often. */
   startDaemon(): Promise<void> {
-    this.started ??= ensureDaemonStarted(this.startOptions()).catch((error: unknown) => {
+    this.started ??= (this.options.ensureStarted ?? ensureDaemonStarted)(this.startOptions()).catch((error: unknown) => {
       this.started = undefined;
       this.failure = describe(error);
       throw error;
@@ -58,7 +67,7 @@ export class DaemonLink {
   /** The connected client: starts the daemon and loads the connection if need be. */
   get(): Promise<DaemonClient> {
     if (this.disposed) {
-      return Promise.reject(new Error('Shelly is exiting.'));
+      return Promise.reject(new Disposed());
     }
     this.loading ??= this.load().then(
       (client) => {
@@ -105,17 +114,43 @@ export class DaemonLink {
     await bounded(client.dispose());
   }
 
+  /** Checks after every await: a link disposed meanwhile makes no client, and closes one it made. */
   private async load(): Promise<DaemonClient> {
     await this.startDaemon();
+    this.throwIfDisposed();
     if (!this.client) {
-      const { DaemonClient } = await import('./daemon-client.js');
-      this.client ??= new DaemonClient(this.startOptions());
+      const client = await this.makeClient();
+      if (this.disposed) {
+        await client.dispose().catch(() => undefined);
+        throw new Disposed();
+      }
+      this.client ??= client;
     }
-    await this.client.connect();
-    return this.client;
+    const client = this.client;
+    await client.connect();
+    if (this.disposed) {
+      await client.dispose().catch(() => undefined);
+      throw new Disposed();
+    }
+    return client;
   }
 
-  private startOptions() {
+  private async makeClient(): Promise<DaemonClient> {
+    if (this.options.createClient) {
+      return this.options.createClient(this.startOptions());
+    }
+    const { DaemonClient } = await import('./daemon-client.js');
+    return new DaemonClient(this.startOptions());
+  }
+
+  private throwIfDisposed(): void {
+    if (this.disposed) {
+      throw new Disposed();
+    }
+  }
+
+  /** How the daemon is started (for the test seams). */
+  startOptions() {
     const timeout = Number(this.options.env.SHELLY_DAEMON_START_TIMEOUT_MS);
     return {
       env: this.options.env,
