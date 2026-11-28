@@ -71,9 +71,89 @@ describe('tool calls', () => {
   });
 
   it('maps diffs', () => {
-    assert.deepEqual(mapToolContent({ type: 'diff', path: '/a', oldText: null, newText: 'hi' }), {
+    assert.deepEqual(mapToolContent({ type: 'diff', path: '/a', oldText: null, newText: 'hi' }), [{
       type: 'diff', path: '/a', oldText: null, newText: 'hi', truncated: false,
-    });
+    }]);
+  });
+});
+
+describe('file writes', () => {
+  it('keeps a diff when a later update replaces the content with a message', () => {
+    const tools = new ToolTracker();
+    tools.apply({ toolCallId: 'w', kind: 'edit', title: 'a.txt', content: [{ type: 'diff', path: '/p/a.txt', oldText: null, newText: 'hi\n' }] });
+    const done = tools.apply({ toolCallId: 'w', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Created file successfully: a.txt' } }] });
+    assert.deepEqual(done.content, [
+      { type: 'diff', path: '/p/a.txt', oldText: null, newText: 'hi\n', truncated: false },
+      { type: 'text', text: 'Created file successfully: a.txt', truncated: false },
+    ]);
+  });
+
+  it('shows a write that only says it created the file as a new-file diff', () => {
+    const tools = new ToolTracker();
+    tools.apply({ toolCallId: 'w', kind: 'edit', title: 'write', locations: [{ path: '/p/notes.txt' }], rawInput: { path: '/p/notes.txt', content: 'alpha\nbeta\n' } });
+    const done = tools.apply({ toolCallId: 'w', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Created file successfully: /p/notes.txt' } }] });
+    assert.deepEqual(done.content[0], { type: 'diff', path: '/p/notes.txt', oldText: null, newText: 'alpha\nbeta\n', truncated: false });
+  });
+
+  it("doesn't invent a diff for an overwrite, whose old text nobody sent", () => {
+    const tools = new ToolTracker();
+    tools.apply({ toolCallId: 'w', kind: 'edit', title: 'write', rawInput: { path: '/p/a', content: 'new' } });
+    const done = tools.apply({ toolCallId: 'w', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Wrote file successfully: /p/a' } }] });
+    assert.ok(!done.content.some((item) => item.type === 'diff'));
+  });
+});
+
+describe('ACP v2 diffs', () => {
+  const v2 = (changes: unknown[], text?: string) =>
+    ({ type: 'diff', changes, ...(text === undefined ? {} : { patch: { format: 'git_patch', text } }) }) as never;
+
+  it('turns a new file into a diff with no old text', () => {
+    const patch = 'diff --git /p/notes.txt /p/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ /p/notes.txt\n@@ -0,0 +1,3 @@\n+alpha\n+beta\n+gamma\n';
+    assert.deepEqual(mapToolContent(v2([{ operation: 'add', path: '/p/notes.txt', fileType: 'text' }], patch)), [
+      { type: 'diff', path: '/p/notes.txt', oldText: null, newText: 'alpha\nbeta\ngamma', truncated: false },
+    ]);
+  });
+
+  it('joins the hunks of a changed file, and handles git prefixes and several files', () => {
+    const patch = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      'index 1..2 100644',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,2 +1,2 @@',
+      ' one',
+      '-two',
+      '+TWO',
+      '@@ -10,2 +10,3 @@',
+      ' ten',
+      '+ten and a half',
+      ' eleven',
+      '\\ No newline at end of file',
+      'diff --git a/gone.txt b/gone.txt',
+      'deleted file mode 100644',
+      '--- a/gone.txt',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-bye',
+    ].join('\n');
+    assert.deepEqual(mapToolContent(v2([{ operation: 'modify', path: '/r/src/a.ts' }, { operation: 'delete', path: '/r/gone.txt' }], patch)), [
+      { type: 'diff', path: 'src/a.ts', oldText: 'one\ntwo\nten\neleven', newText: 'one\nTWO\nten\nten and a half\neleven', truncated: false },
+      { type: 'diff', path: 'gone.txt', oldText: 'bye', newText: '', truncated: false },
+    ]);
+  });
+
+  it('caps a long new file like other diffs', () => {
+    const lines = Array.from({ length: 500 }, (_, i) => `+line ${i}`);
+    const patch = ['diff --git /p/big /p/big', '--- /dev/null', '+++ /p/big', '@@ -0,0 +1,500 @@', ...lines].join('\n');
+    const [diff] = mapToolContent(v2([{ operation: 'add', path: '/p/big' }], patch));
+    assert.ok(diff?.type === 'diff' && diff.oldText === null && diff.truncated);
+    assert.equal(diff.newText.split('\n').length, 200);
+  });
+
+  it('describes changes it has no patch text for', () => {
+    assert.deepEqual(mapToolContent(v2([{ operation: 'move', oldPath: '/p/a', path: '/p/b' }])), [
+      { type: 'text', text: 'Moved /p/a to /p/b', truncated: false },
+    ]);
   });
 });
 
@@ -210,6 +290,24 @@ describe('command output', () => {
     // A later whole output that fits is not cut.
     const whole = tools.apply({ toolCallId: 'b', _meta: meta({ terminal_output: { terminal_id: 'b', data: 'short' } }) });
     assert.deepEqual(whole.content, [{ type: 'text', text: 'short', truncated: false }]);
+  });
+
+  it('shows ACP v2 terminal output (base64, CRLF) for the tool whose content names the terminal', () => {
+    const tools = new ToolTracker();
+    const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
+    // The terminal can start before the tool call that shows it.
+    assert.deepEqual(mapSessionUpdate({ sessionUpdate: 'terminal_update', terminalId: 't1' } as never, tools), { kind: 'ignore' });
+    tools.apply({ toolCallId: 'bash', title: 'Terminal', kind: 'execute', status: 'pending', content: [terminal('t1')] });
+    const replaced = mapSessionUpdate({ sessionUpdate: 'terminal_update', terminalId: 't1', output: { data: b64('Exit code 3\r\none\r\ntwo') } } as never, tools);
+    assert.ok(replaced.kind === 'update' && replaced.update.type === 'tool');
+    assert.deepEqual(replaced.update.tool.content, [{ type: 'text', text: 'Exit code 3\none\ntwo', truncated: false }]);
+    const appended = mapSessionUpdate({ sessionUpdate: 'terminal_output_chunk', terminalId: 't1', data: b64('\r\nthree') } as never, tools);
+    assert.ok(appended.kind === 'update' && appended.update.type === 'tool');
+    const exited = mapSessionUpdate({ sessionUpdate: 'terminal_update', terminalId: 't1', exitStatus: { exitCode: 3 } } as never, tools);
+    assert.ok(exited.kind === 'update' && exited.update.type === 'tool');
+    assert.deepEqual(exited.update.tool.content, [{ type: 'text', text: 'one\ntwo\nthree\nExit code 3', truncated: false }]);
+    // A later tool update keeps the output.
+    assert.deepEqual(tools.apply({ toolCallId: 'bash', status: 'failed' }).content, exited.update.tool.content);
   });
 
   it('leaves tools without terminal fields alone', () => {
