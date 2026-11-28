@@ -29,7 +29,14 @@ terminal tab ─ shelly (client) ─ pty ─ user's shell (with Shelly's hooks)
   turns. Owns agent processes, threads and their history, so a thread outlives
   the tab it started in and an agent's work survives closing the tab.
 - **Protocol** (`src/protocol/`): Effect RPC over a unix socket in
-  `$SHELLY_HOME/run/`, NDJSON-serialised. Both sides share the schemas.
+  `$SHELLY_HOME/run/`, NDJSON-serialised. The daemon serves it with Effect's
+  RpcServer and the schemas. The client speaks the same messages with a
+  small hand-written client (`src/client/rpc-connection.ts`) and never loads
+  Effect, which would cost every tab about 40 MB: it trusts the protocol
+  version checked at hello, and checks the shape of the events it renders.
+  A contract test (`test/e2e/daemon-contract.e2e.ts`) runs every RPC through
+  it against a real daemon, and fails when an RPC is added that it does not
+  know.
 
 `SHELLY_HOME` defaults to `~/.shelly`. Tests always point it at a temporary
 directory.
@@ -196,7 +203,7 @@ recorded event sequences from `test/fixtures/thread-events/` through them.
 - Nothing slows the shell: no extra work before the prompt, none per keystroke
   or per byte of output beyond what the hooks need.
 - The client loads only what the shell needs until Shelly is used: about
-  60 MB RSS for a tab that never opens it. The daemon is started at the
+  60 MB RSS for a tab that never opens it, and never Effect. The daemon is started at the
   first prompt (a socket probe, maybe a spawn). The UI (OpenTUI, about 60 ms
   of module loading in a build) and the daemon connection load on first use:
   from the first `:` or `_` typed at an empty prompt, which may begin a

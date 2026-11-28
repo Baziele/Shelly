@@ -1,39 +1,28 @@
 import { randomUUID } from 'node:crypto';
-import * as NodeSocket from '@effect/platform-node/NodeSocket';
-import * as Cause from 'effect/Cause';
-import * as Effect from 'effect/Effect';
-import * as Exit from 'effect/Exit';
-import * as Layer from 'effect/Layer';
-import * as ManagedRuntime from 'effect/ManagedRuntime';
-import * as RpcClient from 'effect/rpc/RpcClient';
-import type { RpcClientError } from 'effect/rpc/RpcClientError';
-import type * as RpcGroup from 'effect/rpc/RpcGroup';
-import * as RpcSerialization from 'effect/rpc/RpcSerialization';
-import * as Schedule from 'effect/Schedule';
-import * as Scope from 'effect/Scope';
-import * as Stream from 'effect/Stream';
+import { checkFastEvent, checkThreadEvent } from '../protocol/guards.js';
 import { shellyPaths } from '../protocol/paths.js';
 import { probeSocket } from '../protocol/probe.js';
-import { DaemonRpcs } from '../protocol/rpc.js';
-import {
-  type AgentInfo,
-  type FastEvent,
-  type FastInput,
-  type ModeState,
-  PROTOCOL_VERSION,
-  type PromptContext,
-  type ThreadEvent,
-  type ThreadLocation,
-  type ThreadSummary,
+import type {
+  AgentInfo,
+  FastEvent,
+  FastInput,
+  ModeState,
+  PromptContext,
+  ThreadEvent,
+  ThreadLocation,
+  ThreadSummary,
 } from '../protocol/schema.js';
+import { PROTOCOL_VERSION } from '../protocol/version.js';
 import { SHELLY_VERSION } from '../version.js';
 import { type DaemonStartOptions, ensureDaemonStarted, waitForSocketGone } from './daemon-spawn.js';
+import { type CallTag, DaemonDisconnected, DaemonError, type Guard, RpcConnection, type StreamTag } from './rpc-connection.js';
 
 /*
  * The client's connection to the daemon, for plain TypeScript callers: a
- * Promise per call and an AsyncIterable per stream. Effect stays inside,
- * behind a ManagedRuntime. Load this module with a dynamic import() once the
- * shell is up, never on the startup path.
+ * Promise per call and an AsyncIterable per stream, over a hand-written
+ * RPC client (rpc-connection.ts) that loads no Effect. Load this module
+ * with a dynamic import() when Shelly is about to be used, never on the
+ * startup path.
  *
  * Connecting is lazy: the first call connects (starting the daemon if
  * nothing answers) and says hello. A daemon older than this client (Shelly
@@ -43,7 +32,8 @@ import { type DaemonStartOptions, ensureDaemonStarted, waitForSocketGone } from 
  * Breaking out of a stream stops listening; it never cancels a turn.
  *
  * Errors: the daemon's typed errors (ThreadNotFound, ThreadBusy, …) are
- * thrown as they are; tell them apart by `_tag`.
+ * thrown as DaemonError, with the daemon's `_tag`, fields and message; tell
+ * them apart by `_tag`.
  *
  * An open connection keeps Node's event loop alive (the socket and its
  * keep-alive pings): call `dispose()` before the process means to exit.
@@ -52,14 +42,7 @@ import { type DaemonStartOptions, ensureDaemonStarted, waitForSocketGone } from 
 export { ensureDaemonStarted } from './daemon-spawn.js';
 export { DaemonStartFailed } from './daemon-spawn.js';
 
-/** The connection dropped (the daemon stopped or crashed). The next call reconnects. */
-export class DaemonDisconnected extends Error {
-  readonly _tag = 'DaemonDisconnected';
-  constructor() {
-    super("Lost the connection to Shelly's background service.");
-    this.name = 'DaemonDisconnected';
-  }
-}
+export { DaemonDisconnected, DaemonError } from './rpc-connection.js';
 
 /** Nothing answers on the socket and the client was told not to start a daemon. */
 export class DaemonNotRunning extends Error {
@@ -95,17 +78,10 @@ export interface DaemonStatusResult {
   readonly fastWorkers: number;
 }
 
-type Client = RpcClient.RpcClient<RpcGroup.Rpcs<typeof DaemonRpcs>, RpcClientError>;
-
 interface Connection {
-  client: Client;
-  readonly scope: Scope.Closeable;
-  open: boolean;
+  readonly rpc: RpcConnection;
   hello: HelloResult;
 }
-
-const isRpcClientError = (error: unknown): error is RpcClientError =>
-  typeof error === 'object' && error !== null && (error as { _tag?: unknown })._tag === 'RpcClientError';
 
 const isProtocolMismatch = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { _tag?: unknown })._tag === 'ProtocolMismatch';
@@ -145,9 +121,9 @@ export class DaemonClient {
   private readonly version: string;
   private readonly options: DaemonClientOptions;
   private readonly socketPath: string;
-  private readonly runtime = ManagedRuntime.make(Layer.empty);
   private connection: Promise<Connection> | undefined;
   private current: Connection | undefined;
+  private disposed = false;
 
   constructor(options: DaemonClientOptions = {}) {
     this.options = options;
@@ -169,15 +145,13 @@ export class DaemonClient {
     this.connection = undefined;
     this.current = undefined;
     const connection = await pending?.catch(() => undefined);
-    if (connection) {
-      await this.closeConnection(connection);
-    }
+    connection?.rpc.close();
   }
 
-  /** Close the connection and the runtime behind it; the client cannot be used again. */
+  /** Close the connection for good; the client cannot be used again. */
   async dispose(): Promise<void> {
+    this.disposed = true;
     await this.close();
-    await this.runtime.dispose();
   }
 
   /** Resolves once nothing answers on the daemon's socket. */
@@ -186,11 +160,18 @@ export class DaemonClient {
   }
 
   private ensureConnection(): Promise<Connection> {
-    if (this.connection && this.current?.open !== false) {
+    if (this.disposed) {
+      return Promise.reject(new DaemonDisconnected());
+    }
+    if (this.connection && this.current?.rpc.isOpen !== false) {
       return this.connection;
     }
     const attempt = this.openConnection().then(
       (connection) => {
+        if (this.disposed) {
+          connection.rpc.close();
+          throw new DaemonDisconnected();
+        }
         this.current = connection;
         return connection;
       },
@@ -222,13 +203,13 @@ export class DaemonClient {
       connection.hello = await this.hello(connection);
     } catch (error) {
       if (!isProtocolMismatch(error) || this.options.autoStart === false) {
-        await this.closeConnection(connection);
+        connection.rpc.close();
         throw error;
       }
       // An older (or newer) daemon that speaks another protocol: ask it to make way, unless it is busy.
       const fresh = await this.replaceDaemon(connection);
       if (!fresh) {
-        await this.closeConnection(connection);
+        connection.rpc.close();
         throw error;
       }
       return fresh;
@@ -249,11 +230,11 @@ export class DaemonClient {
    * it will not stop.
    */
   private async replaceDaemon(connection: Connection): Promise<Connection | undefined> {
-    const willStop = await this.run(connection, connection.client['daemon.shutdown']({ ifIdle: true })).catch(() => false);
-    if (!willStop) {
+    const willStop = await connection.rpc.call('daemon.shutdown', { ifIdle: true }).catch(() => false);
+    if (willStop !== true) {
       return undefined;
     }
-    await this.closeConnection(connection);
+    connection.rpc.close();
     await waitForSocketGone(this.socketPath, OLD_DAEMON_EXIT_TIMEOUT_MS);
     await this.startOrFind();
     const fresh = await this.openSocket();
@@ -261,114 +242,75 @@ export class DaemonClient {
       fresh.hello = await this.hello(fresh);
       return fresh;
     } catch (error) {
-      await this.closeConnection(fresh);
+      fresh.rpc.close();
       throw error;
     }
   }
 
-  private hello(connection: Connection): Promise<HelloResult> {
-    return this.run(
-      connection,
-      connection.client.hello({
-        protocolVersion: PROTOCOL_VERSION,
-        clientVersion: this.version,
-        clientId: this.clientId,
-        pid: process.pid,
-      }),
-    );
+  private async hello(connection: Connection): Promise<HelloResult> {
+    const hello = await connection.rpc.call('hello', {
+      protocolVersion: PROTOCOL_VERSION,
+      clientVersion: this.version,
+      clientId: this.clientId,
+      pid: process.pid,
+    });
+    if (!isHello(hello)) {
+      throw new Error("Shelly's background service answered hello with something this terminal does not understand.");
+    }
+    if (hello.protocolVersion !== PROTOCOL_VERSION) {
+      // The daemon checks this itself; a daemon that did not is just as foreign.
+      throw new DaemonError({ _tag: 'ProtocolMismatch', daemonProtocol: hello.protocolVersion, clientProtocol: PROTOCOL_VERSION });
+    }
+    return hello;
   }
 
   private async openSocket(): Promise<Connection> {
-    const scope = await this.runtime.runPromise(Scope.make());
     const connection: Connection = {
-      client: undefined as unknown as Client,
-      scope,
-      open: true,
+      rpc: undefined as unknown as RpcConnection,
       hello: { protocolVersion: 0, daemonVersion: '', pid: 0 },
     };
-    const hooks = Layer.succeed(RpcClient.ConnectionHooks, {
-      onConnect: Effect.void,
-      onDisconnect: Effect.sync(() => this.markClosed(connection)),
-    });
-    const protocol = RpcClient.layerProtocolSocket({
-      // A lost daemon is not retried here: the next call reconnects, starting a new one if needed.
-      retryPolicy: Schedule.recurs(0),
-    }).pipe(
-      Layer.provide(NodeSocket.layerNet({ path: this.socketPath })),
-      Layer.provide(RpcSerialization.layerNdjson),
-      Layer.provide(hooks),
-    );
-    try {
-      const client = await this.runtime.runPromise(
-        Effect.gen(function* () {
-          const context = yield* Layer.buildWithScope(protocol, scope);
-          return yield* RpcClient.make(DaemonRpcs).pipe(Effect.provideContext(context), Scope.provide(scope));
-        }),
-      );
-      connection.client = client;
-      return connection;
-    } catch (error) {
-      await this.runtime.runPromise(Scope.close(scope, Exit.void));
-      throw error;
-    }
+    const rpc = await RpcConnection.open(this.socketPath, () => this.markClosed(connection));
+    (connection as { rpc: RpcConnection }).rpc = rpc;
+    return connection;
   }
 
   private markClosed(connection: Connection): void {
-    connection.open = false;
     if (this.current === connection) {
       this.current = undefined;
       this.connection = undefined;
     }
   }
 
-  private async closeConnection(connection: Connection): Promise<void> {
-    this.markClosed(connection);
-    await this.runtime.runPromise(Scope.close(connection.scope, Exit.void)).catch(() => undefined);
-  }
-
   // ─── Calls ────────────────────────────────────────────────────────────────
 
-  private mapError(connection: Connection, error: unknown): unknown {
-    if (isRpcClientError(error)) {
+  /** A daemon that interrupts a call is stopping: this connection is done with, and the next call reconnects. */
+  private lost(connection: Connection, error: unknown): unknown {
+    if (error instanceof DaemonDisconnected) {
       this.markClosed(connection);
-      return new DaemonDisconnected();
+      connection.rpc.close();
     }
     return error;
   }
 
-  /** The daemon interrupts calls in flight when it stops: to the caller, that is a lost daemon. */
-  private disconnectedOnInterrupt(connection: Connection, cause: Cause.Cause<unknown>): Cause.Cause<unknown> {
-    if (Cause.hasInterruptsOnly(cause)) {
-      this.markClosed(connection);
-      return Cause.fail(new DaemonDisconnected());
-    }
-    return cause;
-  }
-
-  private run<A, E>(connection: Connection, effect: Effect.Effect<A, E>): Promise<A> {
-    return this.runtime.runPromise(
-      effect.pipe(
-        Effect.mapError((error) => this.mapError(connection, error)),
-        Effect.catchCause((cause) => Effect.failCause(this.disconnectedOnInterrupt(connection, cause))),
-      ),
-    );
-  }
-
-  private async call<A, E>(make: (client: Client) => Effect.Effect<A, E>): Promise<A> {
+  private async call<A>(tag: CallTag, payload: unknown): Promise<A> {
     const connection = await this.ensureConnection();
-    return this.run(connection, make(connection.client));
+    try {
+      return (await connection.rpc.call(tag, payload)) as A;
+    } catch (error) {
+      throw this.lost(connection, error);
+    }
   }
 
-  private stream<A, E>(make: (client: Client) => Stream.Stream<A, E>): AsyncIterable<A> {
+  private stream<A>(tag: StreamTag, payload: unknown, guard: Guard): AsyncIterable<A> {
     const self = this;
     return {
       async *[Symbol.asyncIterator]() {
         const connection = await self.ensureConnection();
-        const stream = make(connection.client).pipe(
-          Stream.mapError((error) => self.mapError(connection, error)),
-          Stream.catchCause((cause) => Stream.failCause(self.disconnectedOnInterrupt(connection, cause))),
-        );
-        yield* Stream.toAsyncIterable(stream);
+        try {
+          yield* connection.rpc.stream<A>(tag, payload, guard);
+        } catch (error) {
+          throw self.lost(connection, error);
+        }
       },
     };
   }
@@ -376,103 +318,112 @@ export class DaemonClient {
   // ─── Agents ───────────────────────────────────────────────────────────────
 
   listAgents(): Promise<readonly AgentInfo[]> {
-    return this.call((client) => client['agents.list']());
+    return this.call('agents.list', undefined);
   }
 
   setDefaultAgent(agentId: string): Promise<void> {
-    return this.call((client) => client['agents.setDefault']({ agentId }));
+    return this.call('agents.setDefault', { agentId });
   }
 
   // ─── Threads ──────────────────────────────────────────────────────────────
 
   createThread(input: { readonly agentId?: string; readonly location: ThreadLocation; readonly cwd: string }): Promise<ThreadSummary> {
-    return this.call((client) => client['thread.create'](input));
+    return this.call('thread.create', input);
   }
 
   listThreads(limit?: number): Promise<readonly ThreadSummary[]> {
-    return this.call((client) => client['thread.list'](limit === undefined ? {} : { limit }));
+    return this.call('thread.list', limit === undefined ? {} : { limit });
   }
 
-  attachThread(
+  async attachThread(
     threadId: string,
     options: { readonly force?: boolean; readonly historyTurns?: number } = {},
   ): Promise<{ readonly thread: ThreadSummary; readonly history: readonly ThreadEvent[] }> {
-    return this.call((client) =>
-      client['thread.attach']({
-        threadId,
-        clientId: this.clientId,
-        force: options.force ?? false,
-        historyTurns: options.historyTurns ?? 1,
-      })
-    );
+    const attached = await this.call<{ readonly thread: ThreadSummary; readonly history: readonly unknown[] }>('thread.attach', {
+      threadId,
+      clientId: this.clientId,
+      force: options.force ?? false,
+      historyTurns: options.historyTurns ?? 1,
+    });
+    const history = Array.isArray(attached.history) ? attached.history : [];
+    if (history.some((event) => checkThreadEvent(event) === 'reject')) {
+      throw new Error("Shelly's background service sent a thread's history this terminal does not understand.");
+    }
+    return { thread: attached.thread, history: history.filter((event) => checkThreadEvent(event) === 'yield') as ThreadEvent[] };
   }
 
   detachThread(threadId: string): Promise<void> {
-    return this.call((client) => client['thread.detach']({ threadId, clientId: this.clientId }));
+    return this.call('thread.detach', { threadId, clientId: this.clientId });
   }
 
   /** Start a turn; yields its events from `turn.started` to `turn.ended`. */
   prompt(threadId: string, text: string, context: PromptContext): AsyncIterable<ThreadEvent> {
-    return this.stream((client) => client['thread.prompt']({ threadId, clientId: this.clientId, text, context }));
+    return this.stream('thread.prompt', { threadId, clientId: this.clientId, text, context }, checkThreadEvent);
   }
 
   /** Stored events after `afterSeq`, then live ones until the running turn ends. */
   watch(threadId: string, afterSeq = 0): AsyncIterable<ThreadEvent> {
-    return this.stream((client) => client['thread.watch']({ threadId, afterSeq }));
+    return this.stream('thread.watch', { threadId, afterSeq }, checkThreadEvent);
   }
 
   cancel(threadId: string): Promise<void> {
-    return this.call((client) => client['thread.cancel']({ threadId, clientId: this.clientId }));
+    return this.call('thread.cancel', { threadId, clientId: this.clientId });
   }
 
   respond(threadId: string, requestId: string, optionId: string | null): Promise<void> {
-    return this.call((client) => client['thread.respond']({ threadId, clientId: this.clientId, requestId, optionId }));
+    return this.call('thread.respond', { threadId, clientId: this.clientId, requestId, optionId });
   }
 
   setMode(threadId: string, modeId: string): Promise<void> {
-    return this.call((client) => client['thread.setMode']({ threadId, clientId: this.clientId, modeId }));
+    return this.call('thread.setMode', { threadId, clientId: this.clientId, modeId });
   }
 
   /** The thread's modes (opening the agent's session if need be); null for an agent without modes. */
   threadModes(threadId: string): Promise<ModeState | null> {
-    return this.call((client) => client['thread.modes']({ threadId, clientId: this.clientId }));
+    return this.call('thread.modes', { threadId, clientId: this.clientId });
   }
 
   rename(threadId: string, title: string): Promise<void> {
-    return this.call((client) => client['thread.rename']({ threadId, clientId: this.clientId, title }));
+    return this.call('thread.rename', { threadId, clientId: this.clientId, title });
   }
 
   deleteThread(threadId: string): Promise<void> {
-    return this.call((client) => client['thread.delete']({ threadId, clientId: this.clientId }));
+    return this.call('thread.delete', { threadId, clientId: this.clientId });
   }
 
   /** `cwd`: the shell's directory now, as the coming prompt's context will give it. */
   prewarmThread(input: { readonly threadId?: string; readonly agentId?: string; readonly cwd?: string } = {}): Promise<void> {
-    return this.call((client) => client['thread.prewarm'](input));
+    return this.call('thread.prewarm', input);
   }
 
   // ─── Fast mode ────────────────────────────────────────────────────────────
 
   prewarmFast(agentId?: string): Promise<void> {
-    return this.call((client) => client['fast.prewarm'](agentId === undefined ? {} : { agentId }));
+    return this.call('fast.prewarm', agentId === undefined ? {} : { agentId });
   }
 
   fastRequest(input: { readonly agentId?: string; readonly sessionKey: string; readonly input: FastInput }): AsyncIterable<FastEvent> {
-    return this.stream((client) => client['fast.request'](input));
+    return this.stream('fast.request', input, checkFastEvent);
   }
 
   endFast(sessionKey: string): Promise<void> {
-    return this.call((client) => client['fast.end']({ sessionKey }));
+    return this.call('fast.end', { sessionKey });
   }
 
   // ─── The daemon ───────────────────────────────────────────────────────────
 
   status(): Promise<DaemonStatusResult> {
-    return this.call((client) => client['daemon.status']());
+    return this.call('daemon.status', undefined);
   }
 
   /** Ask the daemon to exit; with `ifIdle`, only when no turn runs and no client has a stream open. Resolves with whether it will. */
   shutdown(ifIdle: boolean): Promise<boolean> {
-    return this.call((client) => client['daemon.shutdown']({ ifIdle }));
+    return this.call('daemon.shutdown', { ifIdle });
   }
 }
+
+const isHello = (value: unknown): value is HelloResult =>
+  typeof value === 'object' && value !== null
+  && typeof (value as HelloResult).protocolVersion === 'number'
+  && typeof (value as HelloResult).daemonVersion === 'string'
+  && typeof (value as HelloResult).pid === 'number';
