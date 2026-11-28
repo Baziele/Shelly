@@ -29,7 +29,8 @@ export const createMarkdownStyle = (renderer: CliRenderer): SyntaxStyle => {
     'markup.italic': { italic: true },
     'markup.strikethrough': { strikethrough: true },
     'markup.raw': { fg: theme.code },
-    'markup.link': { fg: theme.link, underline: true },
+    // The whole link, parentheses included: plain, so only the label is underlined.
+    'markup.link': {},
     'markup.link.label': { fg: theme.link, underline: true },
     'markup.link.url': { fg: theme.muted },
     'markup.list': { fg: theme.muted },

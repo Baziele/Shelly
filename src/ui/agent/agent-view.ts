@@ -127,7 +127,7 @@ export class AgentView {
   private readonly listeners = new Set<(action: AgentAction) => void>();
   private readonly now: () => number;
   /** The agent's name as shown: it comes from config or the daemon, so it is sanitized. */
-  private readonly agentName: string;
+  private agentName: string;
 
   private state: State = 'created';
   private startedAt = 0;
@@ -155,6 +155,7 @@ export class AgentView {
   private tickStartedAt = 0;
   private idleWaiters: Array<() => void> = [];
   private stats = { frames: 0, renderMs: 0, firstPaintMs: -1 };
+  private released = false;
 
   constructor(
     private readonly host: AgentViewHost,
@@ -208,6 +209,12 @@ export class AgentView {
     if (event.type === 'turn.ended') {
       this.timers.clearInterval(this.spinnerTimer);
     }
+    this.schedule();
+  }
+
+  /** The agent turned out to be another than the view was made for (it was not known yet). */
+  setAgentName(name: string): void {
+    this.agentName = oneLine(name) || 'agent';
     this.schedule();
   }
 
@@ -366,6 +373,7 @@ export class AgentView {
     this.schedule();
   }
 
+  /** Stop at once and free the renderer, without committing anything more. */
   destroy(): void {
     if (this.state === 'running' || this.state === 'finishing') {
       // Torn down mid-turn (an error, the shell exiting): no live rows or hidden cursor left behind.
@@ -380,7 +388,7 @@ export class AgentView {
     clearTimeout(this.frameTimer);
     this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
-    this.headless.destroy();
+    this.releaseRenderer();
   }
 
   /** Rendering costs so far, for measurements. */
@@ -799,6 +807,19 @@ export class AgentView {
     this.frameTimer = undefined;
     this.timers.clearInterval(this.spinnerTimer);
     this.releaseIdleWaiters();
+    this.releaseRenderer();
+  }
+
+  /** A finished view keeps nothing: its block views and its OpenTUI renderer go. */
+  private releaseRenderer(): void {
+    if (this.released) {
+      return;
+    }
+    this.released = true;
+    for (const [key, view] of this.views) {
+      this.destroyView(key, view);
+    }
+    this.headless.destroy();
   }
 
   // ─── Formatting ───────────────────────────────────────────────────────────
@@ -865,8 +886,14 @@ export class AgentView {
         phase: phaseText(phase, this.agentName, context),
         elapsedMs: this.now() - Math.min(startedAt, this.now()),
         hints: phase.type === 'waiting'
-          ? ['←→ select · enter confirm · esc reject', 'enter confirm · esc reject', 'enter · esc']
-          : phase.type === 'stopping' ? [] : ['esc background · ^c stop', 'esc · ^c'],
+          ? [
+            { text: '←→ select', priority: 3 },
+            { text: 'enter confirm', short: 'enter', priority: 1 },
+            { text: 'esc reject', short: 'esc', priority: 2 },
+          ]
+          : phase.type === 'stopping'
+            ? []
+            : [{ text: 'esc background', short: 'esc', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
       }, context));
     }
     return lines;

@@ -42,7 +42,11 @@ export const AgentSettings = Schema.Struct({
    * Omitted: the agent's own default.
    */
   model: Schema.optionalKey(Schema.String),
-  /** The model fast mode uses; agents without one have no fast mode. */
+  /**
+   * The model fast mode uses, for an agent fast mode has a backend for
+   * (Claude Code: `haiku` by default; OpenCode: a `provider/model`).
+   * Custom agents have no fast mode, with or without it.
+   */
   fastModel: Schema.optionalKey(Schema.String),
   /** false hides the agent. */
   enabled: Schema.optionalKey(Schema.Boolean),

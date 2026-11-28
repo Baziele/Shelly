@@ -1,16 +1,20 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { displayWidth } from '../../render/text-width.js';
 import type { ToolCall } from '../../protocol/schema.js';
 import { diffExcerpt, diffLines, diffStats } from './diff.js';
 import {
+  commandTitle,
   formatDuration,
   formatPermission,
   formatPermissionOutcome,
+  fitHints,
   formatStatus,
   formatSummary,
   formatTool,
   relativeTime,
   shortenPath,
+  shortToolTitle,
   tidyTitle,
   type FormatContext,
 } from './format.js';
@@ -125,13 +129,64 @@ describe('permission prompts', () => {
   });
 });
 
+describe('command titles', () => {
+  it('reads an execute title as the command it runs', () => {
+    assert.equal(commandTitle('Run `pnpm test`'), 'pnpm test');
+    assert.equal(commandTitle('Running `make build`'), 'make build');
+    assert.equal(commandTitle('Terminal: `ls -la`'), 'ls -la');
+    assert.equal(commandTitle('`git status`'), 'git status');
+    // Claude Code titles the call with the command itself once it knows it.
+    assert.equal(commandTitle("printf 'hi\\n' > allowed.txt"), "printf 'hi\\n' > allowed.txt");
+    // A description, not a command in backticks, stays as it is.
+    assert.equal(commandTitle('Run the test suite'), 'Run the test suite');
+    // Generic names, before the command is known, are not commands.
+    assert.equal(commandTitle('Terminal'), undefined);
+    assert.equal(commandTitle('bash'), undefined);
+  });
+
+  it('shows `$ command` rows, and generic names without the prompt sign', () => {
+    const exec = (title: string): ToolCall => ({ id: 't', title, kind: 'execute', status: 'completed', locations: [], content: [] });
+    assert.match(lineText(formatTool(exec('Run `pnpm test`'), context)[0]!), /^. \$ pnpm test$/);
+    assert.match(lineText(formatTool(exec('Terminal'), context)[0]!), /^. Terminal$/);
+    assert.equal(shortToolTitle(exec('Run `pnpm test`'), context), 'pnpm test');
+  });
+});
+
 describe('status and summary', () => {
-  it('right-aligns the hints that fit, dropping them when none do', () => {
-    const status = { phase: 'Thinking', elapsedMs: 3200, hints: ['esc background · ^c stop', 'esc · ^c'] };
-    const wide = lineText(formatStatus(status, context));
-    assert.ok(wide.startsWith('⠋ Thinking · 3s') && wide.endsWith('esc background · ^c stop') && wide.length === 60);
-    assert.ok(lineText(formatStatus(status, { ...context, width: 28 })).endsWith('esc · ^c'));
-    assert.equal(lineText(formatStatus(status, { ...context, width: 18 })), '⠋ Thinking · 3s');
+  it('right-aligns the hints that fit, shortening and dropping the least important first', () => {
+    const running = {
+      phase: 'Thinking',
+      elapsedMs: 3200,
+      hints: [{ text: 'esc background', short: 'esc', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
+    };
+    const wide = lineText(formatStatus(running, context));
+    assert.ok(wide.startsWith('⠋ Thinking · 3s') && wide.endsWith('esc background · ^c stop ') && wide.length === 60, wide);
+    assert.ok(lineText(formatStatus(running, { ...context, width: 32 })).endsWith(' esc · ^c stop '));
+    assert.equal(lineText(formatStatus(running, { ...context, width: 18 })), '⠋ Thinking · 3s');
+
+    const waiting = {
+      phase: 'Waiting for you',
+      elapsedMs: 0,
+      hints: [
+        { text: '←→ select', priority: 3 },
+        { text: 'enter confirm', short: 'enter', priority: 1 },
+        { text: 'esc reject', short: 'esc', priority: 2 },
+      ],
+    };
+    const at = (width: number) => lineText(formatStatus(waiting, { ...context, width }));
+    assert.ok(at(100).endsWith('←→ select · enter confirm · esc reject '), at(100));
+    assert.ok(at(80).endsWith('←→ select · enter confirm · esc reject '), at(80));
+    assert.ok(at(44).endsWith('enter confirm · esc '), at(44));
+    for (const width of [100, 80, 60, 44, 36, 30, 24]) {
+      const line = at(width);
+      assert.ok(displayWidth(line) <= width, `fits ${width}: ${line}`);
+      assert.ok(!/(·|select|confirm|reject) ?$/.test(line.trimEnd()) || /(select|confirm|reject|enter|esc)$/.test(line.trimEnd()), `no cut word at ${width}: ${line}`);
+    }
+  });
+
+  it('ellipsizes the last hint rather than cutting it', () => {
+    assert.equal(fitHints([{ text: 'press enter to confirm', priority: 1 }], 12), 'press enter…');
+    assert.equal(fitHints([{ text: 'press enter to confirm', priority: 1 }], 4), '');
   });
 
   it('says how each turn ended', () => {

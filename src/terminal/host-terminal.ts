@@ -150,12 +150,24 @@ export class HostTerminal {
   }
 
   private readonly handleData = (data: string | Buffer): void => {
-    const text = typeof data === 'string' ? data : data.toString('utf8');
+    let text = typeof data === 'string' ? data : data.toString('utf8');
     const query = this.pendingCursorQuery;
 
     if (!query) {
       this.passOn(text);
       return;
+    }
+
+    if (this.lateRepliesOwed()) {
+      // A reply still owed for an earlier query (the plain echo of a DEC
+      // answer) comes ahead of this query's own: taken as this query's answer,
+      // it would leave this query's replies to reach the shell as typed text.
+      if (this.partialReport) {
+        clearTimeout(this.partialReport.timer);
+        text = this.partialReport.text + text;
+        this.partialReport = undefined;
+      }
+      text = this.dropLateReplies(text);
     }
 
     query.buffered += text;

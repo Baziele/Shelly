@@ -47,6 +47,8 @@ export interface PromptViewPlacement {
   readonly rewriting?: string;
   /** Right-aligned, muted: where `::` will go (`claude · new thread`). */
   readonly hint?: string;
+  /** Enter on an empty input submits `''` (to watch a running turn) instead of closing. */
+  readonly submitEmpty?: boolean;
 }
 
 export interface PickerRequest {
@@ -96,6 +98,7 @@ export class PromptView {
   private dismissedQuery: string | undefined;
   private picker: PickerRequest | undefined;
   private busy = false;
+  private submitEmpty = false;
   private preview = '';
   private error: string | undefined;
   private spinnerTimer: NodeJS.Timeout | undefined;
@@ -162,6 +165,7 @@ export class PromptView {
     this.preview = '';
     this.error = undefined;
     this.hint = placement.hint === undefined ? undefined : oneLine(placement.hint);
+    this.submitEmpty = placement.submitEmpty ?? false;
     this.inputRow.paddingLeft = placement.inputCol - 1;
     const color = this.mode === 'fast' ? theme.fast : theme.accent;
     this.marker.content = t`${bold(fg(color)(placement.trigger))} `;
@@ -201,8 +205,16 @@ export class PromptView {
   }
 
   /** Where `::` will go, right-aligned on the input row; undefined hides it. */
-  setHint(hint: string | undefined): void {
+  setHint(hint: string | undefined, submitEmpty = this.submitEmpty): void {
     this.hint = hint === undefined ? undefined : oneLine(hint);
+    this.submitEmpty = submitEmpty;
+    this.refresh();
+  }
+
+  /** Empty the input (after a command that keeps it open), clearing any error. */
+  clearInput(): void {
+    this.error = undefined;
+    this.input.value = '';
     this.refresh();
   }
 
@@ -278,7 +290,7 @@ export class PromptView {
       return;
     }
     const text = value.trim();
-    if (text) {
+    if (text || this.submitEmpty) {
       this.handlers.onSubmit(text);
     } else {
       this.handlers.onCancel();
@@ -412,7 +424,8 @@ export class PromptView {
       if (query !== this.dismissedQuery) {
         this.dismissedQuery = undefined;
       }
-      if (query === undefined || query === this.dismissedQuery || this.busy) {
+      // Slash commands belong to agent mode; fast mode takes the text as it is.
+      if (query === undefined || query === this.dismissedQuery || this.busy || this.mode === 'fast') {
         this.list.hide();
       } else {
         const items = this.commands.match(query).map((command): PickerItem => ({
@@ -477,7 +490,8 @@ export class PromptView {
     const room = this.renderer.terminalWidth - this.textOffset - 1;
     const typed = displayWidth(this.input.value);
     const hint = this.hint && !this.busy && !this.picker ? this.hint : undefined;
-    const hintCells = hint ? displayWidth(hint) + HINT_GAP : 0;
+    // One cell after the hint stays free: its ● and · are two cells wide in some terminals.
+    const hintCells = hint ? displayWidth(hint) + HINT_GAP + 1 : 0;
 
     let placeholder: string = displayWidth(full) <= room ? full : short;
     let showHint = false;
@@ -493,8 +507,8 @@ export class PromptView {
     this.input.placeholder = placeholder;
     this.hintText.visible = showHint;
     if (hint && showHint) {
-      this.hintText.content = toStyledText([[seg(hint, 'muted')]]);
-      this.hintText.width = displayWidth(hint);
+      this.hintText.content = toStyledText([[seg(hint, 'muted'), seg(' ')]]);
+      this.hintText.width = displayWidth(hint) + 1;
     }
   }
 }

@@ -6,7 +6,7 @@ import type {
   ToolCall,
   ToolContent,
 } from '../../protocol/schema.js';
-import { truncateStart } from '../../render/text-width.js';
+import { displayWidth, truncateEnd, truncateStart } from '../../render/text-width.js';
 import { diffExcerpt, diffOf, diffStats, type DiffLine } from './diff.js';
 import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, type Line, type Segment } from './lines.js';
 
@@ -69,6 +69,29 @@ export const shortenPathsIn = (text: string, context: PathContext): string =>
   });
 
 /** An agent's tool title made tidy for one row: one line, paths shortened, wrapping backticks dropped. */
+/** What agents call a command before they know it: shown as a name, not as `$ Terminal`. */
+const GENERIC_COMMAND_TITLE = /^(?:terminal|bash|shell|command|run command|execute)$/i;
+/** `Run \`pnpm test\``, `Running \`make\``, `Terminal: \`ls\``: a verb before the command in backticks. */
+const VERBED_COMMAND = /^(?:run|running|ran|execute|executing|terminal)\s*:?\s+`([^`]+)`$/i;
+
+/**
+ * An execute tool's title as the command it runs, when it is one: without
+ * backticks or a leading verb. Undefined for a generic name (Claude Code's
+ * "Terminal" before the command is known), which shows as it is.
+ */
+export const commandTitle = (title: string): string | undefined => {
+  let text = oneLine(title);
+  const verbed = VERBED_COMMAND.exec(text);
+  if (verbed) {
+    text = verbed[1]!.trim();
+  }
+  const wrapped = /^`([^`]+)`$/.exec(text);
+  if (wrapped) {
+    text = wrapped[1]!.trim();
+  }
+  return text === '' || GENERIC_COMMAND_TITLE.test(text) ? undefined : text;
+};
+
 export const tidyTitle = (title: string, context: PathContext): string => {
   let text = oneLine(title);
   const wrapped = /^`([^`]+)`$/.exec(text);
@@ -193,9 +216,10 @@ export const formatTool = (tool: ToolCall, context: FormatContext, options: Tool
     ? []
     : [seg(` · ${options.permission === null ? 'cancelled' : PERMISSION_NOTE[options.permission]}`, 'muted')];
   const suffix = [...toolSuffix(tool), ...permission];
-  const title = tidyTitle(tool.title, context);
-  // Commands read as commands.
-  const prompt: Segment[] = tool.kind === 'execute' ? [seg('$ ', 'muted')] : [];
+  // Commands read as commands: `$ pnpm test`, not `$ Run \`pnpm test\``.
+  const command = tool.kind === 'execute' ? commandTitle(tool.title) : undefined;
+  const title = command === undefined ? tidyTitle(tool.title, context) : shortenPathsIn(command, context);
+  const prompt: Segment[] = command !== undefined ? [seg('$ ', 'muted')] : [];
   const titleWidth = Math.max(8, width - 2 - lineWidth(prompt) - lineWidth(suffix));
   const titleRow: Line = [glyph, seg(' '), ...prompt, ...fitLine([seg(title, tool.status === 'pending' ? 'muted' : undefined)], titleWidth), ...suffix];
   const rows: Line[] = [fitLine(titleRow, width)];
@@ -235,8 +259,11 @@ export const formatToolSummary = (tool: ToolCall, context: FormatContext): Line 
   formatTool({ ...tool, content: tool.content.filter((item) => item.type === 'diff') }, context, { stopped: true })[0]!;
 
 /** The tool title for the status line's "Running …". */
-export const shortToolTitle = (tool: ToolCall, context: PathContext, maxWidth = 40): string =>
-  fitLine([seg(tidyTitle(tool.title, context))], maxWidth).map((segment) => segment.text).join('');
+export const shortToolTitle = (tool: ToolCall, context: PathContext, maxWidth = 40): string => {
+  const command = tool.kind === 'execute' ? commandTitle(tool.title) : undefined;
+  const title = command === undefined ? tidyTitle(tool.title, context) : shortenPathsIn(command, context);
+  return fitLine([seg(title)], maxWidth).map((segment) => segment.text).join('');
+};
 
 // ─── Thoughts, plans, notices ───────────────────────────────────────────────
 
@@ -361,12 +388,55 @@ export const relativeTime = (at: number, now: number): string => {
   return new Date(at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: days > 300 ? 'numeric' : undefined });
 };
 
+/** A key hint on the status row. */
+export interface StatusHint {
+  readonly text: string;
+  /** Used before the hint is dropped: `esc` for `esc background`. */
+  readonly short?: string;
+  /** Lower stays longer: when room runs out, the highest is shortened, then dropped. */
+  readonly priority: number;
+}
+
 export interface StatusLineView {
   readonly phase: string;
   readonly elapsedMs: number;
-  /** Key hints, longest first; the first that fits is shown. */
-  readonly hints: readonly string[];
+  /** In the order they are shown. */
+  readonly hints: readonly StatusHint[];
 }
+
+const HINT_SEPARATOR = ' · ';
+/** Cells kept free at the right edge: an ambiguous-width glyph (←, →, ·) may take two in some terminals. */
+const HINT_MARGIN = 1;
+/** A hint shorter than this once ellipsized is not worth showing. */
+const MIN_HINT_CELLS = 6;
+
+/**
+ * The hints that fit in `room` cells: the least important shortened first,
+ * then dropped, and the last one left ellipsized if it still does not fit.
+ */
+export const fitHints = (hints: readonly StatusHint[], room: number): string => {
+  let shown = hints.map((hint) => ({ ...hint, current: hint.text }));
+  const text = (): string => shown.map((hint) => hint.current).join(HINT_SEPARATOR);
+  // The least important first: shortened, then dropped, before the next is touched.
+  for (const hint of [...shown].sort((a, b) => b.priority - a.priority)) {
+    if (displayWidth(text()) <= room) {
+      return text();
+    }
+    if (hint.short !== undefined) {
+      hint.current = hint.short;
+      if (displayWidth(text()) <= room) {
+        return text();
+      }
+    }
+    if (shown.length > 1) {
+      shown = shown.filter((candidate) => candidate !== hint);
+    }
+  }
+  if (displayWidth(text()) <= room) {
+    return text();
+  }
+  return room >= MIN_HINT_CELLS ? truncateEnd(text(), room) : '';
+};
 
 /** The live status row: spinner, phase and time on the left, key hints on the right when they fit. */
 export const formatStatus = (status: StatusLineView, context: FormatContext): Line => {
@@ -376,8 +446,8 @@ export const formatStatus = (status: StatusLineView, context: FormatContext): Li
     seg(status.phase),
     seg(` · ${formatDuration(status.elapsedMs)}`, 'muted'),
   ];
-  const hints = status.hints.find((candidate) => lineWidth(left) + 2 + lineWidth([seg(candidate)]) <= context.width);
-  return alignRight(left, hints ? [seg(hints, 'muted')] : [], context.width);
+  const hints = fitHints(status.hints, context.width - lineWidth(left) - 2 - HINT_MARGIN);
+  return alignRight(left, hints ? [seg(hints, 'muted'), seg(' '.repeat(HINT_MARGIN))] : [], context.width);
 };
 
 export interface TurnOutcome {

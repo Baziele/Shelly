@@ -157,6 +157,15 @@ export class TriggerDetector {
     this.typedLength = 0;
   }
 
+  /**
+   * Tell the detector the line holds `length` characters with the cursor at
+   * the end (Shelly just set it), so deleting them all makes it empty again.
+   */
+  markLineTyped(length: number): void {
+    this.lineUnknown = false;
+    this.typedLength = length;
+  }
+
   /** Tell the detector the shell's input line holds text it did not see typed, e.g. a line Shelly put back. */
   markLineUnknown(): void {
     this.lineUnknown = true;

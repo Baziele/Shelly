@@ -28,4 +28,28 @@ describe('renderMarkdownRows', { timeout: 60_000 }, () => {
     assert.match(rows.at(-1)!, /^… \(\d+ more lines not shown\)$/);
     assert.ok(rows.length >= 50);
   });
+
+  it('underlines a link\'s label only: the parentheses around the URL stay plain', async () => {
+    const rows = await renderMarkdownRows('See [the ACP spec](https://agentclientprotocol.com) for more.', 80);
+    const spans = rows.flatMap((row) => [...row]);
+    const underlined = (char: string) => {
+      const span = spans.find((candidate) => candidate.text.includes(char));
+      assert.ok(span, `no span holds ${char}: ${JSON.stringify(spans.map((candidate) => candidate.text))}`);
+      return (span.style.attributes & 8) !== 0;
+    };
+    assert.equal(rows.map(rowText).join(' '), 'See the ACP spec (https://agentclientprotocol.com) for more.');
+    assert.equal(underlined('ACP'), true, 'the label is underlined');
+    assert.equal(underlined('('), false, 'the opening parenthesis is plain');
+    assert.equal(underlined(')'), false, 'the closing parenthesis is plain');
+    assert.equal(underlined('agentclientprotocol'), false, 'the URL is muted, not underlined');
+  });
+
+  it('keeps a 12,000-line answer to what OpenTUI can lay out, with a note, instead of throwing', async () => {
+    const lines = Array.from({ length: 12_000 }, (_, index) => `line ${index + 1}`).join('\n\n');
+    // At 100 columns OpenTUI allows 10,000 rows (a million cells).
+    const rows = (await renderMarkdownRows(lines, 100)).map(rowText);
+    assert.ok(rows.length <= 10_001, `${rows.length} rows`);
+    assert.equal(rows[0], 'line 1');
+    assert.match(rows.at(-1)!, /^… \(\d+ more lines not shown\)$/);
+  });
 });

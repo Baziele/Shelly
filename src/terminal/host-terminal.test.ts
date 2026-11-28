@@ -59,6 +59,22 @@ describe('HostTerminal cursor queries', () => {
     assert.deepEqual(typed, []);
   });
 
+  it('does not take an earlier query\'s owed reply as the answer to the next', async () => {
+    const { host, typed, answer } = fakeTerminal();
+    // `::` asks; the DEC answer settles it, its plain echo is still on the way.
+    const first = host.queryCursorPosition();
+    await answer('\u001b[?7;3R');
+    assert.deepEqual(await first, { row: 7, col: 3 });
+    // A quick submit asks again before that echo arrives.
+    const second = host.queryCursorPosition();
+    await answer('\u001b[7;3R');
+    await answer('\u001b[?8;1R\u001b[8;1R');
+    assert.deepEqual(await second, { row: 8, col: 1 }, 'the second query gets its own answer');
+    await answer('x');
+    host.stop();
+    assert.equal(typed.join(''), 'x', 'no reply reaches the shell');
+  });
+
   it('shares one in-flight query between callers', async () => {
     const { host, answer } = fakeTerminal();
     const first = host.queryCursorPosition();

@@ -5,7 +5,8 @@
  *
  * The scenario may also come from FAKE_ACP_SCENARIO (and the state dir from
  * FAKE_ACP_STATE_DIR). Without one it echoes every prompt. stdout carries
- * only protocol messages; FAKE_ACP_DEBUG=1 logs to stderr.
+ * only protocol messages; FAKE_ACP_DEBUG=1 logs to stderr, and
+ * FAKE_ACP_PROMPT_LOG appends each prompt it gets to that file.
  */
 import { Readable, Writable } from 'node:stream';
 import { parseArgs } from 'node:util';
@@ -38,7 +39,11 @@ try {
 }
 log(`scenario: ${source ?? '(none: echo)'}`);
 
-const app = createFakeAgent(scenario, { log, stateDir: values['state-dir'] ?? process.env.FAKE_ACP_STATE_DIR });
+const app = createFakeAgent(scenario, {
+  log,
+  stateDir: values['state-dir'] ?? process.env.FAKE_ACP_STATE_DIR,
+  ...(process.env.FAKE_ACP_PROMPT_LOG ? { promptLog: process.env.FAKE_ACP_PROMPT_LOG } : {}),
+});
 const connection = app.connect(acp.ndJsonStream(
   Writable.toWeb(process.stdout) as WritableStream<Uint8Array>,
   Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>,

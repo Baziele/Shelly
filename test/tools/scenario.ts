@@ -1,10 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import xterm from '@xterm/headless';
 import * as pty from 'node-pty';
+import { isProcessAlive, readLock } from '../../src/daemon/lock.js';
+import { shellyPaths } from '../../src/protocol/paths.js';
+import { probeSocket } from '../../src/protocol/probe.js';
 import { flush, screenLines, writeScreenshot, type ScreenshotFiles, type ScreenshotOptions } from './screen.js';
 import { useModernWidths } from './unicode.js';
 
@@ -53,7 +56,15 @@ export interface DriverOptions {
   readonly command?: readonly string[];
   /** Passed to every screenshot. */
   readonly screenshot?: ScreenshotOptions;
+  /**
+   * Shelly's config.json, written into the throwaway SHELLY_HOME (not into
+   * one passed in `env`). Default: the built-in agents turned off, so a test
+   * never starts the real Claude Code or OpenCode.
+   */
+  readonly config?: Readonly<Record<string, unknown>>;
 }
+
+export const NO_AGENTS_CONFIG = { agents: { claude: { enabled: false }, opencode: { enabled: false } } } as const;
 
 export interface WaitOptions {
   /** Default 5000. */
@@ -117,7 +128,12 @@ export class ScenarioDriver {
         writeFileSync(join(this.home, file), content);
       }
     }
-    this.shellyHome = options.env?.SHELLY_HOME ?? this.tempDir('shelly-state-');
+    if (options.env?.SHELLY_HOME) {
+      this.shellyHome = options.env.SHELLY_HOME;
+    } else {
+      this.shellyHome = this.tempDir('shelly-state-');
+      writeFileSync(join(this.shellyHome, 'config.json'), JSON.stringify(options.config ?? NO_AGENTS_CONFIG));
+    }
     this.outDirPath = options.outDir;
 
     this.terminal = new xterm.Terminal({ cols, rows, allowProposedApi: true, scrollback: 1000 });
@@ -140,6 +156,10 @@ export class ScenarioDriver {
         PS1: PROMPT,
         // macOS's bash 3.2 otherwise opens with a notice about zsh.
         BASH_SILENCE_DEPRECATION_WARNING: '1',
+        // A daemon Shelly starts goes away soon after the test, even if close() never runs.
+        SHELLY_DAEMON_IDLE_MS: '30000',
+        // tsx compiles the daemon on the fly: much slower to start than a build.
+        SHELLY_DAEMON_START_TIMEOUT_MS: '20000',
         ...options.env,
       },
     });
@@ -293,7 +313,8 @@ export class ScenarioDriver {
 
   /**
    * Closes Shelly (Ctrl+C, then `exit`; killed if still running after 3 s),
-   * removes the throwaway directories and returns the exit code (-1 if killed).
+   * stops the daemon it started under its SHELLY_HOME, removes the
+   * throwaway directories and returns the exit code (-1 if killed).
    */
   close(): Promise<number> {
     this.closing ??= (async () => {
@@ -315,6 +336,7 @@ export class ScenarioDriver {
         await Promise.race([this.exitCode, sleep(1000)]);
       }
       this.terminal.dispose();
+      await stopDaemonIn(this.shellyHome);
       for (const dir of this.tempDirs) {
         rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
@@ -363,5 +385,42 @@ export const keySequence = (key: string, applicationCursorKeys = false): string 
 };
 
 /** Index of the last row showing the `$ ` prompt (rows are trimmed, so an empty prompt is just `$`). */
+/**
+ * Stop the daemon a test's Shelly started under `shellyHome`: SIGTERM (it
+ * closes its agents and exits), then SIGKILL if it is still there after
+ * 5 s. Only a daemon that answers on that home's socket is signalled.
+ */
+export const stopDaemonIn = async (shellyHome: string): Promise<void> => {
+  const paths = shellyPaths({ SHELLY_HOME: shellyHome });
+  await settleStartingDaemon(paths);
+  const pid = readLock(paths.lock)?.pid;
+  if (pid === undefined || pid === process.pid || !isProcessAlive(pid) || !(await probeSocket(paths.socket))) {
+    return;
+  }
+  process.kill(pid, 'SIGTERM');
+  for (let waited = 0; waited < 5000 && isProcessAlive(pid); waited += 50) {
+    await sleep(50);
+  }
+  if (isProcessAlive(pid)) {
+    process.kill(pid, 'SIGKILL');
+  }
+};
+
+/** A daemon still starting (spawned, its log begun, not yet on its socket) is waited for, so it can be stopped. */
+const DAEMON_START_WAIT_MS = 15_000;
+const DAEMON_GAVE_UP = /started pid=|another daemon is running|too long|failed|stopping/;
+
+const settleStartingDaemon = async (paths: ReturnType<typeof shellyPaths>): Promise<void> => {
+  for (let waited = 0; waited < DAEMON_START_WAIT_MS; waited += 100) {
+    if (!existsSync(paths.daemonLog) || (await probeSocket(paths.socket))) {
+      return;
+    }
+    if (DAEMON_GAVE_UP.test(readFileSync(paths.daemonLog, 'utf8'))) {
+      return;
+    }
+    await sleep(100);
+  }
+};
+
 export const lastPromptRow = (lines: string[]): number =>
   lines.findLastIndex((line) => line === PROMPT.trimEnd() || line.startsWith(PROMPT));

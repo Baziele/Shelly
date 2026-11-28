@@ -1,13 +1,16 @@
+import { homedir } from 'node:os';
+import type { FlowHost, OpenInput, ReleaseOptions } from './client/flow-host.js';
+import type { Flows } from './client/flows.js';
+import type { DaemonLink } from './client/daemon-link.js';
 import { BUILTIN_COMMANDS, CommandRegistry } from './commands/slash-commands.js';
 import { CommandLog } from './context/command-log.js';
 import { describeEnvironment, type EnvironmentInfo } from './context/environment.js';
-import { buildAskContext, formatAskContext } from './context/session-context.js';
 import { TriggerDetector, type TriggerAction } from './input/trigger-detector.js';
 import { detectColorDepth, type ColorDepth } from './render/sgr.js';
 import { LineEditor, type CapturedLine, type CaptureResult } from './shell/line-editor.js';
 import { prepareShellIntegration } from './shell/shell-integration.js';
 import { ShellMarkerParser, type ShellOutputSegment } from './shell/shell-markers.js';
-import { ShellSession } from './shell/shell-session.js';
+import { ShellSession, type ShellSessionOptions } from './shell/shell-session.js';
 import type { CursorPosition } from './terminal/cursor-report.js';
 import type { HostTerminal, TerminalSize } from './terminal/host-terminal.js';
 import type { InlineOverlay } from './ui/inline-overlay.js';
@@ -33,8 +36,15 @@ const TRIGGER_HOLD_MS = 400;
 const RESIZE_SETTLE_MS = 50;
 /** How long output that might begin a shell marker is held before it goes to the terminal anyway. */
 const MARKER_HOLD_MS = 50;
-/** A response that takes longer gives the terminal back rather than holding input. */
-const RESPONSE_TIMEOUT_MS = 5000;
+/** How long the terminal must be quiet (no keys, no output) before the daemon connection loads. */
+const IDLE_MS = 300;
+/** Busy this long with nothing drawing, Shelly gives the prompt back (see armWatchdog). */
+const BUSY_WATCHDOG_MS = Number(process.env.SHELLY_BUSY_WATCHDOG_MS) > 0 ? Number(process.env.SHELLY_BUSY_WATCHDOG_MS) : 5000;
+/** Longest Shelly waits for a prompt it asked for before carrying on anyway. */
+const PROMPT_WAIT_MS = Number(process.env.SHELLY_PROMPT_WAIT_MS) > 0 ? Number(process.env.SHELLY_PROMPT_WAIT_MS) : 1500;
+const NO_HOOKS_PROMPT_WAIT_MS = 100;
+/** Moves the cursor up one row: onto the last line Shelly printed, which the shell's newline then leaves. */
+const CURSOR_UP = '\u001b[A';
 
 export interface ShellyOptions {
   readonly host: HostTerminal;
@@ -43,7 +53,56 @@ export interface ShellyOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly triggers?: readonly string[];
   readonly rewriteHotkeys?: readonly string[];
+  /** The daemon connection; tests may pass their own. Loaded after the shell is up otherwise. */
+  readonly link?: DaemonLink;
+  /** Test seam: start the shell some other way (a fake). */
+  readonly spawnShell?: (options: ShellSessionOptions) => ShellLike;
 }
+
+/** What Shelly needs of the shell process. */
+export type ShellLike = Pick<ShellSession, 'onData' | 'onExit' | 'write' | 'resize' | 'kill' | 'isShellInForeground'>;
+
+/** Keys that mean something now and never later: Ctrl-C reaches the shell at once; Ctrl-D is dropped. */
+const INTERRUPT = '\u0003';
+const EOF_KEY = '\u0004';
+
+/** CSI finals that draw (move, erase, insert, delete, scroll): what dropping drawing removes. */
+const DRAWING_CSI_FINALS = new Set('@ABCDEFGHIJKLMPSTXZ`abdefgrsu'.split(''));
+
+/**
+ * Shell output Shelly drops (a prompt drawn relative to a position that is
+ * no longer there), minus the drawing: text, line breaks, cursor moves and
+ * erases go; everything else stays, because the shell depends on it.
+ * Queries (fish 4 asks where the cursor is and waits for the answer), mode
+ * changes (bracketed paste, the kitty keyboard protocol), OSC and DCS.
+ */
+export const withoutDrawing = (data: string): string => {
+  let kept = '';
+  const sequence = /\u001b(?:\[([0-9;:?<>=!]*)[ -/]*([@-~])|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|P[\s\S]*?\u001b\\|[\s\S])/g;
+  for (const match of data.matchAll(sequence)) {
+    const [text, params, final] = match;
+    if (final !== undefined) {
+      // CSI: `u` and `s` with a private prefix are kitty keyboard requests, not cursor save/restore.
+      const kitty = (final === 'u' || final === 's') && /^[?<>=]/.test(params ?? '');
+      if (kitty || !DRAWING_CSI_FINALS.has(final)) {
+        kept += text;
+      }
+    } else if (text.startsWith('\u001b]') || text.startsWith('\u001bP') || text === '\u001b=' || text === '\u001b>') {
+      kept += text;
+    }
+  }
+  return kept;
+};
+
+/**
+ * Typed text worth replaying once the shell has its line back: printable
+ * characters only. A stale Enter, Ctrl-C, arrow or escape sequence typed
+ * while Shelly drew could act on the next command.
+ */
+export const printableOnly = (text: string): string =>
+  text
+    .replace(/\u001b\[[0-9;?<>=]*[ -/]*[@-~]|\u001bO.|\u001b[\s\S]?/g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
 
 /**
  * Where keystrokes go.
@@ -52,11 +111,13 @@ export interface ShellyOptions {
  *   shell's line; input is queued, but shell output (the cleared line) shows.
  * - opening: a trigger fired and Shelly is getting ready to draw; input is queued.
  * - overlay: to Shelly's input line.
- * - responding: Shelly is writing a response below the prompt; input is
- *   queued (and shell output held) until it is done and the shell has its
- *   line back.
+ * - busy: Shelly is drawing below the prompt (an agent turn, an answer).
+ *   Keys go to what it is drawing, the rest is queued for the shell, and
+ *   shell output is held, until the shell has its line back.
+ * - returning: Shelly asked the shell for a new prompt and waits for it to
+ *   be drawn; input is queued, shell output (the prompt) shows.
  */
-type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'responding';
+type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'busy' | 'returning';
 
 /**
  * A transparent proxy between the terminal and the user's shell. Until a
@@ -64,7 +125,7 @@ type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'responding';
  */
 export class Shelly {
   private readonly host: HostTerminal;
-  private readonly shell: ShellSession;
+  private readonly shell: ShellLike;
   private readonly detector: TriggerDetector;
   private readonly colorDepth: ColorDepth;
   /** Reads the shell hooks' markers; absent for shells without hooks. */
@@ -72,13 +133,19 @@ export class Shelly {
   /** Reads and sets the shell's input line; absent for shells without hooks. */
   private readonly lineEditor: LineEditor | undefined;
   private readonly rewriteHotkeys: readonly string[];
-  /**
-   * Set while the input is open for a rewrite: the line taken from the
-   * shell, to put back afterwards, or none when the shell cannot hand it
-   * over and still has it (bash 3.2).
-   */
-  private rewrite: { readonly captured: CapturedLine | undefined } | undefined;
+  /** What the input was opened for, from the trigger until the shell has its line back. */
+  private open: OpenInput | undefined;
+  /** Where keys go in `busy` mode; returns whether they were used. */
+  private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
+  /** The daemon connection, loaded (with the UI) off the startup path. */
+  private linkLoad: Promise<DaemonLink> | undefined;
+  private link: DaemonLink | undefined;
+  private readonly initialCwd: string;
+  private flows: Flows | undefined;
+  private warmupStarted = false;
+  private warmupTimer: NodeJS.Timeout | undefined;
+  private lastActivityAt = 0;
   private readonly shellPath: string;
   private readonly env: NodeJS.ProcessEnv;
   /** Looked up in the background once the shell is running. */
@@ -89,18 +156,31 @@ export class Shelly {
   private overlayUnavailable = false;
   private disposed = false;
   private mode: Mode = 'shell';
-  private activeTrigger = '';
   private queuedInput = '';
   /** Shell output that arrives while Shelly owns the input line, replayed when it hands back. */
   private heldShellOutput: string[] = [];
   private triggerHoldTimer: NodeJS.Timeout | undefined;
   private resizeTimer: NodeJS.Timeout | undefined;
   private markerHoldTimer: NodeJS.Timeout | undefined;
+  private watchdog: NodeJS.Timeout | undefined;
+  /** A resize that came while Shelly drew: the shell gets it once it has its line back. */
+  private pendingShellSize: TerminalSize | undefined;
+  /** Waiting for the shell to draw the prompt Shelly asked for: then this runs. */
+  private promptWait: {
+    sawCwd: boolean;
+    readonly run: () => void;
+    readonly timer: NodeJS.Timeout;
+    /** Output before the new prompt's marker is dropped (see forwardShellOutput). */
+    readonly dropping: boolean;
+    dropped: string;
+  } | undefined;
 
   constructor(options: ShellyOptions) {
     this.host = options.host;
     this.shellPath = options.shell;
     this.env = options.env;
+    this.initialCwd = options.cwd;
+    this.link = options.link;
     this.colorDepth = detectColorDepth(options.env);
     const lineEditor = new LineEditor({
       write: (data) => this.shell.write(data),
@@ -114,7 +194,7 @@ export class Shelly {
     this.rewriteHotkeys = options.rewriteHotkeys ?? DEFAULT_REWRITE_HOTKEYS;
     this.markers = integration && new ShellMarkerParser(integration.nonce);
     this.commands = new CommandLog({ columns: () => this.host.size.cols });
-    this.shell = ShellSession.spawn({
+    this.shell = (options.spawnShell ?? ((spawnOptions) => ShellSession.spawn(spawnOptions)))({
       shell: options.shell,
       args: integration?.args ?? [],
       cwd: options.cwd,
@@ -134,8 +214,7 @@ export class Shelly {
       this.shell.onData((data) => this.handleShellOutput(data));
       this.shell.onExit((exitCode) => {
         stopResizing();
-        this.dispose();
-        resolve(exitCode);
+        void this.dispose().then(() => resolve(exitCode));
       });
       this.host.start((data) => this.handleInput(data));
       this.overlayLoad = this.loadOverlay();
@@ -150,15 +229,21 @@ export class Shelly {
 
   private async loadOverlay(): Promise<InlineOverlay | undefined> {
     try {
-      const { InlineOverlay } = await import('./ui/inline-overlay.js');
+      const [{ InlineOverlay }, { Flows }, link] = await Promise.all([
+        import('./ui/inline-overlay.js'),
+        import('./client/flows.js'),
+        this.loadLink(),
+      ]);
       if (this.disposed) {
         return undefined;
       }
-      this.overlay = new InlineOverlay(this.host, new CommandRegistry(BUILTIN_COMMANDS), this.colorDepth, {
-        onSubmit: (text) => this.handleSubmit(text),
-        onCancel: () => this.handleCancel(),
+      const overlay = new InlineOverlay(this.host, new CommandRegistry(BUILTIN_COMMANDS), this.colorDepth, {
+        onSubmit: (text) => this.open && this.flows?.submit(this.open, text),
+        onCancel: () => this.open && this.flows?.cancel(this.open),
       });
-      return this.overlay;
+      this.overlay = overlay;
+      this.flows = new Flows(this.flowHost(overlay, link));
+      return overlay;
     } catch (error) {
       // Keep working as a plain shell; triggers simply pass through.
       this.overlayUnavailable = true;
@@ -168,15 +253,57 @@ export class Shelly {
     }
   }
 
+  /** What the agent and fast flows get to work with. */
+  /** The daemon link module is small and plain, but still not needed before the first prompt. */
+  private loadLink(): Promise<DaemonLink> {
+    this.linkLoad ??= this.link
+      ? Promise.resolve(this.link)
+      : import('./client/daemon-link.js').then(({ DaemonLink }) => {
+        this.link = new DaemonLink({ env: this.env });
+        return this.link;
+      });
+    return this.linkLoad;
+  }
+
+  private flowHost(overlay: InlineOverlay, link: DaemonLink): FlowHost {
+    return {
+      terminal: this.host,
+      colorDepth: this.colorDepth,
+      overlay,
+      link,
+      commands: this.commands,
+      lineEditor: this.lineEditor,
+      home: this.env.HOME || homedir(),
+      recordsCommands: this.markers !== undefined,
+      cwd: () => this.commands.cwd ?? this.initialCwd,
+      environment: () => (this.environment ??= describeEnvironment(this.shellPath, this.env)),
+      claim: (onKeys) => this.claim(onKeys),
+      release: (options) => this.release(options),
+    };
+  }
+
   private handleInput(data: string): void {
+    this.lastActivityAt = Date.now();
     switch (this.mode) {
       case 'shell':
         this.handleShellInput(data);
         break;
       case 'capturing':
       case 'opening':
-      case 'responding':
         this.queuedInput += data;
+        break;
+      case 'returning':
+        // Ctrl-C means now: it reaches the shell at once. Ctrl-D is dropped
+        // (at an empty prompt it would close the shell); the rest waits.
+        if (data.includes(INTERRUPT)) {
+          this.shell.write(INTERRUPT);
+        }
+        this.queuedInput += data.replaceAll(INTERRUPT, '').replaceAll(EOF_KEY, '');
+        break;
+      case 'busy':
+        if (!this.busyKeys?.(data)) {
+          this.queuedInput += data;
+        }
         break;
       case 'overlay':
         this.overlay?.feed(data);
@@ -250,6 +377,7 @@ export class Shelly {
   }
 
   private handleShellOutput(data: string): void {
+    this.lastActivityAt = Date.now();
     if (!this.markers) {
       this.forwardShellOutput(data);
       return;
@@ -268,25 +396,71 @@ export class Shelly {
       if (segment.type === 'event') {
         this.commands.handle(segment.event);
         this.lineEditor?.handleEvent(segment.event);
+        if (segment.event.type === 'cwd') {
+          this.warmUp();
+          if (this.promptWait) {
+            this.promptWait.sawCwd = true;
+          }
+        } else if (segment.event.type === 'exec') {
+          this.flows?.commandStarted();
+        }
       } else {
         this.lineEditor?.observeOutput(segment.data);
         this.commands.recordOutput(segment.data);
         this.forwardShellOutput(segment.data);
+        if (this.promptWait?.sawCwd) {
+          // The prompt is being drawn, so the line editor has the terminal again.
+          this.promptReady();
+        }
       }
     }
   }
 
   private forwardShellOutput(data: string): void {
-    if (this.mode === 'shell' || this.mode === 'capturing') {
+    const wait = this.promptWait;
+    if (this.mode === 'returning' && wait?.dropping && !wait.sawCwd) {
+      // Before the new prompt: the shell's own newline, and any repaint of the
+      // old prompt it still had to do (fish 3 after a resize), all drawn
+      // relative to where it thought it was. The new prompt replaces them.
+      wait.dropped += data;
+      this.host.write(withoutDrawing(data));
+      return;
+    }
+    if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
       this.host.write(data);
     } else {
       this.heldShellOutput.push(data);
     }
   }
 
-  private async openOverlay(trigger: string, remainder: string): Promise<void> {
+  /**
+   * The shell has drawn its first prompt: start the daemon now (a spawn, no
+   * Effect), and load the connection to it once the terminal is quiet, so
+   * its module loading never lands on a keystroke.
+   */
+  private warmUp(): void {
+    if (this.warmupStarted || this.disposed) {
+      return;
+    }
+    this.warmupStarted = true;
+    void this.loadLink().then((link) => link.startDaemon()).catch(() => undefined);
+    const whenIdle = (): void => {
+      if (this.disposed) {
+        return;
+      }
+      const quietFor = Date.now() - this.lastActivityAt;
+      if (quietFor < IDLE_MS) {
+        this.warmupTimer = setTimeout(whenIdle, IDLE_MS - quietFor);
+        return;
+      }
+      void this.loadLink().then((link) => link.get()).then((client) => this.flows?.connected(client), () => undefined);
+    };
+    this.warmupTimer = setTimeout(whenIdle, IDLE_MS);
+  }
+
+  private async openOverlay(trigger: string, remainder: string, rewrite?: OpenInput['rewrite']): Promise<void> {
     this.mode = 'opening';
-    this.activeTrigger = trigger;
+    this.open = { trigger, mode: trigger === '__' ? 'fast' : 'agent', rewrite };
     this.queuedInput = remainder;
 
     const [overlay, cursor] = await Promise.all([
@@ -294,24 +468,29 @@ export class Shelly {
       this.host.queryCursorPosition().catch((): CursorPosition | undefined => undefined),
     ]);
 
-    if (!overlay || !cursor || this.disposed) {
+    const flows = this.flows;
+    if (!overlay || !flows || !cursor || this.disposed) {
       // Nowhere to draw: the keystrokes belong to the shell after all.
       const typed = this.queuedInput;
       this.queuedInput = '';
       this.mode = 'shell';
       this.flushHeldShellOutput();
-      if (this.rewrite) {
-        this.finishRewrite();
+      if (this.open?.rewrite) {
+        this.putLineBack(this.open.rewrite);
+        this.open = undefined;
         this.handleInput(typed);
       } else {
+        this.open = undefined;
         this.writeToShell(trigger + typed);
       }
       return;
     }
 
     this.mode = 'overlay';
-    overlay.open(cursor, trigger, this.queuedInput);
+    const open = this.open!;
+    overlay.open(cursor, trigger, this.queuedInput, flows.openOptions(open));
     this.queuedInput = '';
+    flows.opened(open);
   }
 
   /** The rewrite hotkey, at the prompt: take the line the user was typing. */
@@ -373,21 +552,15 @@ export class Shelly {
    * user was typing, now cleared from the shell's input line; undefined when
    * the shell cannot hand its line over (bash 3.2), which then stays where
    * it is. Not called when a capture fails: the line is not Shelly's then.
-   * Until fast mode takes over, this opens the `__` input and puts the line
-   * back once it closes.
+   * Opens fast mode's input to rewrite it; the line comes back as it was
+   * unless a command takes its place.
    */
   private onRewriteHotkey(captured: CapturedLine | undefined): void {
-    this.rewrite = { captured };
-    void this.openOverlay('__', this.queuedInput);
+    void this.openOverlay('__', this.queuedInput, { captured });
   }
 
-  /** Put back the line a rewrite took. */
-  private finishRewrite(): void {
-    const rewrite = this.rewrite;
-    this.rewrite = undefined;
-    if (!rewrite) {
-      return;
-    }
+  /** Put back the line a rewrite took, if it took one. */
+  private putLineBack(rewrite: NonNullable<OpenInput['rewrite']>): void {
     if (rewrite.captured?.buffer) {
       this.lineEditor?.restore(rewrite.captured).catch(() => undefined);
     }
@@ -396,102 +569,215 @@ export class Shelly {
     }
   }
 
-  private handleCancel(): void {
-    this.overlay?.close();
-    this.returnToShell();
-    this.finishRewrite();
+  /** Shelly draws below the prompt: keys go to `onKeys`, shell output waits. */
+  private claim(onKeys: (data: string) => boolean): void {
+    this.mode = 'busy';
+    this.busyKeys = onKeys;
+    this.armWatchdog();
   }
 
-  private handleSubmit(text: string): void {
-    this.overlay?.close();
-    this.mode = 'responding';
-    this.host.write(`\u001b[1;35m${this.activeTrigger}\u001b[0m ${toTerminalText(text)}\r\n`);
-    void Promise.race([
-      this.respond(text),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('it took too long')), RESPONSE_TIMEOUT_MS).unref()),
-    ])
-      .catch((error: unknown) => `Shelly could not answer: ${error instanceof Error ? error.message : String(error)}`)
-      .then((response) => {
-        if (this.disposed) {
-          return;
-        }
-        this.host.write(`\u001b[90m${toTerminalText(response)}\u001b[0m`);
-        // Have the shell draw a fresh prompt below the response, then pass on
-        // anything typed in the meantime.
-        if (this.rewrite && !this.rewrite.captured) {
-          // The line is still on the shell's input line, where Enter would
-          // run it: have the shell redraw it below instead.
-          if (this.lineEditor?.canRedraw && this.lineEditor.isAtPrompt) {
-            this.host.write('\r\n');
-            this.lineEditor.redraw();
-          }
+  /**
+   * The user is never locked out of their shell. While Shelly is busy with
+   * nothing on screen to show for it (no turn drawing: an error lost on the
+   * way, say), it gives the prompt back after BUSY_WATCHDOG_MS, saying so.
+   */
+  private armWatchdog(): void {
+    clearTimeout(this.watchdog);
+    this.watchdog = setTimeout(() => {
+      this.watchdog = undefined;
+      if (this.disposed || this.mode !== 'busy') {
+        return;
+      }
+      if (this.flows?.isDrawing()) {
+        // A turn on screen answers keys itself (Esc, Ctrl-C): look again later.
+        this.armWatchdog();
+        return;
+      }
+      this.host.write(`\r\n\u001b[2m(Shelly lost its place; your prompt is back.)\u001b[0m\r\n`);
+      this.release({ cursor: 'fresh-line', line: { type: 'as-before' } });
+    }, BUSY_WATCHDOG_MS);
+    this.watchdog.unref?.();
+  }
+
+  /**
+   * Give the terminal back to the shell: a fresh prompt if Shelly printed
+   * below the old one, the line as it should be, then whatever arrived
+   * meanwhile (held output, typed keys) in order.
+   */
+  private release({ cursor, line }: ReleaseOptions): void {
+    // Only what Shelly holds can be given back: a second release (an error
+    // path after the first) must not draw another prompt.
+    if (this.disposed || (this.mode !== 'busy' && this.mode !== 'overlay')) {
+      return;
+    }
+    clearTimeout(this.watchdog);
+    this.watchdog = undefined;
+    const rewrite = this.open?.rewrite;
+    this.open = undefined;
+    this.busyKeys = undefined;
+
+    // Anything the shell printed meanwhile goes first, on its own lines. A
+    // shell idle at its prompt only draws its line editor (a prompt redrawn
+    // on a resize, an async prompt segment), with cursor moves relative to
+    // the old prompt further up: drawn down here, it would land on Shelly's
+    // output (fish 3 repaints over the last rows) and show the prompt twice.
+    // The new prompt replaces all of it; what is not drawing (a query the
+    // shell waits on, a mode it set) still goes through.
+    const held = this.takeHeldShellOutput();
+    if (cursor === 'fresh-line' && this.lineEditor?.isAtPrompt) {
+      this.host.write(withoutDrawing(held));
+    } else if (held) {
+      this.host.write(cursor === 'fresh-line' && !held.endsWith('\n') ? `${held}\r\n` : held);
+    }
+
+    const finish = (): void => {
+      this.mode = 'shell';
+      if (this.pendingShellSize) {
+        this.shell.resize(this.pendingShellSize);
+        this.pendingShellSize = undefined;
+      }
+      this.detector.markLineEmpty();
+      if (line.type === 'set') {
+        // Set exactly, cursor at the end; a multi-line command is beyond what the detector follows.
+        if (line.text.includes('\n')) {
+          this.detector.markLineUnknown();
         } else {
-          this.shell.write('\r');
+          this.detector.markLineTyped([...line.text].length);
         }
-        const typed = this.queuedInput;
-        this.queuedInput = '';
-        this.returnToShell();
-        this.finishRewrite();
-        if (typed) {
-          this.handleInput(typed);
-        }
-      });
+        this.lineEditor?.replace(line.text).catch(() => this.host.write('\u0007'));
+      } else if (rewrite) {
+        this.putLineBack(rewrite);
+      }
+      this.flushHeldShellOutput();
+      const typed = printableOnly(this.queuedInput);
+      this.queuedInput = '';
+      if (typed) {
+        this.handleInput(typed);
+      }
+    };
+
+    if (cursor === 'prompt') {
+      finish();
+    } else if (rewrite && !rewrite.captured) {
+      // bash 3.2: the line is still on the shell's input line, where Enter
+      // would run it: have the shell redraw prompt and line down here.
+      this.lineEditor?.redraw();
+      finish();
+    } else {
+      // Keys sent before the new prompt is up would be echoed by the
+      // terminal driver, and a line set then would be lost: wait for it.
+      this.mode = 'returning';
+      this.whenPromptReady(finish, this.markers !== undefined);
+      this.freshPrompt();
+    }
   }
 
-  /** Agent integration is not built yet; /context shows what it would be told. */
-  private async respond(text: string): Promise<string> {
-    if (text !== '/context') {
-      return "Shelly isn't connected to an agent yet.";
+  private whenPromptReady(run: () => void, dropping: boolean): void {
+    clearTimeout(this.promptWait?.timer);
+    // A shell without hooks never says; give it a moment.
+    const timer = setTimeout(() => {
+      const wait = this.promptWait;
+      if (wait && !wait.sawCwd && wait.dropped.trim()) {
+        // No prompt marker came (hooks broken?): a fresh line, so whatever the shell draws next is readable.
+        this.host.write('\r\n');
+      }
+      this.promptReady();
+    }, this.markers ? PROMPT_WAIT_MS : NO_HOOKS_PROMPT_WAIT_MS);
+    this.promptWait = { sawCwd: false, run, timer, dropping, dropped: '' };
+  }
+
+  private promptReady(): void {
+    const wait = this.promptWait;
+    if (!wait) {
+      return;
     }
+    this.promptWait = undefined;
+    clearTimeout(wait.timer);
+    // After this chunk of output has gone to the terminal.
+    setImmediate(() => {
+      if (!this.disposed) {
+        wait.run();
+      }
+    });
+  }
+
+  /**
+   * The cursor is at the start of an empty line below Shelly's output, and
+   * the shell's line editor still thinks it is at the end of its prompt,
+   * further up. Enter on the empty line makes the shell draw a new prompt.
+   *
+   * With hooks, everything the shell writes before the new prompt's marker
+   * (its newline, a late repaint of the old prompt) is dropped, since it is
+   * drawn relative to where the shell thought it was, and the prompt then
+   * lands on the empty line, however late the shell's other output comes.
+   * Without hooks there is no marker: the cursor goes up onto the last
+   * printed line first, so the shell's newline brings it back down.
+   */
+  private freshPrompt(): void {
     if (!this.markers) {
-      return `Commands are not recorded in ${this.shellPath}; Shelly can hook into zsh, bash and fish.`;
+      this.host.write(CURSOR_UP);
     }
-    this.environment ??= describeEnvironment(this.shellPath, this.env);
-    return formatAskContext(await buildAskContext(this.commands, await this.environment));
-  }
-
-  private returnToShell(): void {
-    this.mode = 'shell';
-    this.detector.markLineEmpty();
-    this.flushHeldShellOutput();
+    this.shell.write('\r');
   }
 
   private flushHeldShellOutput(): void {
+    const output = this.takeHeldShellOutput();
+    if (output) {
+      this.host.write(output);
+    }
+  }
+
+  private takeHeldShellOutput(): string {
     const output = this.heldShellOutput.join('');
     this.heldShellOutput = [];
-    this.host.write(output);
+    return output;
   }
 
   private handleResize(size: TerminalSize): void {
-    this.shell.resize(size);
-    if (this.mode !== 'overlay') {
+    if (this.mode === 'busy' || this.mode === 'returning') {
+      // The shell is idle at its prompt and needs no size now. Resized, it
+      // would repaint that prompt (and fish 4 asks the terminal where the
+      // cursor is) under Shelly's output; the size reaches it once it has its
+      // new prompt, which it then redraws in place, as without Shelly.
+      this.pendingShellSize = size;
+    } else {
+      this.shell.resize(size);
+    }
+    if (this.mode !== 'overlay' && this.mode !== 'busy') {
       return;
     }
 
     // Terminals send a burst of resizes while the window is dragged; re-anchor once it settles.
     clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
+      if (this.mode === 'busy') {
+        this.flows?.relayout();
+        return;
+      }
       if (this.mode !== 'overlay') {
         return;
       }
-      this.host.queryCursorPosition()
-        .then((cursor) => this.overlay?.relayout(cursor))
-        .catch(() => this.handleCancel());
+      // A query can fail while another is in flight: try once more, else keep the old anchor.
+      const query = () => this.host.queryCursorPosition();
+      query()
+        .catch(() => query())
+        .then((cursor) => this.overlay?.relayout(cursor), () => undefined);
     }, RESIZE_SETTLE_MS);
   }
 
-  private dispose(): void {
+  private async dispose(): Promise<void> {
     this.disposed = true;
     clearTimeout(this.triggerHoldTimer);
     clearTimeout(this.resizeTimer);
     clearTimeout(this.markerHoldTimer);
+    clearTimeout(this.warmupTimer);
+    clearTimeout(this.promptWait?.timer);
+    clearTimeout(this.watchdog);
     this.lineEditor?.dispose();
     this.overlay?.destroy();
     this.host.stop();
+    // Detach the thread so another terminal can take it, and close the connection so the process can exit.
+    const flows = this.flows;
+    await this.link?.dispose(flows ? (client) => flows.goodbye(client) : undefined);
   }
 }
-
-/** Text for the terminal: line breaks as CRLF, and no stray control characters (C0, DEL, C1). */
-const toTerminalText = (text: string): string => text
-  .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
-  .replace(/\n/g, '\r\n');

@@ -10,6 +10,24 @@ Three tools, so agents and reviewers can check Shelly's terminal UI the way a us
 
 Tests: `pnpm test` runs `test/tools/*.test.ts` (screenshots, fake agent); `pnpm test:e2e` runs `test/e2e/scenario-driver.e2e.ts`.
 
+## The whole stack
+
+`test/e2e/stack.ts` (`startStack`) runs Shelly with everything behind it: the daemon it starts on demand (real agent and fast-mode layers), the fake ACP agent registered in `config.json` as the default agent (scenario `test/e2e/fixtures/agent.scenario.ts`, picked by a word in the prompt), and the fake `claude` on PATH for fast mode. `stack.promptLog` holds every prompt the agent got. `stop()` (and `driver.close()`) stops the daemon, so no process is left behind.
+
+The driver gives every run a `config.json` with the built-in agents off (`NO_AGENTS_CONFIG`), so a test never starts the real Claude Code; pass `config` to change it.
+
+Contact sheets of the main flows, against the same fakes (`scenarioOptions`):
+
+```sh
+pnpm scenario test/tools/scenarios/agent.scenario.ts     # input, markdown, tools, a permission, background and watch
+pnpm scenario test/tools/scenarios/fast.scenario.ts      # a command on the line, an answer, an error, Ctrl+]
+pnpm scenario test/tools/scenarios/threads.scenario.ts   # slash popup, /threads with history, /mode, /agent, /context, /help
+```
+
+`scripts/client-bench.ts` measures startup, `::` to the input, Enter to first feedback and the client's memory over many turns (`--entry` compares another checkout). `SHELLY_REAL_AGENTS=1 node --experimental-ffi --no-warnings --import tsx --test test/e2e/real-agents.e2e.ts` runs a handful of real requests (Claude Code on haiku, real fast mode, OpenCode on a free model).
+
+Timing notes: a key sent right after Esc reads as Alt+key, so wait for Esc to take effect before typing; a permission prompt ignores keys for its first 300 ms on screen.
+
 ## Run a scenario and look at it
 
 ```sh

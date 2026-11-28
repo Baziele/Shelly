@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CommandRegistry, parseSlashQuery } from './slash-commands.js';
+import { CommandRegistry, parseSlashCommand, parseSlashQuery } from './slash-commands.js';
 
 describe('parseSlashQuery', () => {
   it('returns the partial command name while one is being typed', () => {
@@ -24,5 +24,18 @@ describe('CommandRegistry', () => {
 
   it('lists everything for an empty query', () => {
     assert.equal(registry.match('').length, 3);
+  });
+});
+
+describe('parseSlashCommand', () => {
+  it('splits a known command from its arguments', () => {
+    assert.deepEqual(parseSlashCommand('/rename  Fix the build '), { name: 'rename', args: 'Fix the build' });
+    assert.deepEqual(parseSlashCommand('/threads'), { name: 'threads', args: '' });
+  });
+
+  it('leaves anything else to the agent', () => {
+    assert.equal(parseSlashCommand('/etc/hosts is empty?'), undefined);
+    assert.equal(parseSlashCommand('/nope'), undefined);
+    assert.equal(parseSlashCommand('what does /new do'), undefined);
   });
 });

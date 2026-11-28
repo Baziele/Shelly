@@ -16,6 +16,19 @@ export interface RendererSize {
  */
 const PROCESS_EVENTS_OWNED_BY_SHELLY = ['warning', 'uncaughtException', 'unhandledRejection'] as const;
 
+let live = 0;
+
+/** OpenTUI refuses a renderer of more cells than this (width × height). */
+export const MAX_RENDERER_CELLS = 1_000_000;
+
+/** The tallest renderer OpenTUI allows at `width`. */
+export const maxRendererRows = (width: number): number =>
+  Math.max(1, Math.floor(MAX_RENDERER_CELLS / Math.max(1, width)));
+
+/** `size`, no taller than OpenTUI allows: asked for more, it throws. */
+const clampSize = (size: RendererSize): RendererSize =>
+  ({ width: size.width, height: Math.min(size.height, maxRendererRows(size.width)) });
+
 type FakeTerminalOutput = Writable & { columns: number; rows: number; isTTY: true };
 
 /**
@@ -29,7 +42,13 @@ type FakeTerminalOutput = Writable & { columns: number; rows: number; isTTY: tru
  * styling while Shelly handles placement.
  */
 export class HeadlessRenderer {
+  /** Renderers created and not yet destroyed, process-wide: for leak checks. */
+  static get liveCount(): number {
+    return live;
+  }
+
   private frameListener: ((frame: PaintFrame) => void) | undefined;
+  private destroyed = false;
 
   private constructor(
     readonly renderer: CliRenderer,
@@ -39,7 +58,8 @@ export class HeadlessRenderer {
     renderer.addPostProcessFn((buffer) => this.frameListener?.(this.captureFrame(buffer)));
   }
 
-  static create(size: RendererSize): HeadlessRenderer {
+  static create(requested: RendererSize): HeadlessRenderer {
+    const size = clampSize(requested);
     const input = new Readable({ read() {} });
     const output: FakeTerminalOutput = Object.assign(
       new Writable({ write: (_chunk, _encoding, callback) => callback() }),
@@ -75,6 +95,7 @@ export class HeadlessRenderer {
       }
     }
 
+    live++;
     return new HeadlessRenderer(renderer, input, output);
   }
 
@@ -87,7 +108,8 @@ export class HeadlessRenderer {
     this.input.emit('data', Buffer.from(data, 'utf8'));
   }
 
-  resize(size: RendererSize): void {
+  resize(requested: RendererSize): void {
+    const size = clampSize(requested);
     if (size.width === this.output.columns && size.height === this.output.rows) {
       return;
     }
@@ -101,6 +123,12 @@ export class HeadlessRenderer {
   }
 
   destroy(): void {
+    if (this.destroyed) {
+      return;
+    }
+    this.destroyed = true;
+    live--;
+    this.frameListener = undefined;
     this.renderer.destroy();
   }
 

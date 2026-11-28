@@ -9,7 +9,7 @@ export interface ShellyHarness {
   screen(): Promise<string[]>;
   cursor(): Promise<{ row: number; col: number }>;
   /** Poll the screen until `predicate` holds, or fail with the last screen. */
-  waitFor(predicate: (screen: string[]) => boolean, description: string): Promise<string[]>;
+  waitFor(predicate: (screen: string[]) => boolean, description: string, options?: { timeoutMs?: number }): Promise<string[]>;
   /** Everything Shelly wrote to the terminal so far. */
   raw(): string;
   close(): Promise<number>;
@@ -24,6 +24,8 @@ export interface ShellyOptions {
   /** A HOME holding the shell's startup files; a throwaway one when absent. */
   readonly home?: string;
   readonly env?: Readonly<Record<string, string>>;
+  /** Shelly's config.json; by default the built-in agents are off. */
+  readonly config?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -34,15 +36,15 @@ export interface ShellyOptions {
  * should get a HOME whose startup files set the same prompt.
  */
 export const startShelly = async (
-  { cols = 80, rows = 12, shell = '/bin/sh', home, env = {} }: ShellyOptions = {},
+  { cols = 80, rows = 12, shell = '/bin/sh', home, env = {}, config }: ShellyOptions = {},
 ): Promise<ShellyHarness> => {
-  const driver = await ScenarioDriver.start({ cols, rows, shell, home, env });
+  const driver = await ScenarioDriver.start({ cols, rows, shell, home, env, ...(config ? { config } : {}) });
   return {
     driver,
     type: (keys) => driver.type(keys),
     screen: () => driver.lines(),
     cursor: () => driver.cursor(),
-    waitFor: (predicate, description) => driver.waitFor(predicate, description),
+    waitFor: (predicate, description, options) => driver.waitFor(predicate, description, options),
     raw: () => driver.raw(),
     close: () => driver.close(),
   };

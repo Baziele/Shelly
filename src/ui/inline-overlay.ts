@@ -18,6 +18,8 @@ export interface OverlayOpenOptions {
   readonly rewriting?: string;
   /** Right-aligned on the input row: where `::` will go. */
   readonly hint?: string;
+  /** Enter on an empty input submits `''` instead of closing. */
+  readonly submitEmpty?: boolean;
 }
 
 export interface InlineOverlayHandlers {
@@ -87,8 +89,18 @@ export class InlineOverlay {
   }
 
   /** Where `::` will go, shown right-aligned on the input row. */
-  setHint(hint: string | undefined): void {
-    this.update(() => this.view.setHint(hint));
+  setHint(hint: string | undefined, submitEmpty?: boolean): void {
+    this.update(() => this.view.setHint(hint, submitEmpty));
+  }
+
+  /** Empty the input and clear any error, keeping the overlay open. */
+  clearInput(): void {
+    this.update(() => this.view.clearInput());
+  }
+
+  /** What the open input is for, or undefined when it is closed. */
+  get mode(): PromptMode | undefined {
+    return this.session ? this.view.currentMode : undefined;
   }
 
   /** Fast mode: the request is running (spinner, typing paused) or not. */
