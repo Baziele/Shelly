@@ -47,12 +47,16 @@ const agents = AgentRuntimeAcp.layer;
 - **Errors in a turn** end it with `stopReason: 'error'`: a dead process reads "<Agent> stopped
   unexpectedly.", ACP authRequired (-32000) reads the agent's sign-in message, and other agent
   errors read "<Agent> failed: <first line>".
-- **Command output.** Shelly advertises `clientCapabilities._meta.terminal_output_delta`, so Claude
-  Code reports a shell command's output in its tool call's `_meta` (streamed while it runs, then the
-  exit code) instead of only a code block at the end. The tool tracker keeps it per tool call (deltas
-  appended, a whole `terminal_output` replacing) and shows it as the tool's last text content: the
-  end of the output, about 8 KB, with "Exit code N" last for a failed command. It is untrusted
-  terminal text, passed on raw for clients to sanitise, and never logged.
+- **Protocol generations.** The vendored client negotiates: Claude Code answers ACP v2, OpenCode v1.
+  `mapping.ts` handles both. v2 diffs (`changes` plus a git patch) become ordinary diffs per file
+  (a new file has no old text), and a v2 turn that ends with an `error` (Claude Code signed out ends
+  so) becomes an `end` with stopReason `error`.
+- **Command output.** A command's tool call holds only a `terminal` placeholder; the output comes
+  apart from it: in v2 `terminal_update` / `terminal_output_chunk` session updates (base64), or in v1
+  the tool call's `_meta` (Shelly advertises `terminal_output_delta`). The tool tracker keeps it per
+  terminal and shows it as the tool's last text content: the end of the output, about 8 KB, with
+  "Exit code N" last for a failed command. It is untrusted terminal text, passed on raw for clients to
+  sanitise, and never logged.
 - **Permissions** are passed through unchanged. `respond(requestId, null)` and `cancel` answer with
   ACP's cancelled outcome. Unknown, already-answered or invalid option ids fail with `UnknownRequest`.
 - **Modes** come from ACP `modes`, or else from the `mode` config option (OpenCode's agents).
