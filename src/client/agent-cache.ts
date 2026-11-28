@@ -1,4 +1,4 @@
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentInfo } from '../protocol/schema.js';
 
@@ -61,12 +61,17 @@ export const writeKnownAgents = (shellyHome: string, agents: readonly AgentInfo[
   } catch {
     // Not there yet.
   }
+  const temporary = `${path}.${process.pid}.tmp`;
   try {
-    const temporary = `${path}.${process.pid}.tmp`;
     writeFileSync(temporary, text, { mode: 0o600 });
     renameSync(temporary, path);
     written.set(path, text);
   } catch {
     // $SHELLY_HOME not there or not writable: the hint just comes later.
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // Nothing more to do.
+    }
   }
 };
