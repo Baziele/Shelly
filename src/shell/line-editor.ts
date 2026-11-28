@@ -17,7 +17,11 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  *   notice   show the line file's one-line notice below the line, delete it,
  *            report `line-set;<request>`
  *   clear    bash 3.2: clear the line, so Shelly can type a new one
- *   redraw   bash 3.2: redraw the prompt and line where the cursor is
+ *   mark, end, back
+ *            bash 3.2: remember where the cursor is (readline's mark) and
+ *            move it to the end of the line, then back to the mark. Nothing
+ *            on the line changes; Shelly asks the terminal where the end is,
+ *            to show its own notice below the line
  *
  * Each request is numbered in the line file (`capture <n>`, `set <n>
  * <cursor>` and the text, or `notice <n>` and the text), and the hooks echo the number back, so an answer
@@ -36,7 +40,7 @@ import type { ShellEvent, ShellInputLine } from './shell-markers.js';
  *   bash 3.2            no READLINE_LINE, so no capture; replace clears the
  *                       line and types the text: as a bracketed paste when
  *                       the shell has turned that on, otherwise only single
- *                       lines, with control characters removed
+ *                       lines, with control characters removed; jump
  */
 
 /** The keys Shelly sends. Kept in step with the bindings in shell-integration/. */
@@ -47,10 +51,14 @@ export const LINE_KEYS = {
   set: '\u001b[23;16~',
   /** Ctrl+Alt+Shift+Meta+F10. */
   clear: '\u001b[21;16~',
-  /** Ctrl+Alt+Shift+Meta+F9. */
-  redraw: '\u001b[20;16~',
   /** Ctrl+Alt+Shift+Meta+F8. */
   notice: '\u001b[19;16~',
+  /** Ctrl+Alt+Shift+Meta+F7. */
+  mark: '\u001b[18;16~',
+  /** Ctrl+Alt+Shift+Meta+F5. */
+  end: '\u001b[15;16~',
+  /** Ctrl+Alt+Shift+Meta+F4. */
+  back: '\u001b[1;16S',
 } as const;
 
 const LINE_KEY_PATTERN = new RegExp(
@@ -93,6 +101,8 @@ export interface LineEditorOptions {
    * command before it counts as still at its prompt.
    */
   readonly enterQuietMs?: number;
+  /** After a cursor move (bash 3.2), how long to wait for the shell's output to start; then as `settleMs`. */
+  readonly moveStartMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 1000;
@@ -104,6 +114,11 @@ const DEFAULT_SETTLE_MS = 30;
 const DEFAULT_ENTER_QUIET_MS = 300;
 /** However busy the output, a capture is done this long after the shell answered. */
 const MAX_SETTLE_MS = 300;
+/**
+ * A cursor move (bash 3.2) has no answer: it is done once the shell's
+ * output has been quiet for the settle time, waiting this long for it to start.
+ */
+const DEFAULT_MOVE_START_MS = 50;
 
 const BRACKETED_PASTE_MODE = /\u001b\[\?2004([hl])/g;
 const PASTE_START = '\u001b[200~';
@@ -124,6 +139,12 @@ interface PendingCapture {
   settleTimer?: NodeJS.Timeout;
 }
 
+interface PendingMove {
+  readonly resolve: () => void;
+  readonly deadline: number;
+  timer?: NodeJS.Timeout;
+}
+
 interface PendingSet {
   readonly request: number;
   readonly resolve: () => void;
@@ -139,6 +160,8 @@ export class LineEditor {
   private readonly timeoutMs: number;
   private readonly settleMs: number;
   private readonly enterQuietMs: number;
+  private readonly moveStartMs: number;
+  private pendingMove: PendingMove | undefined;
   private features = new Set<string>();
   /** The shell has drawn a prompt (`cwd`) and not started a command (`exec`) since. */
   private atPrompt = false;
@@ -167,6 +190,7 @@ export class LineEditor {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
     this.enterQuietMs = options.enterQuietMs ?? DEFAULT_ENTER_QUIET_MS;
+    this.moveStartMs = options.moveStartMs ?? DEFAULT_MOVE_START_MS;
     try {
       // mkdtemp makes the directory 0700.
       this.lineDir = mkdtempSync(join(options.runtimeDir ?? tmpdir(), 'shelly-'));
@@ -183,9 +207,12 @@ export class LineEditor {
     return this.features.has('capture') && this.lineFile !== undefined;
   }
 
-  /** A shell that cannot capture can still redraw its line below something Shelly printed. */
-  get canRedraw(): boolean {
-    return this.features.has('redraw');
+  /**
+   * A shell that cannot capture its line can move its cursor to the line's
+   * end and back, leaving the line as it is (bash 3.2).
+   */
+  get canJump(): boolean {
+    return this.features.has('jump');
   }
 
   /** The shell can show a notice below its line, leaving the line alone. */
@@ -252,6 +279,9 @@ export class LineEditor {
     const capture = this.pendingCapture;
     if (capture?.answer) {
       this.settle(capture);
+    }
+    if (this.pendingMove) {
+      this.waitForQuiet(this.pendingMove, this.settleMs);
     }
   }
 
@@ -349,22 +379,29 @@ export class LineEditor {
   }
 
   /**
-   * Have a shell that cannot capture its line redraw the prompt and line
-   * where the cursor is now (below something Shelly printed). False if it
-   * cannot.
+   * bash 3.2: remember where the shell's cursor is, then move it to the end
+   * of the line. Resolves once the move has reached the screen (the shell's
+   * output has gone quiet); false if the shell cannot move it, or is not at
+   * its prompt.
    */
-  redraw(): boolean {
-    if (!this.features.has('redraw') || !this.isAtPrompt) {
-      return false;
-    }
-    this.write(LINE_KEYS.redraw);
-    return true;
+  jumpToLineEnd(): Promise<boolean> {
+    return this.move(LINE_KEYS.mark + LINE_KEYS.end);
+  }
+
+  /** bash 3.2: move the shell's cursor back to where `jumpToLineEnd` found it; see there. */
+  jumpBack(): Promise<boolean> {
+    return this.move(LINE_KEYS.back);
   }
 
   /** Stop waiting for the shell and remove the line file's directory. */
   dispose(): void {
     this.disposed = true;
     this.clearEnter();
+    if (this.pendingMove) {
+      clearTimeout(this.pendingMove.timer);
+      this.pendingMove.resolve();
+      this.pendingMove = undefined;
+    }
     if (this.pendingCapture) {
       clearTimeout(this.pendingCapture.timer);
       clearTimeout(this.pendingCapture.settleTimer);
@@ -464,6 +501,34 @@ export class LineEditor {
         this.pendingCapture = undefined;
         capture.resolve(answer);
       }
+    }, delay);
+  }
+
+  /** Send keys that only move the cursor, and wait for the shell's output to go quiet. */
+  private move(keys: string): Promise<boolean> {
+    return this.enqueue(async () => {
+      if (!this.canJump || !this.isAtPrompt) {
+        return false;
+      }
+      await new Promise<void>((resolve) => {
+        const move: PendingMove = { resolve, deadline: Date.now() + MAX_SETTLE_MS };
+        this.pendingMove = move;
+        this.write(keys);
+        // No output at all means the cursor was there already.
+        this.waitForQuiet(move, this.moveStartMs);
+      });
+      return true;
+    });
+  }
+
+  private waitForQuiet(move: PendingMove, quietMs: number): void {
+    clearTimeout(move.timer);
+    const delay = Math.max(0, Math.min(quietMs, move.deadline - Date.now()));
+    move.timer = setTimeout(() => {
+      if (this.pendingMove === move) {
+        this.pendingMove = undefined;
+      }
+      move.resolve();
     }, delay);
   }
 
