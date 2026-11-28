@@ -18,4 +18,10 @@ describe('portableExecArgv', () => {
     assert.deepEqual(daemonExecArgv([]), ['--disable-warning=ExperimentalWarning', '--experimental-ffi']);
     assert.deepEqual(daemonExecArgv(['--experimental-ffi', '--no-warnings']), ['--experimental-ffi', '--no-warnings']);
   });
+
+  it("keeps the client's young-generation limit from the daemon", () => {
+    assert.deepEqual(daemonExecArgv(['--experimental-ffi', '--no-warnings', '--max-semi-space-size=4']), ['--experimental-ffi', '--no-warnings']);
+    assert.deepEqual(daemonExecArgv(['--max-semi-space-size', '4', '--no-warnings']), ['--experimental-ffi', '--no-warnings']);
+    assert.deepEqual(daemonExecArgv(['--max_semi_space_size=4', '--no-warnings']), ['--experimental-ffi', '--no-warnings']);
+  });
 });

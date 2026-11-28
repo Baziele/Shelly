@@ -77,12 +77,36 @@ export const portableExecArgv = (execArgv: readonly string[], cwd = process.cwd(
 };
 
 /**
- * The daemon's Node flags: this process's, made portable, plus
- * --experimental-ffi, which the daemon's lock needs (flock through
- * node:ffi), with its experimental warning kept out of the log.
+ * Flags tuned for a terminal's client that the daemon should not inherit:
+ * the small young generation (see src/index.ts) saves memory per tab, but
+ * the daemon is one process, lives long and streams more.
+ */
+const CLIENT_ONLY_FLAGS = new Set(['--max-semi-space-size']);
+
+/** `execArgv` without CLIENT_ONLY_FLAGS, in either form (`--flag=value` or `--flag value`). */
+const withoutClientOnlyFlags = (execArgv: readonly string[]): string[] => {
+  const out: string[] = [];
+  for (let index = 0; index < execArgv.length; index++) {
+    const arg = execArgv[index]!;
+    const flag = arg.includes('=') ? arg.slice(0, arg.indexOf('=')) : arg;
+    // V8 reads `_` and `-` alike in its flags' names.
+    if (!CLIENT_ONLY_FLAGS.has(flag.replaceAll('_', '-'))) {
+      out.push(arg);
+    } else if (!arg.includes('=')) {
+      index++;
+    }
+  }
+  return out;
+};
+
+/**
+ * The daemon's Node flags: this process's, made portable and without the
+ * client's own tuning, plus --experimental-ffi, which the daemon's lock
+ * needs (flock through node:ffi), with its experimental warning kept out
+ * of the log.
  */
 export const daemonExecArgv = (execArgv: readonly string[], cwd = process.cwd()): string[] => {
-  const args = portableExecArgv(execArgv, cwd);
+  const args = portableExecArgv(withoutClientOnlyFlags(execArgv), cwd);
   if (!args.includes('--experimental-ffi')) {
     args.unshift('--experimental-ffi');
   }
