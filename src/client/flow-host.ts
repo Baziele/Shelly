@@ -53,6 +53,8 @@ export interface FlowHost {
   readonly home: string;
   /** Shelly's config file as the user would type it: `~/.shelly/config.json`. */
   readonly configPath: string;
+  /** $SHELLY_HOME, where the client keeps what it last heard about the agents. */
+  readonly shellyHome: string;
   /** The shell's working directory now. */
   cwd(): string;
   environment(): Promise<EnvironmentInfo>;

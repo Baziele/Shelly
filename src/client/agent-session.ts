@@ -19,6 +19,7 @@ import type { PickerItem } from '../ui/list-picker.js';
 import { agentPickerItems, modePickerItems, threadPickerItems, turnedOffReason } from '../ui/pickers.js';
 import { fallbackAgentName } from '../protocol/agent-names.js';
 import { truncateEnd } from '../render/text-width.js';
+import { readKnownAgents, writeKnownAgents } from './agent-cache.js';
 import type { DaemonClient } from './daemon-client.js';
 import type { Claim, FlowHost, OpenInput } from './flow-host.js';
 import { buildPromptContext, newestCommandId } from './prompt-context.js';
@@ -148,6 +149,8 @@ export class AgentSession {
   private readonly agentModes = new Map<string, ModeState>();
   private agents: readonly AgentInfo[] = [];
   private agentsAt = 0;
+  /** The agents as last heard by any terminal (or the config's default), until the daemon answers this one: read once. */
+  private known: readonly AgentInfo[] | undefined | null = null;
   /** The daemon (by pid) this terminal attached the current thread on; a new daemon needs it attached again. */
   private attachedOn: number | undefined;
   /** Per thread, the newest command it has heard about from this terminal. */
@@ -258,11 +261,27 @@ export class AgentSession {
 
   /** The name the user reads for an agent: the daemon's (a configured `name` wins), else the built-in's, else the id. */
   private nameOf(agentId: string): string {
-    return this.agents.find((agent) => agent.id === agentId)?.name ?? fallbackAgentName(agentId);
+    return this.agentList().find((agent) => agent.id === agentId)?.name ?? fallbackAgentName(agentId);
+  }
+
+  /**
+   * The agents: as the daemon last said, or, before it has answered this
+   * terminal, as it last told any (so the hint shows at once, and is put
+   * right in place once it answers).
+   */
+  private agentList(): readonly AgentInfo[] {
+    if (this.agentsAt > 0) {
+      return this.agents;
+    }
+    if (this.known === null) {
+      this.known = this.host.shellyHome ? readKnownAgents(this.host.shellyHome, fallbackAgentName) : undefined;
+    }
+    return this.known ?? [];
   }
 
   private defaultAgentId(): string | undefined {
-    return this.agents.find((agent) => agent.isDefault)?.id ?? this.agents.find((agent) => agent.available)?.id;
+    const agents = this.agentList();
+    return agents.find((agent) => agent.isDefault)?.id ?? agents.find((agent) => agent.available)?.id;
   }
 
   /** The agent a new thread would use. */
@@ -300,7 +319,7 @@ export class AgentSession {
       // Known to be none (not merely not heard yet): say so, and where to look.
       return this.agentsAt > 0 ? 'no agent set up · /agent' : undefined;
     }
-    const info = this.agents.find((candidate) => candidate.id === agent);
+    const info = this.agentList().find((candidate) => candidate.id === agent);
     if (info && !info.available) {
       // Enter would only say why: say it before.
       return `${this.nameOf(agent)} · ${unavailableLabel(info)}`;
@@ -1214,8 +1233,7 @@ export class AgentSession {
       return;
     }
     const { client, agents } = loaded;
-    this.agents = agents;
-    this.agentsAt = Date.now();
+    this.setAgents(agents);
     const overlay = this.host.overlay;
     const usable = agents.some((agent) => agent.available);
     overlay.openPicker({
@@ -1239,7 +1257,7 @@ export class AgentSession {
         }
         void client.setDefaultAgent(agent.id).then(
           () => {
-            this.agents = agents.map((candidate) => ({ ...candidate, isDefault: candidate.id === agent.id }));
+            this.setAgents(agents.map((candidate) => ({ ...candidate, isDefault: candidate.id === agent.id })));
             if (this.thread && this.thread.agentId !== agent.id) {
               // The next message goes to the new agent, in a new thread.
               this.next = { newThread: true, here: this.next.here };
@@ -1456,8 +1474,15 @@ export class AgentSession {
   }
 
   private async refreshAgents(client: DaemonClient): Promise<void> {
-    this.agents = await client.listAgents();
+    this.setAgents(await client.listAgents());
+  }
+
+  private setAgents(agents: readonly AgentInfo[]): void {
+    this.agents = agents;
     this.agentsAt = Date.now();
+    if (this.host.shellyHome) {
+      writeKnownAgents(this.host.shellyHome, agents);
+    }
   }
 
   /** Once connected: learn the agents now, so the first prompt's view names the right one. */

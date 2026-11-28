@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import type { AgentInfo, ModeState, ThreadSummary } from '../protocol/schema.js';
 import type { PickerRequest } from '../ui/prompt-view.js';
@@ -164,6 +167,26 @@ describe('AgentSession', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.ok(t.calls.includes('create t1'), 'sent as a message the second time');
+  });
+
+  it('shows the hint at once from what the daemon last said, then keeps it for the next terminal', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'shelly-cache-'));
+    try {
+      // Nothing heard yet: the config's default agent, by its name.
+      writeFileSync(join(home, 'config.json'), JSON.stringify({ defaultAgent: 'opencode' }));
+      assert.equal(setup({ shellyHome: home }).session.openOptions().hint, 'OpenCode · new thread');
+
+      // The daemon answers: the hint is put right, and what it said is kept.
+      const t = setup({ shellyHome: home });
+      await t.session.connected(await t.client());
+      assert.equal(t.session.openOptions().hint, 'Fake · new thread');
+      assert.deepEqual(JSON.parse(readFileSync(join(home, 'agents-cache.json'), 'utf8')), { agents: AGENTS });
+
+      // The next terminal shows that before its daemon answers.
+      assert.equal(setup({ shellyHome: home }).session.openOptions().hint, 'Fake · new thread');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('names the agent as the user knows it, not by its id', async () => {
