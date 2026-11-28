@@ -574,3 +574,142 @@ describe('a frame on its way to the terminal when it resizes', () => {
     });
   }
 });
+
+describe('frame confirmation', () => {
+  /** A host over an emulated terminal whose width replies the test scripts, and which tracks synchronized output. */
+  const scriptedHost = (term: EmulatedTerminal, reply: (call: number, syncOpen: boolean) => 'answer' | 'miss' | 'withhold') => {
+    let syncOpen = false;
+    let calls = 0;
+    const host = {
+      get size() { return term.size; },
+      write: (data: string) => {
+        term.write(data);
+        for (const [, mode] of data.matchAll(/\u001b\[\?2026([hl])/g)) {
+          syncOpen = mode === 'h';
+        }
+      },
+      queryCursorPosition: () => term.cursor(),
+      queryWidth: async (): Promise<{ row: number; cols: number }> => {
+        calls++;
+        const answer = reply(calls, syncOpen);
+        if (answer === 'withhold') {
+          // A terminal that holds replies while synchronized output is open: none comes in time.
+          return new Promise((_, reject) => setTimeout(() => reject(new Error('no answer')), 300));
+        }
+        if (answer === 'miss') {
+          throw new Error('no answer');
+        }
+        return term.queryWidth();
+      },
+    };
+    return { host, calls: () => calls };
+  };
+
+  const begin = async (host: ConstructorParameters<typeof AgentView>[0], term: EmulatedTerminal, timers: FakeTimers) => {
+    useModernWidths(term.terminal);
+    term.write('~/acme $ :: question\r\n');
+    view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
+    view.start(await term.cursor());
+    view.apply(event({ type: 'turn.started', text: 'q', at: timers.now }));
+    return view;
+  };
+
+  const chunk = (agent: AgentView, index: number) =>
+    agent.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `Paragraph ${index} has a few words in it.\n\n` }));
+
+  it('keeps confirming after a missed reply, and confirms the next frames once the terminal answers again', async () => {
+    const term = new EmulatedTerminal(80, 20);
+    const timers = new FakeTimers();
+    const { host, calls } = scriptedHost(term, (call) => (call === 2 ? 'miss' : 'answer'));
+    const agent = await begin(host, term, timers);
+    for (let index = 1; index <= 5; index++) {
+      chunk(agent, index);
+      await settle(term);
+    }
+    // One confirmation per frame written, the missed one included: confirmation did not stop.
+    assert.ok(calls() >= 5, `${calls()} confirmations`);
+    agent.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
+    await agent.finish();
+    const lines = await term.logicalLines();
+    for (let index = 1; index <= 5; index++) {
+      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${index} `)).length, 1, lines.join('\n'));
+    }
+  });
+
+  it('stops waiting on a terminal that misses twice in a row, and asks it again (without waiting) every ten seconds', async () => {
+    const term = new EmulatedTerminal(80, 20);
+    const timers = new FakeTimers();
+    let answering = false;
+    const { host, calls } = scriptedHost(term, () => (answering ? 'answer' : 'miss'));
+    const agent = await begin(host, term, timers);
+    for (let index = 1; index <= 4; index++) {
+      chunk(agent, index);
+      await settle(term);
+    }
+    const afterMisses = calls();
+    assert.equal(afterMisses, 2, 'asked past two misses in a row');
+    // Frames keep coming without confirmations.
+    chunk(agent, 5);
+    await settle(term);
+    assert.equal(calls(), afterMisses);
+    // Ten seconds on, the next frame asks again; the terminal answers, and confirmation is back.
+    answering = true;
+    timers.now += 10_000;
+    chunk(agent, 6);
+    await settle(term);
+    assert.equal(calls(), afterMisses + 1, 'probed once');
+    await sleep(20);
+    chunk(agent, 7);
+    await settle(term);
+    assert.ok(calls() >= afterMisses + 2, 'confirming again');
+  });
+
+  it('never asks while synchronized output is open, so a terminal that holds replies meanwhile costs nothing', async () => {
+    const term = new EmulatedTerminal(80, 12);
+    const timers = new FakeTimers();
+    let askedInSync = 0;
+    const { host } = scriptedHost(term, (_, syncOpen) => {
+      if (syncOpen) {
+        askedInSync++;
+        return 'withhold';
+      }
+      return 'answer';
+    });
+    // The live region must never show empty between frames (a commit drawn as clear, then rows).
+    let emptyShown = 0;
+    let statusSeen = false;
+    let ending = false;
+    const watched = {
+      ...host,
+      write: (data: string) => {
+        host.write(data);
+        term.terminal.write('', () => {
+          const buffer = term.terminal.buffer.active;
+          const screen = Array.from({ length: term.terminal.rows }, (_, row) => buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '');
+          const status = screen.some((line) => line.includes('esc background'));
+          statusSeen ||= status;
+          if (statusSeen && !status && !ending) {
+            emptyShown++;
+          }
+        });
+      },
+    };
+    const agent = await begin(watched, term, timers);
+    const started = Date.now();
+    for (let index = 1; index <= 6; index++) {
+      chunk(agent, index);
+      await settle(term);
+    }
+    await term.flush();
+    ending = true;
+    agent.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
+    await agent.finish();
+    assert.equal(askedInSync, 0, 'asked for a width while synchronized output was open');
+    assert.equal(emptyShown, 0, 'the live region showed empty between frames');
+    assert.ok(Date.now() - started < 3_000, `took ${Date.now() - started} ms`);
+    const lines = await term.logicalLines();
+    for (let index = 1; index <= 6; index++) {
+      assert.equal(lines.filter((line) => line.startsWith(`Paragraph ${index} `)).length, 1, lines.join('\n'));
+    }
+  });
+});
