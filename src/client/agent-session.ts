@@ -16,7 +16,7 @@ import { UNKNOWN_AGENT } from '../ui/agent/format.js';
 import { renderHistory } from '../ui/agent/history.js';
 import { oneLine, seg, type Line } from '../ui/agent/lines.js';
 import type { PickerItem } from '../ui/list-picker.js';
-import { agentPickerItems, modePickerItems, threadPickerItems } from '../ui/pickers.js';
+import { agentPickerItems, modePickerItems, threadPickerItems, turnedOffReason } from '../ui/pickers.js';
 import { fallbackAgentName } from '../protocol/agent-names.js';
 import { truncateEnd } from '../render/text-width.js';
 import type { DaemonClient } from './daemon-client.js';
@@ -285,7 +285,13 @@ export class AgentSession {
     }
     const agent = this.nextAgentId();
     if (!agent) {
-      return undefined;
+      // Known to be none (not merely not heard yet): say so, and where to look.
+      return this.agentsAt > 0 ? 'no agent set up · /agent' : undefined;
+    }
+    const info = this.agents.find((candidate) => candidate.id === agent);
+    if (info && !info.available) {
+      // Enter would only say why: say it before.
+      return `${this.nameOf(agent)} · ${unavailableLabel(info)}`;
     }
     const known = this.agentModes.get(agent);
     const mode = this.next.modeId && known ? labelOf({ ...known, currentModeId: this.next.modeId }) : undefined;
@@ -344,19 +350,28 @@ export class AgentSession {
   private async send(output: Output, text: string): Promise<void> {
     const { view } = output;
     const started = Date.now();
-    let client: DaemonClient;
+    // What to go back to should this prompt start a thread that never gets a turn.
+    const before = { thread: this.thread, next: this.next };
+    let client: DaemonClient | undefined;
     let threadId: string;
     let context: PromptContext;
+    let created: CurrentThread | undefined;
     try {
       client = await this.host.link.get();
       if (this.agents.length === 0) {
         await this.refreshAgents(client);
       }
       const thread = await this.ensureThread(client);
+      created = thread === before.thread ? undefined : thread;
       view.setAgentName(this.nameOf(thread.agentId));
       threadId = thread.id;
       context = await this.contextFor(threadId);
     } catch (error) {
+      if (client && created) {
+        this.discardThread(client, created, before);
+      }
+      // No agent ran: the reason is the whole story, with no time and no agent to check.
+      view.setAgentName(UNKNOWN_AGENT);
       await this.endView(output, this.describeError(error), started);
       return;
     }
@@ -389,10 +404,22 @@ export class AgentSession {
         await this.recover(live, live, view, { requestId, onStarted });
       }
     } catch (error) {
+      const neverStarted = live.startSeq === undefined;
+      // Only a refusal that says the turn never began (the agent could not be started): any other
+      // failure may have left a turn running in the thread.
+      const refused = tagOf(error) === 'AgentUnavailable' || tagOf(error) === 'AgentFailed';
+      if (neverStarted && refused && created) {
+        // A thread with no turn in it would only clutter /threads; the retry starts it again.
+        this.discardThread(client, created, before);
+      }
       if (live.view === view && live.status !== 'ended') {
         live.status = 'ended';
         live.view = undefined;
         output.target = undefined;
+        if (neverStarted && tagOf(error) !== 'AgentFailed') {
+          // Refused before any agent ran (it can't be used, the thread is busy): no time, no agent to check.
+          view.setAgentName(UNKNOWN_AGENT);
+        }
         await this.endView(output, this.describeError(error), started, live.turnId);
         this.settled(live);
         return;
@@ -911,6 +938,22 @@ export class AgentSession {
     return this.thread;
   }
 
+  /**
+   * Forget a thread this terminal just made for a prompt that never became a
+   * turn: delete it and go back to what came before.
+   */
+  private discardThread(client: DaemonClient, thread: CurrentThread, before: { readonly thread: CurrentThread | undefined; readonly next: NextThread }): void {
+    if (this.thread?.id === thread.id) {
+      this.thread = before.thread;
+      this.next = before.next;
+      // Making the new thread let go of the old one: attach it again before its next prompt.
+      this.attachedOn = undefined;
+      this.refreshHint();
+    }
+    this.sentUpTo.delete(thread.id);
+    void client.deleteThread(thread.id).catch(() => undefined);
+  }
+
   private async contextFor(threadId: string): Promise<PromptContext> {
     const environment = await this.host.environment();
     return buildPromptContext(this.host.commands, environment, this.host.cwd(), this.sentUpTo.has(threadId) ? this.sentUpTo.get(threadId) ?? -1 : undefined);
@@ -1162,15 +1205,22 @@ export class AgentSession {
     this.agents = agents;
     this.agentsAt = Date.now();
     const overlay = this.host.overlay;
+    const usable = agents.some((agent) => agent.available);
     overlay.openPicker({
-      items: agentPickerItems(agents),
-      placeholder: 'Pick the agent for new threads · type to filter',
+      items: agentPickerItems(agents, { configPath: this.host.configPath }),
+      placeholder: usable ? 'Pick the agent for new threads · type to filter' : 'No agent can be used yet · type to filter',
+      emptyText: 'No agent matches',
+      note: usable
+        ? `To add an agent: "agents" in ${this.host.configPath}`
+        : `Install Claude Code or OpenCode, or add an agent to "agents" in ${this.host.configPath}`,
       onPick: (item) => {
         const agent = agents.find((candidate) => candidate.id === item.id);
+        overlay.closePicker();
         if (!agent) {
+          // A built-in agent the config turned off.
+          overlay.setError(turnedOffReason(item.label, this.host.configPath));
           return;
         }
-        overlay.closePicker();
         if (!agent.available) {
           overlay.setError(agent.unavailableReason ?? `${agent.name} can't be used right now.`);
           return;
@@ -1382,6 +1432,12 @@ export class AgentSession {
         return `${this.thread ? this.nameOf(this.thread.agentId) : 'The agent'} is still working on the last request · empty the line, then ${SEE}`;
       case 'DaemonDisconnected':
         return "Lost the connection to Shelly's background service · try again";
+      case 'AgentUnavailable': {
+        const message = messageOf(error) || "The agent can't be used right now.";
+        const unavailable = (error as { agentId?: string }).agentId;
+        const another = this.agents.some((agent) => agent.available && agent.id !== unavailable);
+        return another ? `${message} · /agent to pick another` : message;
+      }
       default:
         return messageOf(error) || 'Something went wrong.';
     }
@@ -1421,6 +1477,14 @@ export class AgentSession {
     void this.view?.relayout();
   }
 }
+
+/** Why an agent can't be used, in two or three words for the hint. */
+const unavailableLabel = (agent: AgentInfo): string => {
+  const reason = agent.unavailableReason ?? '';
+  return /\bisn't installed|\bnot installed/i.test(reason)
+    ? 'not installed'
+    : /\bsign(?:ed)? in\b/i.test(reason) ? 'not signed in' : 'unavailable';
+};
 
 /** A mode's name, when it is not the agent's first (usual) one. */
 const labelOf = (modes: ModeState | undefined): string | undefined => {

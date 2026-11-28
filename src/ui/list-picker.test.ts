@@ -73,6 +73,14 @@ describe('picker items', () => {
     ]);
   });
 
+  it('lists the built-in agents the config turned off, so /agent is never empty', () => {
+    const rows = agentPickerItems([], { configPath: '~/.shelly/config.json' });
+    assert.deepEqual(rows.map((row) => [row.label, row.columns?.[0]]), [
+      ['Claude Code', 'turned off in ~/.shelly/config.json'],
+      ['OpenCode', 'turned off in ~/.shelly/config.json'],
+    ]);
+  });
+
   it('marks the current mode', () => {
     const rows = modePickerItems([{ id: 'default', name: 'Default', description: null }, { id: 'plan', name: 'Plan', description: 'Read only' }], 'plan');
     assert.deepEqual(rows.map((row) => row.current), [false, true]);

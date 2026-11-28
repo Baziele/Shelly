@@ -2,6 +2,7 @@ import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { BUILTIN_AGENT_NAMES } from '../../protocol/agent-names.js';
+import { configPathForDisplay } from '../../protocol/paths.js';
 import type { AgentInfo } from '../../protocol/schema.js';
 import { findClaudeExecutable, withoutHostSession } from '../claude-env.js';
 import type { AgentSettings, ConfigFile } from '../services.js';
@@ -220,7 +221,7 @@ const custom = (id: string, settings: AgentSettings, env: NodeJS.ProcessEnv): Ag
     name,
     enabled: settings.enabled ?? true,
     launch: settings.command === undefined
-      ? { ok: false, reason: `${name} has no \`command\` in Shelly's config.json.` }
+      ? { ok: false, reason: `${name} has no \`command\` in ${configPathForDisplay(env)}.` }
       : launchFrom(name, settings.command, settings.args ?? [], env),
     env: { ...settings.env },
     sessionSetup: modelSetup(settings.model),

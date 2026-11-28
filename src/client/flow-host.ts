@@ -51,6 +51,8 @@ export interface FlowHost {
   readonly lineEditor: LineEditor | undefined;
   /** The user's home directory, for showing paths with `~`. */
   readonly home: string;
+  /** Shelly's config file as the user would type it: `~/.shelly/config.json`. */
+  readonly configPath: string;
   /** The shell's working directory now. */
   cwd(): string;
   environment(): Promise<EnvironmentInfo>;

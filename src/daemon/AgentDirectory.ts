@@ -2,6 +2,7 @@ import * as Context from 'effect/Context';
 import * as Effect from 'effect/Effect';
 import * as Layer from 'effect/Layer';
 import { AgentUnavailable } from '../protocol/errors.js';
+import { configPathForDisplay } from '../protocol/paths.js';
 import type { AgentInfo } from '../protocol/schema.js';
 import { AgentRuntime, ShellyConfig } from './services.js';
 
@@ -27,6 +28,10 @@ export class AgentDirectory extends Context.Service<
 >()('shelly/daemon/AgentDirectory') {}
 
 export const FALLBACK_AGENT_ID = 'claude';
+
+/** What to do when there is no agent at all: where to add one, and where to look. */
+export const noAgentMessage = (env: NodeJS.ProcessEnv = process.env): string =>
+  `No agent is set up. Install Claude Code or OpenCode, or add an agent to ${configPathForDisplay(env)} · /agent shows what Shelly found.`;
 
 export const layer: Layer.Layer<AgentDirectory, never, AgentRuntime | ShellyConfig> = Layer.effect(
   AgentDirectory,
@@ -66,7 +71,7 @@ export const layer: Layer.Layer<AgentDirectory, never, AgentRuntime | ShellyConf
       const agent = agents.find((candidate) => candidate.id === agentId);
       if (!agent) {
         const reason = agents.length === 0
-          ? "No agent is set up. Install Claude Code or OpenCode, or add an agent to Shelly's config.json."
+          ? noAgentMessage()
           : `Shelly does not know an agent called "${agentId}".`;
         return yield* new AgentUnavailable({ agentId, reason });
       }

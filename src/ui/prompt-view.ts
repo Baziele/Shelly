@@ -60,6 +60,8 @@ export interface PickerRequest {
   readonly placeholder: string;
   /** Shown when nothing matches the filter. */
   readonly emptyText?: string;
+  /** A muted line between the input and the list: what else there is to know (how to add an agent, say). */
+  readonly note?: string;
   readonly onPick: (item: PickerItem) => void;
   /** Escape closes the picker and returns to the input. */
   readonly onClose: () => void;
@@ -253,7 +255,12 @@ export class PromptView {
 
   /** Show a list to pick from; the input becomes its filter. */
   openPicker(request: PickerRequest): void {
-    this.picker = { ...request, placeholder: oneLine(request.placeholder), emptyText: request.emptyText && oneLine(request.emptyText) };
+    this.picker = {
+      ...request,
+      placeholder: oneLine(request.placeholder),
+      emptyText: request.emptyText && oneLine(request.emptyText),
+      note: request.note && oneLine(request.note),
+    };
     this.input.value = '';
     this.refresh();
   }
@@ -428,7 +435,7 @@ export class PromptView {
   private refreshList(): void {
     const width = this.renderer.terminalWidth;
     if (this.picker) {
-      this.list.show(this.picker.items, this.input.value, width, this.textOffset - 2);
+      this.list.show(this.picker.items, this.input.value, width, this.textOffset - 2, this.picker.emptyText);
     } else {
       const query = parseSlashQuery(this.input.value);
       if (query !== this.dismissedQuery) {
@@ -488,6 +495,13 @@ export class PromptView {
       if (rows.length > MAX_MESSAGE_ROWS) {
         rows = [...rows.slice(0, MAX_MESSAGE_ROWS - 1), fitLine([...rows[MAX_MESSAGE_ROWS - 1]!, seg(' …', 'error')], width)];
       }
+      this.messageRows = rows.length;
+      this.messageRow.height = rows.length;
+      this.messageRow.visible = true;
+      this.messageRow.content = toStyledText(rows);
+    } else if (this.picker?.note) {
+      const left = room >= 30 ? this.textOffset : 2;
+      const rows = wrapMessage([seg(' '.repeat(left))], this.picker.note, { tone: 'muted' }, width).slice(0, MAX_MESSAGE_ROWS);
       this.messageRows = rows.length;
       this.messageRow.height = rows.length;
       this.messageRow.visible = true;

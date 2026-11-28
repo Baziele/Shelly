@@ -521,6 +521,7 @@ const make = Effect.gen(function* () {
     // thread is never left marked busy with no turn running.
     return yield* Effect.uninterruptibleMask((restore) =>
       restore(runtime.session(sessionRequest(row, context.cwd))).pipe(
+        Effect.tapError((error) => Effect.logWarning(`turn refused thread=${threadId} agent=${error.agentId}: ${error._tag}`)),
         Effect.flatMap((session) => Semaphore.withPermit(thread.lock, setUpTurn(input, thread, session))),
         Effect.ensuring(Effect.sync(() => {
           thread.starting = false;
@@ -533,7 +534,10 @@ const make = Effect.gen(function* () {
   // ─── Operations ───────────────────────────────────────────────────────────
 
   const create = Effect.fn('ThreadService.create')(function* (input: CreateThreadInput) {
-    const agent = yield* agents.requireAvailable(input.agentId);
+    // Said in the log (never the prompt): the client shows the reason, and only there would it be seen.
+    const agent = yield* agents.requireAvailable(input.agentId).pipe(
+      Effect.tapError((error) => Effect.logWarning(`thread refused agent=${error.agentId}: ${error.reason}`)),
+    );
     const now = Date.now();
     const row: ThreadRow = {
       id: randomUUID(),

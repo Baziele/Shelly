@@ -7,6 +7,7 @@ import { BUILTIN_COMMANDS, CommandRegistry } from './commands/slash-commands.js'
 import { CommandLog } from './context/command-log.js';
 import { describeEnvironment, type EnvironmentInfo } from './context/environment.js';
 import { TriggerDetector, type TriggerAction } from './input/trigger-detector.js';
+import { configPathForDisplay } from './protocol/paths.js';
 import { detectColorDepth, type ColorDepth } from './render/sgr.js';
 import { drawBelowLine, eraseBelowLine, type BelowLineNotice } from './shell/below-line.js';
 import { LineEditor, type CapturedLine, type CaptureResult } from './shell/line-editor.js';
@@ -356,6 +357,7 @@ export class Shelly {
       commands: this.commands,
       lineEditor: this.lineEditor,
       home: this.env.HOME || homedir(),
+      configPath: configPathForDisplay(this.env),
       recordsCommands: this.markers !== undefined,
       cwd: () => this.commands.cwd ?? this.initialCwd,
       environment: () => (this.environment ??= describeEnvironment(this.shellPath, this.env)),
