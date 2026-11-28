@@ -313,13 +313,13 @@ export class TurnModel {
 
   private end(event: ThreadEventOf<'turn.ended'>): void {
     this.settle();
-    this.appendLine({
-      type: 'summary',
-      ended: event,
-      toolCount: this.toolCount,
-      produced: this.blocks.some((block) => block.kind === 'message' || block.kind === 'tool'),
-      noticed: this.blocks.some((block) => block.kind === 'line' && block.content.type === 'notice'),
-    });
+    const produced = this.blocks.some((block) => block.kind === 'message' || block.kind === 'tool');
+    const noticed = this.blocks.some((block) => block.kind === 'line' && block.content.type === 'notice');
+    // A turn that ended normally with only a notice to show (say, that the agent gave no reply)
+    // has said all there is: no footer, and no gap for one, before the prompt.
+    if (!(event.stopReason === 'end_turn' && !produced && noticed)) {
+      this.appendLine({ type: 'summary', ended: event, toolCount: this.toolCount, produced, noticed });
+    }
     this.ended = event;
   }
 

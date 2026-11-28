@@ -182,12 +182,19 @@ describe('TurnModel at the end of a turn', () => {
 
   it('records whether the turn showed anything, for the footer', () => {
     const empty = new TurnModel();
-    empty.apply(ev<'notice'>({ type: 'notice', turnId: 't', level: 'warning', text: 'no reply' }));
     empty.apply(end());
     const summary = empty.blocks.at(-1);
     assert.ok(summary?.kind === 'line' && summary.content.type === 'summary');
     assert.equal(summary.content.type === 'summary' && summary.content.produced, false);
-    assert.equal(summary.content.type === 'summary' && summary.content.noticed, true);
+    assert.equal(summary.content.type === 'summary' && summary.content.noticed, false);
+  });
+
+  it('adds no footer (nor a gap for one) when a notice is all the turn showed', () => {
+    const model = new TurnModel();
+    model.apply(ev<'notice'>({ type: 'notice', turnId: 't', level: 'warning', text: 'no reply' }));
+    model.apply(end());
+    assert.deepEqual(kinds(model), ['notice']);
+    assert.equal(phaseOf(model).type, 'ended');
   });
 });
 
