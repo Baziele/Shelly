@@ -211,11 +211,14 @@ describe('the client and the daemon agree on every RPC', () => {
     const refused = await collect('fast.request', client.fastRequest({ agentId: 'broken', sessionKey: 's2', input: FAST_INPUT })).then(() => undefined, (error: unknown) => error);
     assert.ok(refused instanceof DaemonError && refused._tag === 'AgentUnavailable' && refused.message.length > 0);
 
-    // A request that never finishes holds the daemon up (it is not idle) until the stream is let go.
+    // A request that never finishes holds the daemon up (it is not idle) until the stream is let go,
+    // as Esc lets it go: while a read waits for more.
     const slow = client.fastRequest({ sessionKey: 's3', input: { ...FAST_INPUT, instruction: 'slow' } })[Symbol.asyncIterator]();
     assert.deepEqual((await slow.next()).value, { type: 'delta', text: 'ls ' });
+    const waiting = slow.next();
     assert.equal(await other.shutdown(true), false, 'busy while the stream is open');
     await slow.return?.();
+    assert.deepEqual(await waiting, { done: true, value: undefined });
   });
 
   it('answers pings on a raw connection', async () => {
@@ -235,7 +238,12 @@ describe('the client and the daemon agree on every RPC', () => {
     assert.equal(status.runningTurns, 0);
     assert.ok(status.clients >= 2);
     // The stopped fast stream above is closed on the daemon's side: it is idle now.
-    assert.equal(await call('daemon.shutdown', client.shutdown(true)), true);
+    let willStop = await call('daemon.shutdown', client.shutdown(true));
+    for (let waited = 0; !willStop && waited < 3000; waited += 50) {
+      await sleep(50);
+      willStop = await client.shutdown(true);
+    }
+    assert.equal(willStop, true);
     for (let waited = 0; isProcessAlive(daemonPid); waited += 20) {
       assert.ok(waited < 5000, 'the daemon to exit');
       await sleep(20);

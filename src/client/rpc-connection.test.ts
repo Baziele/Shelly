@@ -162,6 +162,31 @@ describe('RpcConnection', () => {
     assert.deepEqual(await status, { pid: 1 });
   });
 
+  it('stops at once when told to while a read waits, as when Esc cancels a fast request', async () => {
+    const fake = await fakeServer();
+    const connection = await open(fake);
+    const iterator = connection.stream('fast.request', {}, () => 'yield')[Symbol.asyncIterator]();
+    const waiting = iterator.next();
+    const request = await fake.next(requestFor('fast.request'));
+    assert.deepEqual(await iterator.return!(), { done: true, value: undefined });
+    assert.deepEqual(await waiting, { done: true, value: undefined });
+    assert.deepEqual(await fake.next((message) => message._tag === 'Interrupt'), { _tag: 'Interrupt', requestId: request.id });
+    // Late chunks for it are ignored.
+    fake.send({ _tag: 'Chunk', requestId: request.id, values: ['late'] });
+    assert.deepEqual(await iterator.next(), { done: true, value: undefined });
+  });
+
+  it('serves reads asked for at once, in order', async () => {
+    const fake = await fakeServer();
+    const connection = await open(fake);
+    const iterator = connection.stream<number>('thread.watch', {}, () => 'yield')[Symbol.asyncIterator]();
+    const reads = [iterator.next(), iterator.next(), iterator.next()];
+    const request = await fake.next(requestFor('thread.watch'));
+    fake.send({ _tag: 'Chunk', requestId: request.id, values: [1, 2] });
+    fake.send({ _tag: 'Exit', requestId: request.id, exit: { _tag: 'Success' } });
+    assert.deepEqual(await Promise.all(reads), [{ done: false, value: 1 }, { done: false, value: 2 }, { done: true, value: undefined }]);
+  });
+
   it('skips values its guard does not know, and breaks on ones it cannot read', async () => {
     const fake = await fakeServer();
     const connection = await open(fake);

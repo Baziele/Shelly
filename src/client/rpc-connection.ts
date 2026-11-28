@@ -201,81 +201,126 @@ export class RpcConnection {
   }
 
   /**
-   * A stream's values, as they come. The request goes out when iteration
-   * starts. Stopping early (break, return, a throw) interrupts it: the
-   * daemon stops sending (a turn goes on running; see `thread.cancel`).
+   * A stream's values, as they come. The request goes out on the first
+   * `next()`. Stopping early (break, `return()`, even while a `next()` is
+   * waiting) interrupts it at once: the daemon stops sending (a turn goes
+   * on running; see `thread.cancel`).
    */
   stream<A>(tag: StreamTag, payload: unknown, guard: Guard): AsyncIterable<A> {
-    const connection = this;
-    return {
-      async *[Symbol.asyncIterator]() {
-        const queue: unknown[] = [];
-        let ackOwed = false;
-        let ended = false;
-        let failure: Error | undefined;
-        let wake: (() => void) | undefined;
-        const notify = () => {
-          wake?.();
-          wake = undefined;
-        };
-        const id = connection.request(tag, payload, {
-          onChunk: (values) => {
-            queue.push(...values);
-            if (queue.length <= STREAM_BUFFER) {
-              connection.send({ _tag: 'Ack', requestId: id });
-            } else {
-              ackOwed = true;
-            }
-            notify();
-          },
-          onExit: (exit) => {
-            ended = true;
-            try {
-              valueOfExit(exit);
-            } catch (error) {
-              failure = error as Error;
-            }
-            notify();
-          },
-          onError: (error) => {
-            ended = true;
-            failure = error;
-            notify();
-          },
-        });
-        if (id === undefined) {
-          throw new DaemonDisconnected();
+    return { [Symbol.asyncIterator]: () => this.openStream<A>(tag, payload, guard) };
+  }
+
+  private openStream<A>(tag: StreamTag, payload: unknown, guard: Guard): AsyncIterator<A, undefined> {
+    const done: IteratorReturnResult<undefined> = { done: true, value: undefined };
+    const queue: unknown[] = [];
+    const readers: { readonly resolve: (result: IteratorResult<A, undefined>) => void; readonly reject: (error: unknown) => void }[] = [];
+    let id: string | undefined;
+    let ackOwed = false;
+    /** The daemon ended the stream (or the connection did), with `failure` if it failed. */
+    let ended = false;
+    let failure: Error | undefined;
+    /** Nothing more for the reader: the end was read, or the reader stopped. */
+    let finished = false;
+
+    const stop = (): void => {
+      if (!ended && !finished && id !== undefined) {
+        this.pending.delete(id);
+        this.send({ _tag: 'Interrupt', requestId: id });
+      }
+      finished = true;
+      queue.length = 0;
+    };
+    /** The next result for a reader, or undefined to wait for more. Throws what the stream failed with. */
+    const take = (): IteratorResult<A, undefined> | undefined => {
+      while (queue.length > 0) {
+        const value = queue.shift();
+        if (ackOwed && queue.length <= STREAM_BUFFER / 2) {
+          ackOwed = false;
+          this.send({ _tag: 'Ack', requestId: id });
         }
+        const verdict = guard(value);
+        if (verdict === 'reject') {
+          stop();
+          throw new Error(`Shelly's background service sent something this terminal does not understand (${tag}).`);
+        }
+        if (verdict === 'yield') {
+          return { done: false, value: value as A };
+        }
+      }
+      if (finished) {
+        return done;
+      }
+      if (ended) {
+        finished = true;
+        if (failure) {
+          throw failure;
+        }
+        return done;
+      }
+      return undefined;
+    };
+    /** Serve waiting readers, in order, as far as there is something for them. */
+    const serve = (): void => {
+      while (readers.length > 0) {
+        let result: IteratorResult<A, undefined> | undefined;
         try {
-          for (;;) {
-            while (queue.length > 0) {
-              const value = queue.shift();
-              if (ackOwed && queue.length <= STREAM_BUFFER / 2) {
-                ackOwed = false;
-                connection.send({ _tag: 'Ack', requestId: id });
-              }
-              const verdict = guard(value);
-              if (verdict === 'reject') {
-                throw new Error(`Shelly's background service sent something this terminal does not understand (${tag}).`);
-              }
-              if (verdict === 'yield') {
-                yield value as A;
-              }
-            }
-            if (ended) {
-              if (failure) {
-                throw failure;
-              }
-              return;
-            }
-            await new Promise<void>((resolve) => (wake = resolve));
-          }
-        } finally {
-          if (!ended) {
-            connection.pending.delete(id);
-            connection.send({ _tag: 'Interrupt', requestId: id });
-          }
+          result = take();
+        } catch (error) {
+          readers.shift()!.reject(error);
+          continue;
         }
+        if (!result) {
+          return;
+        }
+        readers.shift()!.resolve(result);
+      }
+    };
+    const start = (): void => {
+      id = this.request(tag, payload, {
+        onChunk: (values) => {
+          queue.push(...values);
+          if (queue.length <= STREAM_BUFFER) {
+            this.send({ _tag: 'Ack', requestId: id });
+          } else {
+            ackOwed = true;
+          }
+          serve();
+        },
+        onExit: (exit) => {
+          ended = true;
+          try {
+            valueOfExit(exit);
+          } catch (error) {
+            failure = error as Error;
+          }
+          serve();
+        },
+        onError: (error) => {
+          ended = true;
+          failure = error;
+          serve();
+        },
+      });
+      if (id === undefined) {
+        ended = true;
+        failure = new DaemonDisconnected();
+      }
+    };
+
+    return {
+      next: () => {
+        if (id === undefined && !ended && !finished) {
+          start();
+        }
+        return new Promise((resolve, reject) => {
+          readers.push({ resolve, reject });
+          serve();
+        });
+      },
+      return: () => {
+        stop();
+        readers.splice(0).forEach((reader) => reader.resolve(done));
+        return Promise.resolve(done);
       },
     };
   }

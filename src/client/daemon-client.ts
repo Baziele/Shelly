@@ -301,16 +301,39 @@ export class DaemonClient {
     }
   }
 
+  /** As RpcConnection.stream, connecting first; `return()` stops it at once, even mid-connect. */
   private stream<A>(tag: StreamTag, payload: unknown, guard: Guard): AsyncIterable<A> {
-    const self = this;
     return {
-      async *[Symbol.asyncIterator]() {
-        const connection = await self.ensureConnection();
-        try {
-          yield* connection.rpc.stream<A>(tag, payload, guard);
-        } catch (error) {
-          throw self.lost(connection, error);
-        }
+      [Symbol.asyncIterator]: (): AsyncIterator<A, undefined> => {
+        const done: IteratorReturnResult<undefined> = { done: true, value: undefined };
+        let opening: Promise<{ readonly connection: Connection; readonly events: AsyncIterator<A, undefined> }> | undefined;
+        let stopped = false;
+        return {
+          next: async () => {
+            if (stopped) {
+              return done;
+            }
+            opening ??= this.ensureConnection().then((connection) => ({
+              connection,
+              events: connection.rpc.stream<A>(tag, payload, guard)[Symbol.asyncIterator]() as AsyncIterator<A, undefined>,
+            }));
+            const { connection, events } = await opening;
+            if (stopped) {
+              return done;
+            }
+            try {
+              return await events.next();
+            } catch (error) {
+              throw this.lost(connection, error);
+            }
+          },
+          return: async () => {
+            stopped = true;
+            // Not waiting for a connection still being made: a stream it opens is never started.
+            void opening?.then(({ events }) => events.return?.(), () => undefined);
+            return done;
+          },
+        };
       },
     };
   }
