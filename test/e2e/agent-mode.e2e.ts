@@ -23,6 +23,15 @@ const promptRightAfter = (lines: string[], pattern: RegExp): void => {
   assert.match(before, pattern, `the row above the prompt; screen:\n${lines.join('\n')}`);
 };
 
+/** A failed turn's footer: the failure (wrapped, if long), a hint, then one blank row before the prompt. */
+const failureBeforePrompt = (lines: string[], pattern: RegExp): void => {
+  const last = lastPromptRow(lines);
+  const screen = `screen:\n${lines.join('\n')}`;
+  assert.equal(lines[last - 1]?.trim(), '', `a blank row above the prompt; ${screen}`);
+  assert.match(lines[last - 2] ?? '', /Try again, or check `\w+` on its own\./, `the hint above it; ${screen}`);
+  assert.ok(lines.slice(Math.max(0, last - 6), last - 2).some((line) => pattern.test(line)), `the failure above that; ${screen}`);
+};
+
 /** No escape sequence or control character leaked onto the screen as text. */
 const assertClean = (lines: string[]): void => {
   for (const line of lines) {
@@ -83,7 +92,7 @@ for (const shell of E2E_SHELLS) {
 
       let lines = await ask(driver, 'show me markdown', '✓');
       assert.ok(lines.some((line) => line.includes('Table')), 'the markdown answer');
-      promptRightAfter(lines, /✓ \d/);
+      promptRightAfter(lines, /✓ (<1s|\d)/);
       assertClean(lines);
 
       lines = await ask(driver, 'run the tools', '✓');
@@ -133,13 +142,13 @@ for (const shell of E2E_SHELLS) {
     it('stops on Ctrl-C, and goes to the background on Esc to be watched later', async () => {
       const driver = await start();
       await driver.type('::slow build\r');
-      await driver.waitForText('Running make build', { timeoutMs: TURN_MS });
+      await driver.waitForText('Running make', { timeoutMs: TURN_MS });
       await driver.press('ctrl-c');
       let lines = await waitForTurnEnd(driver, 'slow build', '◼ Stopped');
       promptRightAfter(lines, /◼ Stopped/);
 
       await driver.type('::marathon build\r');
-      await driver.waitForText('Running make build', { timeoutMs: TURN_MS });
+      await driver.waitForText('Running make', { timeoutMs: TURN_MS });
       await driver.press('esc');
       lines = await driver.waitFor(
         (rows) => rows.some((row) => row.includes('fake is still working')) && atPrompt(rows),
@@ -210,13 +219,13 @@ for (const shell of E2E_SHELLS) {
     it('reflows when the terminal is resized mid-turn', async () => {
       const driver = await start(100, 24);
       await driver.type('::slow resize\r');
-      await driver.waitForText('Running make build', { timeoutMs: TURN_MS });
+      await driver.waitForText('Running make', { timeoutMs: TURN_MS });
       await driver.resize(70, 20);
       await sleep(200);
       await driver.resize(84, 22);
       const lines = await waitForTurnEnd(driver, 'slow resize', '✓');
       assert.ok(lines.some((line) => line.includes('The build passed')));
-      assert.equal(lines.filter((line) => /Running make build|esc background/.test(line)).length, 0, 'no live rows left behind');
+      assert.equal(lines.filter((line) => /Running make|esc background/.test(line)).length, 0, 'no live rows left behind');
       promptRightAfter(lines, /✓ /);
       assertClean(lines);
     });
@@ -258,11 +267,11 @@ for (const shell of E2E_SHELLS) {
 
       // Killed mid-turn: the turn ends saying so, and the prompt comes back.
       await driver.type('::slow and doomed\r');
-      await driver.waitForText('Running make build', { timeoutMs: TURN_MS });
+      await driver.waitForText('Running make', { timeoutMs: TURN_MS });
       process.kill(second!, 'SIGKILL');
       const lines = await waitForTurnEnd(driver, 'slow and doomed', '✗ Interrupted');
       assert.ok(lines.some((line) => line.includes("Lost the connection to Shelly's background service")), lines.join('\n'));
-      promptRightAfter(lines, /✗ Interrupted/);
+      failureBeforePrompt(lines, /✗ Interrupted/);
 
       // And the thread still works.
       await ask(driver, 'echo still here', '✓');

@@ -111,7 +111,7 @@ for (const [label, introducer] of [['C1 DCS', '\u0090'], ['C1 OSC', '\u009d'], [
   const { term, agent } = await view(100, 30);
   agent.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: `\`\`\`ts\n${Array.from({ length: 5000 }, (_, index) => `const v${index} = ${index};`).join('\n')}\n\`\`\`\n\nDone.` }));
   agent.apply(event({ type: 'tool.updated', tool: { id: 't', title: 'sleep 60', kind: 'execute', status: 'in_progress', locations: [], content: [] } }));
-  for (let waited = 0; waited < 10_000 && !(await term.screen()).some((line) => line.includes('Running sleep 60')); waited += 20) {
+  for (let waited = 0; waited < 10_000 && !(await term.screen()).some((line) => line.includes('Running sleep')); waited += 20) {
     await sleep(20);
   }
   await sleep(500);

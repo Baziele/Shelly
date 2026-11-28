@@ -45,7 +45,7 @@ export default async (driver: ScenarioDriver): Promise<void> => {
   await driver.type('clear\r');
   await driver.waitFor(prompt, 'a clear screen');
   await driver.type('::slow build\r');
-  await driver.waitForText('Running make build', { timeoutMs: 20_000 });
+  await driver.waitForText('Running make', { timeoutMs: 20_000 });
   await driver.screenshot('slow-turn-running');
   await driver.press('esc');
   await driver.waitForText('still working');

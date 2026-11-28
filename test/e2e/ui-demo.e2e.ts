@@ -75,7 +75,7 @@ describe('UI demo in a real terminal', { timeout: 120_000 }, () => {
     assertClean(run);
     const lines = contentLines(run);
     assert.equal(lines[0], '~/acme-web $ :: run the tests and fix what fails');
-    const order = ['✗ $ pnpm test', '● Edit src/pages/Profile.tsx  +3 −0', '● $ pnpm test --filter profile', '✓ 21s · 6 tools'].map((line) => lines.indexOf(line));
+    const order = ['✗ $ pnpm test', '● Edit src/pages/Profile.tsx  +3', '● $ pnpm test --filter profile', '✓ 21s · 6 tools'].map((line) => lines.indexOf(line));
     assert.ok(order.every((index) => index > 0), lines.join('\n'));
     assert.deepEqual(order, [...order].sort((a, b) => a - b));
     assert.equal(lines.at(-1), '✓ 21s · 6 tools');
