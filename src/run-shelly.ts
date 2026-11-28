@@ -1,5 +1,6 @@
 /* The interactive `shelly`: the user's shell in a pty, with Shelly around it. Loaded by index.ts. */
-import { logClientError } from './client/client-log.js';
+import { clientLogPath, logClientError } from './client/client-log.js';
+import { crashGuard } from './crash-guard.js';
 import { defaultShell } from './shell/shell-session.js';
 import { Shelly } from './shelly.js';
 import { HostTerminal } from './terminal/host-terminal.js';
@@ -11,37 +12,21 @@ if (!host.isInteractive) {
   process.exit(1);
 }
 
-// Whatever goes wrong, never leave the user's terminal stuck in raw mode.
-const crash = (error: unknown): never => {
-  host.stop();
-  process.stderr.write(`\r\nshelly crashed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\r\n`);
-  process.exit(1);
-};
+let shelly: Shelly | undefined;
 
-/*
- * The shell is the user's work: an error in Shelly's own flows (a daemon
- * call nobody caught, say) is logged and Shelly carries on, the shell
- * untouched; a terminal Shelly was drawing on comes back by itself (the
- * busy watchdog). Only errors coming in a storm, which means Shelly itself
- * is broken, end it: the terminal restored first.
- */
-const STORM = { errors: 5, withinMs: 10_000 };
-const recent: number[] = [];
-const survive = (what: string) => (error: unknown): void => {
-  logClientError(what, error);
-  const now = Date.now();
-  recent.push(now);
-  while (recent.length > 0 && now - recent[0]! > STORM.withinMs) {
-    recent.shift();
-  }
-  if (recent.length >= STORM.errors) {
-    crash(error);
-  }
-};
-process.on('unhandledRejection', survive('unhandled rejection'));
-process.on('uncaughtException', survive('uncaught exception'));
+// Whatever goes wrong, never leave the user's terminal stuck in raw mode (see crash-guard.ts).
+const guard = crashGuard({
+  restoreTerminal: () => host.stop(),
+  killShell: () => shelly?.terminate(),
+  log: (what, error) => logClientError(what, error),
+  logPath: clientLogPath(),
+  write: (text) => process.stderr.write(text),
+  exit: (code) => process.exit(code),
+});
+process.on('uncaughtException', guard.uncaughtException);
+process.on('unhandledRejection', guard.unhandledRejection);
 
-const shelly = new Shelly({
+shelly = new Shelly({
   host,
   shell: defaultShell(),
   cwd: process.cwd(),
@@ -49,7 +34,7 @@ const shelly = new Shelly({
 });
 
 for (const signal of ['SIGHUP', 'SIGTERM'] as const) {
-  process.on(signal, () => shelly.terminate());
+  process.on(signal, () => shelly?.terminate());
 }
 
 // Exit with the shell. run() has already said goodbye to the daemon (bounded
