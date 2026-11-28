@@ -8,7 +8,7 @@ import type {
 } from '../../protocol/schema.js';
 import { displayWidth, truncateEnd, truncateStart } from '../../render/text-width.js';
 import { diffExcerpt, diffOf, diffStats, type DiffLine } from './diff.js';
-import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, type Line, type Segment } from './lines.js';
+import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, wrapMessage, type Line, type Segment } from './lines.js';
 
 /** Braille spinner, one frame per 80 ms. */
 export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
@@ -79,7 +79,7 @@ const VERBED_COMMAND = /^(?:run|running|ran|execute|executing|terminal)\s*:?\s+`
  * backticks or a leading verb. Undefined for a generic name (Claude Code's
  * "Terminal" before the command is known), which shows as it is.
  */
-export const commandTitle = (title: string): string | undefined => {
+export const commandTitle = (title: string, context?: PathContext): string | undefined => {
   let text = oneLine(title);
   const verbed = VERBED_COMMAND.exec(text);
   if (verbed) {
@@ -89,7 +89,21 @@ export const commandTitle = (title: string): string | undefined => {
   if (wrapped) {
     text = wrapped[1]!.trim();
   }
+  if (context) {
+    text = stripCdIntoCwd(text, context);
+  }
   return text === '' || GENERIC_COMMAND_TITLE.test(text) ? undefined : text;
+};
+
+/** `cd "." && make`, or `cd` into the shell's own directory first: only `make` says anything. */
+const stripCdIntoCwd = (command: string, context: PathContext): string => {
+  const match = /^cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*(.+)$/.exec(command);
+  if (!match) {
+    return command;
+  }
+  const target = match[1]!.replace(/^["']|["']$/g, '');
+  const here = target === '.' || target === './' || nodePath.normalize(target) === nodePath.normalize(context.cwd);
+  return here ? match[2]!.trim() : command;
 };
 
 export const tidyTitle = (title: string, context: PathContext): string => {
@@ -141,7 +155,12 @@ const toolSuffix = (tool: ToolCall): Segment[] => {
     const added = stats.reduce((sum, stat) => sum + stat.added, 0);
     const removed = stats.reduce((sum, stat) => sum + stat.removed, 0);
     const files = diffs.length > 1 ? [seg(` in ${diffs.length} files`, 'muted')] : [];
-    return [seg('  '), seg(`+${added}`, 'success'), seg(' '), seg(`−${removed}`, 'error'), ...files];
+    // Only the counts that say something: a pure addition shows no −0.
+    const counts = [
+      ...(added > 0 ? [seg(`+${added}`, 'success')] : []),
+      ...(removed > 0 ? [seg(`−${removed}`, 'error')] : []),
+    ].flatMap((count, index) => (index === 0 ? [count] : [seg(' '), count]));
+    return counts.length > 0 || files.length > 0 ? [seg('  '), ...counts, ...files] : [];
   }
   if (tool.status !== 'completed') {
     return [];
@@ -174,16 +193,31 @@ const formatDiffLine = (line: DiffLine, width: number): Line => {
 /** A code line for one row: control characters gone, tabs expanded, trailing space trimmed. */
 const oneLineCode = (text: string): string => sanitizeText(text).replace(/\n/g, ' ').trimEnd();
 
+/** Lines of a failed command's output worth showing: those that read like errors, and the last. */
+const FAILURE_PATTERN = /error|failed|fatal|exception/i;
+
 const outputTail = (text: string, width: number, failed: boolean): Line[] => {
   const lines = nonEmptyLines(text);
-  const shown = lines.slice(-MAX_OUTPUT_LINES);
-  const result: Line[] = [];
-  if (lines.length > shown.length) {
-    result.push([seg(`${DETAIL_INDENT}… ${plural(lines.length - shown.length, 'more line')}`, 'muted')]);
+  let shown = lines.slice(-MAX_OUTPUT_LINES).map((line, index, tail) => ({ line, at: lines.length - tail.length + index }));
+  if (failed && lines.length > MAX_OUTPUT_LINES) {
+    // The real error is often above the last lines (a compiler's message, then make's summary).
+    const errors = lines.map((line, at) => ({ line, at })).filter(({ line }) => FAILURE_PATTERN.test(line));
+    const last = { line: lines.at(-1)!, at: lines.length - 1 };
+    if (errors.length > 0) {
+      shown = [...errors.filter(({ at }) => at !== last.at).slice(0, MAX_OUTPUT_LINES - 1), last];
+    }
   }
-  for (const line of shown) {
+  const gutter = seg(`${DETAIL_INDENT}│ `, 'muted');
+  const result: Line[] = [];
+  let next = 0;
+  for (const { line, at } of shown) {
+    if (at > next) {
+      // What was left out, marked where it was, inside the gutter.
+      result.push([gutter, seg(`… ${plural(at - next, 'more line')}`, 'muted')]);
+    }
     const tone = failed && ERROR_PATTERN.test(line) ? 'error' : 'muted';
-    result.push(fitLine([seg(`${DETAIL_INDENT}│ `, 'muted'), seg(line, tone)], width));
+    result.push(fitLine([gutter, seg(line, tone)], width));
+    next = at + 1;
   }
   return result;
 };
@@ -217,7 +251,7 @@ export const formatTool = (tool: ToolCall, context: FormatContext, options: Tool
     : [seg(` · ${options.permission === null ? 'cancelled' : PERMISSION_NOTE[options.permission]}`, 'muted')];
   const suffix = [...toolSuffix(tool), ...permission];
   // Commands read as commands: `$ pnpm test`, not `$ Run \`pnpm test\``.
-  const command = tool.kind === 'execute' ? commandTitle(tool.title) : undefined;
+  const command = tool.kind === 'execute' ? commandTitle(tool.title, context) : undefined;
   const title = command === undefined ? tidyTitle(tool.title, context) : shortenPathsIn(command, context);
   const prompt: Segment[] = command !== undefined ? [seg('$ ', 'muted')] : [];
   const titleWidth = Math.max(8, width - 2 - lineWidth(prompt) - lineWidth(suffix));
@@ -260,7 +294,12 @@ export const formatToolSummary = (tool: ToolCall, context: FormatContext): Line 
 
 /** The tool title for the status line's "Running …". */
 export const shortToolTitle = (tool: ToolCall, context: PathContext, maxWidth = 40): string => {
-  const command = tool.kind === 'execute' ? commandTitle(tool.title) : undefined;
+  const command = tool.kind === 'execute' ? commandTitle(tool.title, context) : undefined;
+  if (tool.kind === 'execute') {
+    // The command itself is on its own row; the status line names it by its first word.
+    const word = command?.split(/\s+/)[0];
+    return word ? fitLine([seg(word)], maxWidth).map((segment) => segment.text).join('') : 'a command';
+  }
   const title = command === undefined ? tidyTitle(tool.title, context) : shortenPathsIn(command, context);
   return fitLine([seg(title)], maxWidth).map((segment) => segment.text).join('');
 };
@@ -285,15 +324,17 @@ export const formatPlan = (entries: readonly PlanEntry[], width: number): Line[]
   }
 });
 
-export const formatNotice = (level: 'info' | 'warning' | 'error', text: string, width: number): Line => {
+/** A notice, wrapped rather than cut: its end is often what to do about it. */
+export const formatNotice = (level: 'info' | 'warning' | 'error', text: string, width: number): Line[] => {
   const body = oneLine(text);
   switch (level) {
     case 'info':
-      return fitLine([seg(`· ${body}`, 'muted')], width);
+      return wrapMessage([seg('· ', 'muted')], body, { tone: 'muted' }, width);
     case 'warning':
-      return fitLine([seg('! ', 'warning', { bold: true }), seg(body, 'warning')], width);
+      // A bold label, and the message in the default colour: yellow text is faint on light themes.
+      return wrapMessage([seg('! ', 'warning', { bold: true })], body, {}, width);
     case 'error':
-      return fitLine([seg('✗ ', 'error'), seg(body, 'error')], width);
+      return wrapMessage([seg('✗ ', 'error', { bold: true })], body, { tone: 'error' }, width);
   }
 };
 
@@ -322,7 +363,7 @@ const optionLabel = (option: PermissionOption): string => oneLine(option.name) |
 export const formatPermission = (prompt: PermissionView, context: FormatContext): Line[] => {
   const { width } = context;
   const title = tidyTitle(prompt.title, context);
-  const question = fitLine([seg('? ', 'warning', { bold: true }), seg(`${context.agentName} wants to: `, undefined, { bold: true }), seg(title)], width);
+  const question = fitLine([seg('? ', 'accent', { bold: true }), seg(`${context.agentName} wants to: `, undefined, { bold: true }), seg(title)], width);
   const labels = prompt.options.map(optionLabel);
 
   const option = (label: string, index: number): Segment[] => index === prompt.selected
@@ -357,7 +398,10 @@ export const formatPermissionOutcome = (title: string, kind: PermissionOption['k
 // ─── Status and summary ─────────────────────────────────────────────────────
 
 export const formatDuration = (ms: number): string => {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (ms < 1000) {
+    return '<1s';
+  }
+  const seconds = Math.floor(ms / 1000);
   if (seconds < 60) {
     return `${seconds}s`;
   }
@@ -456,17 +500,38 @@ export interface TurnOutcome {
   readonly durationMs: number;
 }
 
-/** The row a finished turn leaves behind. */
-export const formatSummary = (outcome: TurnOutcome, toolCount: number, context: FormatContext): Line => {
+export interface SummaryFacts {
+  readonly toolCount: number;
+  /** The turn showed something: text or a tool call. */
+  readonly produced: boolean;
+  /** It showed a notice (a warning about the empty reply, say). */
+  readonly noticed: boolean;
+}
+
+/**
+ * The rows a finished turn leaves behind. A failure wraps (its end is the
+ * useful part), says how long it took, suggests a next step and leaves a
+ * blank row before the prompt. A turn that showed nothing but a notice
+ * leaves no footer at all.
+ */
+export const formatSummary = (outcome: TurnOutcome, facts: SummaryFacts, context: FormatContext): Line[] => {
   const time = formatDuration(outcome.durationMs);
   const agent = context.agentName;
   const error = outcome.error ? oneLine(outcome.error) : undefined;
-  const muted = (text: string): Line => fitLine([seg(text, 'muted')], context.width);
-  const failed = (text: string): Line => fitLine([seg('✗ ', 'error'), seg(text, 'error')], context.width);
+  const muted = (text: string): Line[] => wrapMessage([], text, { tone: 'muted' }, context.width);
+  const hint = fitLine([seg(`  Try again, or check \`${agent}\` on its own.`, 'muted')], context.width);
+  const failed = (text: string, withHint: boolean): Line[] => [
+    ...wrapMessage([seg('✗ ', 'error', { bold: true })], `${text} · ${time}`, { tone: 'error' }, context.width),
+    ...(withHint ? [hint] : []),
+    [],
+  ];
 
   switch (outcome.stopReason) {
     case 'end_turn':
-      return muted(`✓ ${time}${toolCount > 0 ? ` · ${plural(toolCount, 'tool')}` : ''}`);
+      if (!facts.produced) {
+        return facts.noticed ? [] : muted(`◼ No reply · ${time}`);
+      }
+      return muted(`✓ ${time}${facts.toolCount > 0 ? ` · ${plural(facts.toolCount, 'tool')}` : ''}`);
     case 'cancelled':
       return muted(`◼ Stopped · ${time}`);
     case 'max_tokens':
@@ -474,11 +539,11 @@ export const formatSummary = (outcome: TurnOutcome, toolCount: number, context: 
     case 'max_turn_requests':
       return muted(`◼ Stopped: ${agent} reached its step limit for one turn · ${time}`);
     case 'refusal':
-      return failed(`${agent} declined to continue`);
+      return failed(`${agent} declined to continue`, false);
     case 'interrupted':
-      return failed(error ? `Interrupted: ${error}` : `Interrupted: ${agent} stopped unexpectedly`);
+      return failed(error ? `Interrupted: ${error}` : `Interrupted: ${agent} stopped unexpectedly`, true);
     case 'error':
-      return failed(error ?? `${agent} failed`);
+      return failed(error ?? `${agent} failed`, true);
   }
 };
 

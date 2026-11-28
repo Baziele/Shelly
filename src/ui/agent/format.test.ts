@@ -6,6 +6,7 @@ import { diffExcerpt, diffLines, diffStats } from './diff.js';
 import {
   commandTitle,
   formatDuration,
+  formatNotice,
   formatPermission,
   formatPermissionOutcome,
   fitHints,
@@ -62,7 +63,7 @@ describe('formatTool', () => {
   it('shows the last four lines of a command, with how many came before', () => {
     const output = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join('\n');
     const lines = texts(formatTool(tool({ kind: 'execute', title: '`npm test`', content: [{ type: 'text', text: output, truncated: false }] }), context));
-    assert.deepEqual(lines, ['● $ npm test', '  … 6 more lines', '  │ line 7', '  │ line 8', '  │ line 9', '  │ line 10']);
+    assert.deepEqual(lines, ['● $ npm test', '  │ … 6 more lines', '  │ line 7', '  │ line 8', '  │ line 9', '  │ line 10']);
   });
 
   it('shows an edit as counts and the first changed lines', () => {
@@ -102,6 +103,49 @@ describe('formatTool', () => {
     for (const line of texts(formatTool(long, { ...context, width: 40 }))) {
       assert.ok(line.length <= 40, `too wide: ${line}`);
     }
+  });
+});
+
+describe('tool output that matters', () => {
+  it('shows a failed command\'s error lines and its last line, the gap marked inside the gutter', () => {
+    const output = [
+      'cc -o app src/main.c',
+      'main.c:12: error: unknown conifg',
+      '    conifg.port = 8080;',
+      '    ^',
+      '1 error generated.',
+      'make: *** [build] Error 1',
+    ].join('\n');
+    const lines = texts(formatTool(tool({ kind: 'execute', status: 'failed', title: '`make build`', content: [{ type: 'text', text: output, truncated: false }] }), context));
+    assert.deepEqual(lines, [
+      '✗ $ make build',
+      '  │ … 1 more line',
+      '  │ main.c:12: error: unknown conifg',
+      '  │ … 2 more lines',
+      '  │ 1 error generated.',
+      '  │ make: *** [build] Error 1',
+    ]);
+  });
+
+  it('keeps the tail of a failed command with no error lines', () => {
+    const output = Array.from({ length: 6 }, (_, index) => `step ${index + 1}`).join('\n');
+    const lines = texts(formatTool(tool({ kind: 'execute', status: 'failed', title: 'x', content: [{ type: 'text', text: output, truncated: false }] }), context));
+    assert.deepEqual(lines.slice(1), ['  │ … 2 more lines', '  │ step 3', '  │ step 4', '  │ step 5', '  │ step 6']);
+  });
+
+  it('shows only the counts an edit has: no −0 on a pure addition', () => {
+    const added = tool({ kind: 'edit', title: 'Write a.ts', content: [{ type: 'diff', path: '/home/dev/app/a.ts', oldText: null, newText: 'a\nb\n', truncated: false }] });
+    assert.equal(texts(formatTool(added, context))[0], '● Write a.ts  +2');
+    const removed = tool({ kind: 'edit', title: 'Edit a.ts', content: [{ type: 'diff', path: '/home/dev/app/a.ts', oldText: 'a\nb\n', newText: 'a\n', truncated: false }] });
+    assert.equal(texts(formatTool(removed, context))[0], '● Edit a.ts  −1');
+  });
+
+  it('drops a cd into the shell\'s own directory from a command', () => {
+    const exec = (title: string) => texts(formatTool(tool({ kind: 'execute', title }), context))[0];
+    assert.equal(exec('`cd "." && make build`'), '● $ make build');
+    assert.equal(exec('`cd . && ls`'), '● $ ls');
+    assert.equal(exec('`cd /home/dev/app && pnpm test`'), '● $ pnpm test');
+    assert.equal(exec('`cd /tmp && ls`'), '● $ cd /tmp && ls', 'a cd elsewhere matters');
   });
 });
 
@@ -148,7 +192,9 @@ describe('command titles', () => {
     const exec = (title: string): ToolCall => ({ id: 't', title, kind: 'execute', status: 'completed', locations: [], content: [] });
     assert.match(lineText(formatTool(exec('Run `pnpm test`'), context)[0]!), /^. \$ pnpm test$/);
     assert.match(lineText(formatTool(exec('Terminal'), context)[0]!), /^. Terminal$/);
-    assert.equal(shortToolTitle(exec('Run `pnpm test`'), context), 'pnpm test');
+    // The status line names a running command by its first word: the whole command is on its own row.
+    assert.equal(shortToolTitle(exec('Run `pnpm test`'), context), 'pnpm');
+    assert.equal(shortToolTitle(exec('Terminal'), context), 'a command');
   });
 });
 
@@ -166,7 +212,7 @@ describe('status and summary', () => {
 
     const waiting = {
       phase: 'Waiting for you',
-      elapsedMs: 0,
+      elapsedMs: 1000,
       hints: [
         { text: '←→ select', priority: 3 },
         { text: 'enter confirm', short: 'enter', priority: 1 },
@@ -184,6 +230,11 @@ describe('status and summary', () => {
     }
   });
 
+  it('keeps what esc does on a 40-column status line', () => {
+    const status = { phase: 'Writing', elapsedMs: 3200, hints: [{ text: 'esc background', short: 'esc bg', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }] };
+    assert.ok(lineText(formatStatus(status, { ...context, width: 40 })).trimEnd().endsWith('esc bg · ^c stop'));
+  });
+
   it('ellipsizes the last hint rather than cutting it', () => {
     assert.equal(fitHints([{ text: 'press enter to confirm', priority: 1 }], 12), 'press enter…');
     assert.equal(fitHints([{ text: 'press enter to confirm', priority: 1 }], 4), '');
@@ -191,20 +242,48 @@ describe('status and summary', () => {
 
   it('says how each turn ended', () => {
     const summary = (stopReason: Parameters<typeof formatSummary>[0]['stopReason'], error: string | null = null, tools = 0) =>
-      lineText(formatSummary({ stopReason, error, durationMs: 12_400 }, tools, context));
-    assert.equal(summary('end_turn', null, 3), '✓ 12s · 3 tools');
-    assert.equal(summary('end_turn', null, 1), '✓ 12s · 1 tool');
-    assert.equal(summary('end_turn'), '✓ 12s');
-    assert.equal(summary('cancelled'), '◼ Stopped · 12s');
-    assert.equal(summary('error', 'API connection lost'), '✗ API connection lost');
-    assert.equal(summary('error'), '✗ claude failed');
-    assert.equal(summary('refusal'), '✗ claude declined to continue');
-    assert.equal(summary('max_tokens'), '◼ Stopped: claude reached its output limit · 12s');
-    assert.equal(summary('interrupted'), '✗ Interrupted: claude stopped unexpectedly');
+      formatSummary({ stopReason, error, durationMs: 12_400 }, { toolCount: tools, produced: true, noticed: false }, context).map(lineText);
+    assert.deepEqual(summary('end_turn', null, 3), ['✓ 12s · 3 tools']);
+    assert.deepEqual(summary('end_turn', null, 1), ['✓ 12s · 1 tool']);
+    assert.deepEqual(summary('end_turn'), ['✓ 12s']);
+    assert.deepEqual(summary('cancelled'), ['◼ Stopped · 12s']);
+    assert.deepEqual(summary('max_tokens'), ['◼ Stopped: claude reached its output limit · 12s']);
+    assert.deepEqual(summary('refusal'), ['✗ claude declined to continue · 12s', '']);
+  });
+
+  it('ends a failed turn with its time, a next step and a blank row before the prompt', () => {
+    const lines = formatSummary({ stopReason: 'error', error: 'API connection lost', durationMs: 3_100 }, { toolCount: 0, produced: false, noticed: false }, context).map(lineText);
+    assert.deepEqual(lines, ['✗ API connection lost · 3s', '  Try again, or check `claude` on its own.', '']);
+    const interrupted = formatSummary({ stopReason: 'interrupted', error: null, durationMs: 500 }, { toolCount: 0, produced: true, noticed: false }, context).map(lineText);
+    assert.equal(interrupted[0], '✗ Interrupted: claude stopped unexpectedly · <1s');
+  });
+
+  it('wraps a long error instead of cutting off its end', () => {
+    const error = 'claude-agent-acp exited (code 1): not signed in; run `claude login` in a terminal, then try again';
+    const lines = formatSummary({ stopReason: 'error', error, durationMs: 1_000 }, { toolCount: 0, produced: false, noticed: false }, { ...context, width: 50 }).map(lineText);
+    assert.ok(lines.every((line) => line.length <= 50), lines.join('\n'));
+    assert.ok(!lines.some((line) => line.includes('…')), lines.join('\n'));
+    assert.match(lines.join(' ').replace(/\s+/g, ' '), /then try again · 1s/);
+  });
+
+  it('leaves no footer for a turn that showed nothing but a notice, and says so when it showed nothing at all', () => {
+    const outcome = { stopReason: 'end_turn' as const, error: null, durationMs: 200 };
+    assert.deepEqual(formatSummary(outcome, { toolCount: 0, produced: false, noticed: true }, context), []);
+    assert.deepEqual(formatSummary(outcome, { toolCount: 0, produced: false, noticed: false }, context).map(lineText), ['◼ No reply · <1s']);
+  });
+
+  it('wraps notices, with a bold label and a warning in the default colour', () => {
+    const text = 'fake ended the turn without a reply. If it keeps doing that, check that it is signed in.';
+    const lines = formatNotice('warning', text, 50);
+    assert.ok(lines.length > 1 && lines.every((line) => lineText(line).length <= 50));
+    assert.ok(!lines.some((line) => lineText(line).includes('…')));
+    assert.equal(lineText(lines[1]!).slice(0, 2), '  ', 'continuation rows line up under the text');
+    assert.deepEqual([lines[0]![0]!.tone, lines[0]![0]!.bold, lines[0]![1]!.tone], ['warning', true, undefined]);
   });
 
   it('formats durations and relative times', () => {
-    assert.equal(formatDuration(900), '0s');
+    assert.equal(formatDuration(900), '<1s');
+    assert.equal(formatDuration(1_000), '1s');
     assert.equal(formatDuration(65_000), '1m 05s');
     assert.equal(formatDuration(3_725_000), '1h 02m');
     const now = Date.UTC(2026, 10, 27, 12);

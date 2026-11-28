@@ -80,19 +80,19 @@ const lastExchange = (events: readonly ThreadEvent[]): Exchange | undefined => {
  * a blank line well past what fills `maxRows`, and the rest is counted by
  * its non-blank source lines.
  */
-const layoutAnswerStart = async (answer: string, width: number, maxRows: number): Promise<{ rows: PaintRow[]; totalRows: number }> => {
+const layoutAnswerStart = async (answer: string, width: number, maxRows: number, colorDepth: ColorDepth): Promise<{ rows: PaintRow[]; totalRows: number }> => {
   const lines = answer.split('\n');
   const budget = maxRows * 4;
   if (lines.length > budget) {
     const blank = lines.lastIndexOf('', budget);
     const end = blank > maxRows ? blank : budget;
-    const start = await layoutMarkdown(lines.slice(0, end).join('\n'), width, maxRows);
+    const start = await layoutMarkdown(lines.slice(0, end).join('\n'), width, maxRows, colorDepth);
     if (start.totalRows >= maxRows) {
       const rest = lines.slice(end).filter((line) => line.trim() !== '').length;
       return { rows: start.rows, totalRows: start.totalRows + rest };
     }
   }
-  return layoutMarkdown(answer, width, maxRows);
+  return layoutMarkdown(answer, width, maxRows, colorDepth);
 };
 
 /** `── “title” · claude · 2h ago ─────` across the width. */
@@ -139,7 +139,7 @@ export const renderHistory = async (events: readonly ThreadEvent[], options: His
   }
 
   if (exchange.answer.trim()) {
-    const answer = await layoutAnswerStart(exchange.answer, options.width, maxAnswerRows + 1);
+    const answer = await layoutAnswerStart(exchange.answer, options.width, maxAnswerRows + 1, options.colorDepth);
     // Cutting a row short of the limit beats a lone row after the note.
     const cut = answer.totalRows > maxAnswerRows + 1 ? maxAnswerRows : answer.totalRows;
     if (shownTools.length > 0) {
@@ -153,7 +153,8 @@ export const renderHistory = async (events: readonly ThreadEvent[], options: His
 
   if (exchange.ended) {
     rows.push([]);
-    rows.push(lineToPaintRow(formatSummary(exchange.ended, exchange.tools.length, context)));
+    const summary = formatSummary(exchange.ended, { toolCount: exchange.tools.length, produced: exchange.tools.length > 0 || exchange.answer.trim() !== '', noticed: false }, context);
+    rows.push(...summary.map(lineToPaintRow));
   }
   return rowsToText(rows, options.colorDepth);
 };

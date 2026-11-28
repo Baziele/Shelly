@@ -946,7 +946,7 @@ export class AgentView {
           ]
           : phase.type === 'stopping'
             ? []
-            : [{ text: 'esc background', short: 'esc', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
+            : [{ text: 'esc background', short: 'esc bg', priority: 2 }, { text: '^c stop', short: '^c', priority: 1 }],
       }, context));
     }
     return lines;
@@ -981,7 +981,7 @@ export const lineBlockLines = (block: LineBlock, context: FormatContext): Line[]
   const { content } = block;
   switch (content.type) {
     case 'notice':
-      return [formatNotice(content.level, content.text, context.width)];
+      return formatNotice(content.level, content.text, context.width);
     case 'mode':
       return [formatModeChange(content.name, context.width)];
     case 'permission':
@@ -989,6 +989,6 @@ export const lineBlockLines = (block: LineBlock, context: FormatContext): Line[]
     case 'plan':
       return formatPlan(content.entries, context.width);
     case 'summary':
-      return [formatSummary(content.ended, content.toolCount, context)];
+      return formatSummary(content.ended, { toolCount: content.toolCount, produced: content.produced, noticed: content.noticed }, context);
   }
 };
