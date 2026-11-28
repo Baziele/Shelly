@@ -203,13 +203,14 @@ recorded event sequences from `test/fixtures/thread-events/` through them.
 - Nothing slows the shell: no extra work before the prompt, none per keystroke
   or per byte of output beyond what the hooks need.
 - The client loads only what the shell needs until Shelly is used: about
-  60 MB RSS for a tab that never opens it, and never Effect. The daemon is started at the
-  first prompt (a socket probe, maybe a spawn). The UI (OpenTUI, about 60 ms
-  of module loading in a build) and the daemon connection load on first use:
-  from the first `:` or `_` typed at an empty prompt, which may begin a
-  trigger, or the rewrite hotkey. A `::` typed at a normal pace opens as fast
-  as if they were loaded; one typed instantly waits for the load the first
-  time. Without a daemon, Shelly is a plain shell and `::` says why.
+  60 MB RSS for a tab that never opens it, and never Effect. The daemon is
+  started at the first prompt (a socket probe, maybe a spawn). The UI
+  (OpenTUI) and the daemon connection load on first use, from the first `:`
+  or `_` typed at an empty prompt (which may begin a trigger) or the rewrite
+  hotkey. A `::` typed at a normal pace opens as fast as if they were
+  loaded; one typed instantly (a paste) waits about 90 ms for the load, the
+  first time only. Without a daemon, Shelly is a plain shell and `::` says
+  why.
 - Each client runs with a 4 MB young generation (`--max-semi-space-size=4`
   in the shebang): V8's default grows by 30–55 MB per tab while a turn
   streams. The daemon keeps V8's defaults.
