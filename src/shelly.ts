@@ -140,6 +140,27 @@ export const replayable = (text: string): string => {
 };
 
 /**
+ * The terminal's answers to the shell's queries (cursor position, device
+ * attributes, modes, colours, keyboard flags), as opposed to keys. While
+ * Shelly holds the user's keys, these still go to the shell at once: it is
+ * waiting for them (fish 4 does while its line is set), and held, then
+ * stripped as not text, they would never reach it.
+ */
+const TERMINAL_REPLY = /\u001b\[\??\d+(?:;\d+)*R|\u001b\[[?>=][\d;]*c|\u001b\[\??[\d;]*\$y|\u001b\[\?\d*u|\u001b\[\d+n|\u001b\[\d+(?:;\d+)*t|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001bP[^\u001b]*\u001b\\/g;
+
+export const splitTerminalReplies = (data: string): { readonly replies: string; readonly keys: string } => {
+  if (!data.includes('\u001b')) {
+    return { replies: '', keys: data };
+  }
+  let replies = '';
+  const keys = data.replace(TERMINAL_REPLY, (reply) => {
+    replies += reply;
+    return '';
+  });
+  return { replies, keys };
+};
+
+/**
  * Where keystrokes go.
  * - shell:   straight to the shell, watching for a trigger.
  * - capturing: the rewrite hotkey was pressed and Shelly is taking the
@@ -360,16 +381,18 @@ export class Shelly {
         break;
       case 'capturing':
       case 'opening':
-        this.queuedInput += data;
+        this.queuedInput += this.passReplies(data);
         break;
-      case 'returning':
+      case 'returning': {
         // Ctrl-C means now: it reaches the shell at once. Ctrl-D is dropped
         // (at an empty prompt it would close the shell); the rest waits.
-        if (data.includes(INTERRUPT)) {
+        const keys = this.passReplies(data);
+        if (keys.includes(INTERRUPT)) {
           this.shell.write(INTERRUPT);
         }
-        this.queuedInput += data.replaceAll(INTERRUPT, '').replaceAll(EOF_KEY, '');
+        this.queuedInput += keys.replaceAll(INTERRUPT, '').replaceAll(EOF_KEY, '');
         break;
+      }
       case 'busy':
         if (!this.busyKeys?.(data)) {
           this.queuedInput += data;
@@ -379,6 +402,15 @@ export class Shelly {
         this.overlay?.feed(data);
         break;
     }
+  }
+
+  /** The shell's answers from the terminal go to it now; returns the keys, which wait. */
+  private passReplies(data: string): string {
+    const { replies, keys } = splitTerminalReplies(data);
+    if (replies) {
+      this.shell.write(replies);
+    }
+    return keys;
   }
 
   /**
@@ -523,7 +555,7 @@ export class Shelly {
     if (this.mode === 'shell') {
       this.handleShellInput(held, replay);
     } else {
-      this.queuedInput += held;
+      this.queuedInput += this.passReplies(held);
     }
   }
 
