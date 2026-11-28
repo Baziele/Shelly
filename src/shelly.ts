@@ -169,13 +169,52 @@ type Mode = 'shell' | 'capturing' | 'opening' | 'overlay' | 'busy' | 'returning'
 /**
  * Whether the cursor is at the start of a line after `data` (given where it
  * was before): its last character that moves the cursor is a line feed or a
- * carriage return. Escape sequences (a shell's mode switches, say) do not count.
+ * carriage return. Escape sequences (a shell's mode switches, say) do not
+ * count, nor does one cut off at the end (see `cutOffEscape`). More than
+ * 4 KB after the last line break counts as text without a look.
  */
-const endsAtLineStart = (data: string, before: boolean): boolean => {
-  const text = data.replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[()][0-9A-Za-z]|[^[\]()])/g, '');
-  const last = text.at(-1);
-  return last === undefined ? before : last === '\n' || last === '\r';
+export const endsAtLineStart = (data: string, before: boolean): boolean => {
+  // Only what follows the last line break can decide it, so only that tail
+  // is examined: this runs on every chunk of shell output.
+  const lineBreak = Math.max(data.lastIndexOf('\n'), data.lastIndexOf('\r'));
+  const tail = data.slice(lineBreak + 1);
+  if (tail.length > 4096) {
+    return false; // That much after a line break is text, whatever else it holds.
+  }
+  const printable = tail
+    .replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[()][0-9A-Za-z]|[^[\]()])/g, '')
+    // A sequence cut off at the end of the chunk is not text either.
+    .replace(/\u001b(?:\[[0-?]*[ -/]*|\][^\u0007\u001b]*|[()])?$/, '');
+  return printable.length > 0 ? false : lineBreak >= 0 || before;
 };
+
+/** An escape sequence cut off at the end of `data`, to read with the next chunk; empty when there is none. */
+export const cutOffEscape = (data: string): string => {
+  const start = data.lastIndexOf('\u001b');
+  if (start === -1 || data.length - start > 256) {
+    return '';
+  }
+  const rest = data.slice(start);
+  return /^\u001b(?:\[[0-?]*[ -/]*|\][^\u0007\u001b]*|[()])?$/.test(rest) ? rest : '';
+};
+
+/** At most this many notes are kept; a burst keeps the newest. */
+export const MAX_NOTES = 3;
+
+/** Notes that pile up are kept together, each once, newest last. */
+export const joinNotes = (...lists: readonly (readonly string[])[]): string[] => {
+  const distinct: string[] = [];
+  for (const note of lists.flat()) {
+    const at = distinct.indexOf(note);
+    if (at !== -1) {
+      distinct.splice(at, 1);
+    }
+    distinct.push(note);
+  }
+  return distinct.slice(-MAX_NOTES);
+};
+
+const showNotes = (notes: readonly string[]): string => notes.join(' · ');
 
 /**
  * A transparent proxy between the terminal and the user's shell. Until a
@@ -198,11 +237,15 @@ export class Shelly {
   /** How much of `queuedInput` was typed before bash 3.2's notice was on screen: after it, keys are for the shell. */
   private typedBeforeNotice: number | undefined;
   /** A note for the user that found the shell busy (or a line being typed): printed above the next prompt. */
-  private pendingNotice: string | undefined;
+  private pendingNotes: string[] = [];
+  /** The notes drawn below the line right now, if `noticeBelow` is them: a later note joins them. */
+  private shownNotes: string[] = [];
   /** Keys handled so far, to tell whether the user typed while Shelly asked where the cursor is. */
   private inputCount = 0;
   /** The shell's output so far ended a line (the cursor is at the start of one). */
   private outputEndedLine = true;
+  /** An escape sequence the shell's last output chunk cut off, read with the next one. */
+  private outputCarry = '';
   /** Where keys go in `busy` mode; returns whether they were used. */
   private busyKeys: ((data: string) => boolean) | undefined;
   private readonly commands: CommandLog;
@@ -587,6 +630,7 @@ export class Shelly {
       // first; left, the shell's drawing would land around it.
       this.host.write(eraseBelowLine(this.noticeBelow));
       this.noticeBelow = undefined;
+      this.shownNotes = [];
     }
     if (!this.markers) {
       this.forwardShellOutput(data);
@@ -639,7 +683,6 @@ export class Shelly {
     }
     if (this.mode === 'shell' || this.mode === 'capturing' || this.mode === 'returning') {
       this.toTerminal(data);
-      this.outputEndedLine = endsAtLineStart(data, this.outputEndedLine);
     } else {
       this.heldShellOutput.push(data);
     }
@@ -670,7 +713,7 @@ export class Shelly {
       return;
     }
     if (this.mode !== 'shell' || !this.lineEditor?.isAtPrompt || !this.detector.isLineEmpty) {
-      this.pendingNotice = line;
+      this.pendingNotes = joinNotes(this.pendingNotes, this.shownNotes, [line]);
       return;
     }
     const typed = this.inputCount;
@@ -678,35 +721,37 @@ export class Shelly {
       (cursor) => {
         // Only on the line as it was asked about: a key since, and the cursor may be elsewhere.
         if (this.disposed || this.inputCount !== typed || this.mode !== 'shell' || !this.lineEditor?.isAtPrompt || !this.detector.isLineEmpty) {
-          this.pendingNotice = line;
+          this.pendingNotes = joinNotes(this.pendingNotes, [line]);
           return;
         }
+        const notes = joinNotes(this.pendingNotes, this.shownNotes, [line]);
         this.eraseNoticeBelow();
-        const drawn = drawBelowLine(line, cursor, this.host.size);
+        const drawn = drawBelowLine(showNotes(notes), cursor, this.host.size);
         this.host.write(drawn.output);
         this.noticeBelow = drawn.notice;
-        this.pendingNotice = undefined;
+        this.shownNotes = notes;
+        this.pendingNotes = [];
       },
       () => {
-        this.pendingNotice = line;
+        this.pendingNotes = joinNotes(this.pendingNotes, [line]);
       },
     );
   }
 
   /** The shell is about to draw a prompt: the note that waited for it goes just above. */
   private printPendingNotice(): void {
-    const line = this.pendingNotice;
-    if (line === undefined || this.mode !== 'shell') {
+    if (this.pendingNotes.length === 0 || this.mode !== 'shell') {
       return;
     }
-    this.pendingNotice = undefined;
+    const line = showNotes(this.pendingNotes);
+    this.pendingNotes = [];
     this.host.write(`${this.outputEndedLine ? '\r' : '\r\n'}\u001b[2m${line}\u001b[0m\r\n`);
     this.outputEndedLine = true;
   }
 
   private async openOverlay(trigger: string, remainder: string, rewrite?: OpenInput['rewrite']): Promise<void> {
     // The input shows where things stand (a turn that finished, say): the note is not needed.
-    this.pendingNotice = undefined;
+    this.pendingNotes = [];
     this.mode = 'opening';
     this.open = { trigger, mode: trigger === '__' ? 'fast' : 'agent', rewrite };
     this.queuedInput = remainder;
@@ -822,6 +867,7 @@ export class Shelly {
     if (this.noticeBelow) {
       this.host.write(eraseBelowLine(this.noticeBelow));
       this.noticeBelow = undefined;
+      this.shownNotes = [];
     }
   }
 
@@ -870,8 +916,11 @@ export class Shelly {
       await editor.jumpBack();
     }
     if (!this.disposed) {
-      // After the shell's move back, whose output would erase it.
+      // After the shell's move back, whose output would erase it. Any note
+      // shown below the line was erased by the Ctrl+] that led here, so
+      // there is nothing for a later note to join.
       this.noticeBelow = drawn.notice;
+      this.shownNotes = [];
     }
   }
 
@@ -1139,11 +1188,18 @@ export class Shelly {
     this.toTerminal(this.takeHeldShellOutput());
   }
 
-  /** The shell's output, on the terminal at last: any query in it now waits for an answer. */
+  /**
+   * The shell's output, on the terminal at last (whenever and however it gets
+   * there): any query in it now waits for an answer, and whether it ended a
+   * line is noted for the next note above the prompt.
+   */
   private toTerminal(output: string): void {
     if (output) {
       this.replies.asked(output);
       this.host.write(output);
+      const seen = this.outputCarry + output;
+      this.outputEndedLine = endsAtLineStart(seen, this.outputEndedLine);
+      this.outputCarry = cutOffEscape(seen);
     }
   }
 
@@ -1156,6 +1212,7 @@ export class Shelly {
   private handleResize(size: TerminalSize): void {
     // Reflowed: the notice is no longer where it was drawn.
     this.noticeBelow = undefined;
+    this.shownNotes = [];
     if (this.mode === 'busy' || this.mode === 'returning') {
       // The shell is idle at its prompt and needs no size now. Resized, it
       // would repaint that prompt (and fish 4 asks the terminal where the
