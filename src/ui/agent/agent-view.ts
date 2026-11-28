@@ -168,7 +168,7 @@ export class AgentView {
 
   constructor(
     private readonly host: AgentViewHost,
-    colorDepth: ColorDepth,
+    private readonly colorDepth: ColorDepth,
     private readonly options: AgentViewOptions,
   ) {
     this.now = options.now ?? Date.now;
@@ -654,7 +654,7 @@ export class AgentView {
     const renderer = this.headless.renderer;
     const base = { key: block.key, syncedFinal: false, syncedVersion: -1, syncedWidth: -1, syncedSpinner: '' };
     if (block.kind === 'message') {
-      const message = new MessageView(renderer, this.style);
+      const message = new MessageView(renderer, this.style, { codeMarks: this.colorDepth === 'none' });
       return { ...base, kind: 'message', root: message.root, message };
     }
     const root = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });

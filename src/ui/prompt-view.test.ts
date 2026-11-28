@@ -10,8 +10,8 @@ import type { PickerItem } from './list-picker.js';
 const PROMPT = '~/acme-web $ ';
 let overlay: InlineOverlay | undefined;
 
-const open = async (cols: number, trigger: string, input = '', options: OverlayOpenOptions = {}) => {
-  const term = new EmulatedTerminal(cols, 10);
+const open = async (cols: number, trigger: string, input = '', options: OverlayOpenOptions = {}, rows = 10) => {
+  const term = new EmulatedTerminal(cols, rows);
   term.write(PROMPT);
   const events: string[] = [];
   overlay = new InlineOverlay(term as unknown as HostTerminal, new CommandRegistry(BUILTIN_COMMANDS), 'ansi256', {
@@ -115,3 +115,36 @@ describe('PromptView', { timeout: 20_000 }, () => {
     assert.deepEqual(await view.screenIs(closedExpected), closedExpected);
   });
 });
+describe('PromptView messages and lists', { timeout: 20_000 }, () => {
+  afterEach(() => {
+    overlay?.destroy();
+    overlay = undefined;
+  });
+
+  it('wraps a fast-mode error at a narrow width instead of cutting off its end', async () => {
+    const view = await open(50, '__', 'compress this folder');
+    view.overlay.setBusy(true);
+    const message = 'Fast mode is unavailable: claude is not signed in. Run `claude login` in a terminal, then try again.';
+    view.overlay.setError(message);
+    const lines = await view.screen((rows) => rows.some((row) => row.includes('again.')));
+    const shown = lines.slice(1).join(' ').replace(/\s+/g, ' ');
+    assert.ok(shown.includes('Run `claude login` in a terminal, then try again.'), lines.join('\n'));
+    assert.ok(!lines.some((row) => row.includes('…')), lines.join('\n'));
+    assert.ok(lines.every((row) => row.length <= 50));
+  });
+
+  it('shows every slash command that fits, and says how many more there are when they do not', async () => {
+    const commands = new CommandRegistry(BUILTIN_COMMANDS).match('').length;
+    const tall = await open(80, '::', '/', {}, 24);
+    const all = await tall.screen((rows) => rows.length >= 1 + commands);
+    assert.equal(all.length, 1 + commands, all.join('\n'));
+    assert.ok(!all.some((row) => row.includes('more')));
+    overlay?.destroy();
+
+    const short = await open(80, '::', '/', {}, 7);
+    const some = await short.screen((rows) => rows.some((row) => row.includes('more')));
+    // 7 rows: the list gets 4, three commands and the note.
+    assert.match(some.at(-1)!, new RegExp(`… ${commands - 3} more$`), some.join('\n'));
+  });
+});
+

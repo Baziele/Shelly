@@ -88,7 +88,7 @@ interface SetupOptions {
   readonly query?: () => Promise<{ row: number; col: number }>;
 }
 
-const setup = async (cols: number, rows: number, options: SetupOptions = {}) => {
+const setup = async (cols: number, rows: number, options: SetupOptions & { depth?: 'ansi256' | 'none' } = {}) => {
   const term = new EmulatedTerminal(cols, rows, { reflow: options.reflow ?? true });
   useModernWidths(term.terminal);
   term.write('~/acme $ :: question\r\n');
@@ -96,7 +96,7 @@ const setup = async (cols: number, rows: number, options: SetupOptions = {}) => 
   const host = options.query
     ? { get size() { return term.size; }, write: term.write, queryCursorPosition: options.query }
     : term;
-  view = new AgentView(host, 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
+  view = new AgentView(host, options.depth ?? 'ansi256', { agentName: 'claude', cwd: '/home/dev/acme', home: '/home/dev', now: () => timers.now, timers });
   const actions: AgentAction[] = [];
   view.onAction((action) => actions.push(action));
   view.start(await term.cursor());
@@ -501,5 +501,23 @@ describe('narrow terminals', () => {
     await waitForScreen(term, (lines) => lines.some((line) => line.includes('⋮')));
     const note = (await term.screen()).find((line) => line.includes('⋮'))!;
     assert.ok(note.length <= 40 && note.endsWith('…'), JSON.stringify(note));
+  });
+});
+
+describe('without colour', () => {
+  it('keeps the backticks around inline code, which is otherwise indistinguishable from prose', async () => {
+    const { term, view } = await setup(80, 12, { depth: 'none' });
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'Run `make build` again.' }));
+    view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
+    await view.finish();
+    assert.ok((await term.allLines()).includes('Run `make build` again.'), (await term.allLines()).join('\n'));
+  });
+
+  it('drops them with colour, where code has its own', async () => {
+    const { term, view } = await setup(80, 12);
+    view.apply(event({ type: 'message.chunk', messageId: 'm', kind: 'text', text: 'Run `make build` again.' }));
+    view.apply(event({ type: 'turn.ended', stopReason: 'end_turn', error: null, durationMs: 1000 }));
+    await view.finish();
+    assert.ok((await term.allLines()).includes('Run make build again.'));
   });
 });

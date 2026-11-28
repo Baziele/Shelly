@@ -27,7 +27,7 @@ export interface MarkdownLayout {
  * output printed statically (history, fast-mode answers) rather than
  * streamed. `totalRows` says how tall the whole document is.
  */
-export const layoutMarkdown = async (markdown: string, width: number, requestedMaxRows = MAX_BUFFER_ROWS): Promise<MarkdownLayout> => {
+export const layoutMarkdown = async (markdown: string, width: number, requestedMaxRows = MAX_BUFFER_ROWS, colorDepth?: ColorDepth): Promise<MarkdownLayout> => {
   // OpenTUI caps a renderer's cells: at 100 columns, 10,000 rows.
   const maxRows = Math.min(requestedMaxRows, maxRendererRows(width));
   let bufferRows = Math.min(FIRST_BUFFER_ROWS, maxRows);
@@ -35,7 +35,7 @@ export const layoutMarkdown = async (markdown: string, width: number, requestedM
   try {
     // flexShrink 0: the box must report its full height, not the buffer's, or a tall answer is cut short.
     const root = new BoxRenderable(headless.renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
-    const message = new MessageView(headless.renderer, createMarkdownStyle(headless.renderer));
+    const message = new MessageView(headless.renderer, createMarkdownStyle(headless.renderer), { codeMarks: colorDepth === 'none' });
     root.add(message.root);
     headless.renderer.root.add(root);
     message.update(markdown, true);
@@ -65,8 +65,8 @@ export const layoutMarkdown = async (markdown: string, width: number, requestedM
  * the whole document fits; past `maxRows` it keeps what fits with a note of
  * how much was left out.
  */
-export const renderMarkdownRows = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS): Promise<PaintRow[]> => {
-  const { rows, totalRows } = await layoutMarkdown(markdown, width, maxRows);
+export const renderMarkdownRows = async (markdown: string, width: number, maxRows = MAX_BUFFER_ROWS, colorDepth?: ColorDepth): Promise<PaintRow[]> => {
+  const { rows, totalRows } = await layoutMarkdown(markdown, width, maxRows, colorDepth);
   if (totalRows <= rows.length) {
     return rows;
   }
@@ -96,4 +96,4 @@ export const rowsToText = (rows: readonly PaintRow[], colorDepth: ColorDepth): s
  * row, ready to print below the echoed request.
  */
 export const renderAnswer = async (markdown: string, width: number, colorDepth: ColorDepth): Promise<string> =>
-  rowsToText(await renderMarkdownRows(markdown, width), colorDepth);
+  rowsToText(await renderMarkdownRows(markdown, width, MAX_BUFFER_ROWS, colorDepth), colorDepth);

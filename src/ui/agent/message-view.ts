@@ -68,7 +68,11 @@ export class MessageView {
   private rawText = '';
   private readonly codeBlocks = new Map<number, CodeBlockView>();
 
-  constructor(private readonly renderer: CliRenderer, style: SyntaxStyle) {
+  /**
+   * `codeMarks`: keep the backticks around inline code. Without colour
+   * (NO_COLOR), they are the only way to tell code from prose.
+   */
+  constructor(private readonly renderer: CliRenderer, style: SyntaxStyle, { codeMarks = false }: { codeMarks?: boolean } = {}) {
     this.root = new BoxRenderable(renderer, { flexDirection: 'column', width: '100%', flexShrink: 0 });
     this.markdown = new MarkdownRenderable(renderer, {
       syntaxStyle: style,
@@ -79,6 +83,7 @@ export class MessageView {
       flexShrink: 0,
       tableOptions: { style: 'grid', widthMode: 'content', borderColor: theme.muted, wrapMode: 'word', cellPaddingX: 1 },
       renderBlock: (block) => (block.kind === 'code' ? this.renderCode(block) : undefined),
+      ...(codeMarks ? { inlineHook: (spans) => spans.map((span) => (span.code ? { ...span, text: `\`${span.text}\`` } : span)) } : {}),
     });
     this.root.add(this.markdown);
   }

@@ -125,7 +125,7 @@ export class ListPicker {
     if (!this.root.visible) {
       return 0;
     }
-    return this.matches.length === 0 ? (this.options.emptyText ? 1 : 0) : Math.min(this.matches.length, this.options.maxRows);
+    return this.matches.length === 0 ? (this.options.emptyText ? 1 : 0) : Math.min(this.matches.length, this.limit());
   }
 
   get selected(): PickerItem | undefined {
@@ -176,8 +176,26 @@ export class ListPicker {
     this.render();
   }
 
+  /** Rows the list may take on this screen (at most `maxRows`); see setRowLimit. */
+  private rowLimit: number | undefined;
+
+  /** How many rows the screen leaves for the list. More matches than fit end in a `… N more` row. */
+  setRowLimit(rows: number): void {
+    this.rowLimit = Math.max(2, Math.min(this.options.maxRows, rows));
+    this.render();
+  }
+
+  private limit(): number {
+    return this.rowLimit ?? this.options.maxRows;
+  }
+
+  /** Items shown, leaving the last row for the `… N more` note when not all fit. */
+  private itemRows(): number {
+    return this.matches.length > this.limit() ? this.limit() - 1 : this.limit();
+  }
+
   private visibleMatches(): PickerItem[] {
-    const rows = this.options.maxRows;
+    const rows = this.itemRows();
     if (this.selectedIndex < this.scrollTop) {
       this.scrollTop = this.selectedIndex;
     } else if (this.selectedIndex >= this.scrollTop + rows) {
@@ -187,7 +205,10 @@ export class ListPicker {
   }
 
   private rows(width: number): Line[] {
-    return formatPickerRows(this.visibleMatches(), this.selectedIndex - this.scrollTop, width, this.options.emptyText ?? '');
+    const visible = this.visibleMatches();
+    const rows = formatPickerRows(visible, this.selectedIndex - this.scrollTop, width, this.options.emptyText ?? '');
+    const hidden = this.matches.length - visible.length;
+    return hidden > 0 ? [...rows, [seg(`  … ${hidden} more`, 'muted')]] : rows;
   }
 
   private render(): void {

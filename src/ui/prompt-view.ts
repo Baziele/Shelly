@@ -12,14 +12,17 @@ import {
 import { parseSlashQuery, type CommandRegistry } from '../commands/slash-commands.js';
 import { displayWidth, truncateEnd, truncateStart } from '../render/text-width.js';
 import { SPINNER_INTERVAL_MS, spinnerFrame } from './agent/format.js';
-import { oneLine, seg } from './agent/lines.js';
+import { fitLine, oneLine, seg, wrapMessage } from './agent/lines.js';
 import { toStyledText } from './agent/styled.js';
 import { ListPicker, type PickerItem } from './list-picker.js';
 import { theme } from './theme.js';
 
-export const MAX_POPUP_ROWS = 6;
+/** The most rows the list under the input takes; fewer when the screen is short (setScreenRows). */
+export const MAX_POPUP_ROWS = 12;
+/** A fast-mode error wraps to at most this many rows. */
+const MAX_MESSAGE_ROWS = 4;
 /** Tallest the view can get: the input row, a rewriting row, a message row and a full popup. */
-export const MAX_VIEW_ROWS = 3 + MAX_POPUP_ROWS;
+export const MAX_VIEW_ROWS = 2 + MAX_MESSAGE_ROWS + MAX_POPUP_ROWS;
 
 /** The trigger that opens fast mode; anything else is agent mode. */
 export const FAST_TRIGGER = '__';
@@ -87,6 +90,7 @@ export class PromptView {
   private readonly hintText: TextRenderable;
   private readonly rewritingRow: TextRenderable;
   private readonly messageRow: TextRenderable;
+  private messageRows = 1;
   private readonly list: ListPicker;
   private active = false;
   private mode: PromptMode = 'agent';
@@ -145,7 +149,7 @@ export class PromptView {
 
   /** Rows the view currently occupies on screen. */
   get height(): number {
-    return 1 + (this.rewritingRow.visible ? 1 : 0) + (this.messageRow.visible ? 1 : 0) + this.list.height;
+    return 1 + (this.rewritingRow.visible ? 1 : 0) + (this.messageRow.visible ? this.messageRows : 0) + this.list.height;
   }
 
   get value(): string {
@@ -195,6 +199,12 @@ export class PromptView {
     this.picker = undefined;
     this.input.blur();
     this.root.visible = false;
+  }
+
+  /** The terminal's height: the list under the input shows as many rows as fit below it. */
+  setScreenRows(rows: number): void {
+    // The input row, the rewriting row and the row of a message under it come first.
+    this.list.setRowLimit(rows - 3);
   }
 
   /** Stop timers; call before the renderer is destroyed. */
@@ -471,9 +481,20 @@ export class PromptView {
     const indent = seg(' '.repeat(this.textOffset));
     const room = Math.max(4, width - this.textOffset);
     if (this.error !== undefined) {
+      // Errors wrap rather than lose their end (often what to do about them). Under a narrow input
+      // they start near the left edge, to keep enough room.
+      const left = room >= 30 ? this.textOffset : 2;
+      let rows = wrapMessage([seg(' '.repeat(left)), seg('✗ ', 'error', { bold: true })], this.error, { tone: 'error' }, width);
+      if (rows.length > MAX_MESSAGE_ROWS) {
+        rows = [...rows.slice(0, MAX_MESSAGE_ROWS - 1), fitLine([...rows[MAX_MESSAGE_ROWS - 1]!, seg(' …', 'error')], width)];
+      }
+      this.messageRows = rows.length;
+      this.messageRow.height = rows.length;
       this.messageRow.visible = true;
-      this.messageRow.content = toStyledText([[indent, seg('✗ ', 'error'), seg(truncateEnd(this.error, room - 2), 'error')]]);
+      this.messageRow.content = toStyledText(rows);
     } else if (this.busy && this.preview && this.previewOnOwnRow()) {
+      this.messageRows = 1;
+      this.messageRow.height = 1;
       this.messageRow.visible = true;
       this.messageRow.content = toStyledText([[indent, seg(truncateStart(oneLine(this.preview), room), 'muted')]]);
     } else {
