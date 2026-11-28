@@ -97,6 +97,11 @@ export class HostTerminal {
         }
       }
     }
+    // Keys typed behind a possible Shift+F3 still go on (the held report itself, likely a late reply, does not).
+    const heldKeys = this.pendingCursorQuery?.held?.after;
+    if (heldKeys) {
+      this.deliver(heldKeys);
+    }
     // Nothing is delivered or settled after this: the query in flight fails, and every timer goes.
     this.inputListener = undefined;
     const query = this.pendingCursorQuery;
@@ -204,12 +209,7 @@ export class HostTerminal {
       this.settleQuery(report.position);
       text = this.dropLateReplies(report.after);
     }
-    const held = this.pendingCursorQuery?.held;
-    if (held) {
-      held.after += text;
-      return;
-    }
-    this.passOn(text);
+    this.deliverOrHold(text);
   };
 
   /** Resolve the pending query with `position`. */
@@ -227,7 +227,7 @@ export class HostTerminal {
     query.resolve(position);
     // Input that waited behind a held report that turned out to be the answer.
     if (after) {
-      this.passOn(after);
+      this.deliverOrHold(after);
     }
   }
 
@@ -274,31 +274,34 @@ export class HostTerminal {
   }
 
   /**
-   * Pass input on to the listener, without the replies still owed. While
-   * a reply is owed or awaited, input that ends in what may be the start of
-   * one is held back briefly, so a reply split across two reads is
-   * recognised whole instead of reaching the shell in pieces.
+   * Where input goes once the replies in it are taken out. One path for all
+   * of it, so keys keep their order:
+   * - the start of a reply cut off at the end of a read (while a reply is
+   *   owed or awaited) waits briefly for the rest, then goes on as input if
+   *   nothing follows;
+   * - while a report that may be Shift+F3 is held, everything else waits
+   *   behind it (see settleQuery, stop);
+   * - otherwise it goes on at once.
    */
-  private passOn(input: string): void {
+  private deliverOrHold(input: string, mayBeCut = true): void {
     let text = input;
-    if (this.partialReport) {
-      clearTimeout(this.partialReport.timer);
-      text = this.partialReport.text + text;
-      this.partialReport = undefined;
-    }
-    text = this.dropLateReplies(text);
-    const partial = this.lateRepliesOwed() || this.pendingCursorQuery ? PARTIAL_REPORT.exec(text) : null;
+    const partial = mayBeCut && (this.lateRepliesOwed() || this.pendingCursorQuery) ? PARTIAL_REPORT.exec(text) : null;
     if (partial) {
-      const held = text.slice(partial.index);
+      const start = text.slice(partial.index);
       text = text.slice(0, partial.index);
       this.partialReport = {
-        text: held,
+        text: start,
         timer: setTimeout(() => {
           // Nothing followed: it was input after all.
           this.partialReport = undefined;
-          this.deliver(this.dropLateReplies(held));
+          this.deliverOrHold(this.dropLateReplies(start), false);
         }, PARTIAL_REPORT_WAIT_MS),
       };
+    }
+    const held = this.pendingCursorQuery?.held;
+    if (held) {
+      held.after += text;
+      return;
     }
     this.deliver(text);
   }
