@@ -33,10 +33,27 @@ const HINT_GAP = 3;
 const MIN_HINT_TITLE_CELLS = 6;
 
 /**
+ * `hint` in `cells`: its quoted thread title (`“…”`) cut short, else its
+ * last ` · ` parts left off (`✓ Claude Code finished · enter to see` keeps
+ * `✓ Claude Code finished`); undefined when not even its first part fits.
+ */
+export const shortenHint = (hint: string, cells: number): string | undefined => {
+  const parts = hint.split(' · ');
+  for (let count = parts.length; count >= 1; count--) {
+    const candidate = parts.slice(0, count).join(' · ');
+    const fitted = displayWidth(candidate) <= cells ? candidate : shortenTitle(candidate, cells);
+    if (fitted !== undefined) {
+      return fitted;
+    }
+  }
+  return undefined;
+};
+
+/**
  * `hint` in `cells`, its quoted thread title (`“…”`) cut short to fit;
  * undefined when even a short title would not fit, or there is none.
  */
-export const shortenTitle = (hint: string, cells: number): string | undefined => {
+const shortenTitle = (hint: string, cells: number): string | undefined => {
   const match = /“([^”]*)”/.exec(hint);
   if (!match) {
     return undefined;
@@ -560,7 +577,7 @@ export class PromptView {
         if (withPlaceholder !== beside && typed > 0) {
           continue;
         }
-        shown = shorten ? shortenTitle(hint, roomFor(withPlaceholder)) : displayWidth(hint) <= roomFor(withPlaceholder) ? hint : undefined;
+        shown = shorten ? shortenHint(hint, roomFor(withPlaceholder)) : displayWidth(hint) <= roomFor(withPlaceholder) ? hint : undefined;
         if (shown !== undefined) {
           if (typed === 0) {
             placeholder = withPlaceholder;

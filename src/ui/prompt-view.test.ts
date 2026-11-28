@@ -72,6 +72,12 @@ describe('PromptView', { timeout: 20_000 }, () => {
     assert.match(typed!, /:: why\s+Fake Agent · “A rather long thread…”$/);
   });
 
+  it('leaves off the end of a status hint that does not fit, rather than drop it', async () => {
+    const view = await open(60, '::', '', { hint: '✓ Fake Agent finished · enter to see' });
+    const [row] = await view.screen((lines) => lines[0]?.includes('Fake Agent') ?? false);
+    assert.match(row!, /:: Ask anything\s+✓ Fake Agent finished$/);
+  });
+
   it('shows an error about a command without the command list over it, and the list again once typing goes on', async () => {
     const view = await open(80, '::', '/rename');
     await view.screen((lines) => lines.some((line) => line.includes('Rename this thread')));
