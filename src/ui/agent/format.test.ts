@@ -128,6 +128,14 @@ describe('tool output that matters', () => {
     ]);
   });
 
+  it('wraps an error line too long for the screen inside the gutter instead of cutting it', () => {
+    const output = ['cc -o app src/main.c', 'src/main.c:12:5: error: use of undeclared identifier conifg; did you mean config?', 'make: *** [build] Error 1'].join('\n');
+    const lines = texts(formatTool(tool({ kind: 'execute', status: 'failed', title: '`make build`', content: [{ type: 'text', text: output, truncated: false }] }), { ...context, width: 40 }));
+    assert.ok(lines.every((line) => displayWidth(line) <= 40), lines.join('\n'));
+    assert.ok(!lines.some((line) => line.includes('…') && !line.includes('more line')), lines.join('\n'));
+    assert.match(lines.filter((line) => line.startsWith('  │ ')).map((line) => line.slice(4)).join(' '), /error: use of undeclared identifier conifg; did you mean config\?/);
+  });
+
   it('keeps the tail of a failed command with no error lines', () => {
     const output = Array.from({ length: 6 }, (_, index) => `step ${index + 1}`).join('\n');
     const lines = texts(formatTool(tool({ kind: 'execute', status: 'failed', title: 'x', content: [{ type: 'text', text: output, truncated: false }] }), context));

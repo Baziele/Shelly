@@ -8,7 +8,7 @@ import type {
 } from '../../protocol/schema.js';
 import { displayWidth, truncateEnd, truncateStart } from '../../render/text-width.js';
 import { diffExcerpt, diffOf, diffStats, type DiffLine } from './diff.js';
-import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, wrapMessage, type Line, type Segment } from './lines.js';
+import { alignRight, fitLine, lineWidth, oneLine, sanitizeText, seg, wrapMessage, wrapText, type Line, type Segment } from './lines.js';
 
 /** Braille spinner, one frame per 80 ms. */
 export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
@@ -195,6 +195,8 @@ const oneLineCode = (text: string): string => sanitizeText(text).replace(/\n/g, 
 
 /** Lines of a failed command's output worth showing: those that read like errors, and the last. */
 const FAILURE_PATTERN = /error|failed|fatal|exception/i;
+/** Rows an error line of a failed tool's output may wrap to before it is cut. */
+const MAX_ERROR_ROWS = 3;
 
 const outputTail = (text: string, width: number, failed: boolean): Line[] => {
   const lines = nonEmptyLines(text);
@@ -215,8 +217,19 @@ const outputTail = (text: string, width: number, failed: boolean): Line[] => {
       // What was left out, marked where it was, inside the gutter.
       result.push([gutter, seg(`… ${plural(at - next, 'more line')}`, 'muted')]);
     }
-    const tone = failed && ERROR_PATTERN.test(line) ? 'error' : 'muted';
-    result.push(fitLine([gutter, seg(line, tone)], width));
+    const isError = failed && ERROR_PATTERN.test(line);
+    if (isError) {
+      // The line that says what went wrong wraps inside the gutter (to a few rows) rather than lose its end.
+      const room = Math.max(8, width - lineWidth([gutter]));
+      const rows = wrapText(line, room);
+      const kept = rows.slice(0, MAX_ERROR_ROWS);
+      kept.forEach((row, index) => {
+        const last = index === kept.length - 1 && rows.length > kept.length;
+        result.push(fitLine([gutter, seg(last ? truncateEnd(`${row} ${rows.slice(kept.length).join(' ')}`, room) : row, 'error')], width));
+      });
+    } else {
+      result.push(fitLine([gutter, seg(line, 'muted')], width));
+    }
     next = at + 1;
   }
   return result;
